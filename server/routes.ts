@@ -5,6 +5,7 @@ import {
   insertJobSchema, insertQuoteSchema, insertReviewSchema, insertTradesmanSchema,
 } from "@shared/schema";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
+import { sendCardIssuedEmail, sendCardRescindedEmail } from "./mailer";
 import type { Tradesman, TradesmanCard } from "@shared/schema";
 import { z } from "zod";
 
@@ -430,7 +431,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
 
     const updatedCards = await storage.getCardsByTradesman(id);
-    res.status(201).json({ card: created, summary: summarizeCards(updatedCards) });
+    const summary = summarizeCards(updatedCards);
+
+    // Send notification email (fire-and-forget — never blocks the response).
+    if (tradesman.email) {
+      sendCardIssuedEmail({
+        to: tradesman.email,
+        businessName: tradesman.businessName,
+        ownerName: tradesman.ownerName || tradesman.businessName,
+        card: created,
+        suspendedUntil: summary.suspendedUntil,
+      }).catch((err) => console.error("[mailer] card-issued send failed:", err?.message));
+    }
+
+    res.status(201).json({ card: created, summary });
   });
 
   // Admin: rescind a card
@@ -455,6 +469,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       reason,
       adminId,
     });
+
+    // Notify the tradesman that the card has been rescinded.
+    const tm = await storage.getTradesmanById(card.tradesmanId);
+    if (tm?.email && updated) {
+      sendCardRescindedEmail({
+        to: tm.email,
+        businessName: tm.businessName,
+        ownerName: tm.ownerName || tm.businessName,
+        card: updated,
+      }).catch((err) => console.error("[mailer] card-rescinded send failed:", err?.message));
+    }
+
     res.json(updated);
   });
 
