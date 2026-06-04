@@ -172,3 +172,45 @@ export const tradesmanCredits = pgTable("tradesman_credits", {
 export const insertTradesmanCreditsSchema = createInsertSchema(tradesmanCredits).omit({ id: true });
 export type InsertTradesmanCredits = z.infer<typeof insertTradesmanCreditsSchema>;
 export type TradesmanCredits = typeof tradesmanCredits.$inferSelect;
+
+/* ──────────────────────────────────────────────
+   TRADESMAN CARDS (Warning / Yellow / Red)
+   Football-style 3-strike moderation. Gross-misconduct = instant Red.
+   ────────────────────────────────────────────── */
+export const tradesmanCards = pgTable("tradesman_cards", {
+  id: serial("id").primaryKey(),
+  tradesmanId: integer("tradesman_id").notNull(),
+  cardType: text("card_type").notNull(), // 'warning' | 'yellow' | 'red'
+  reason: text("reason").notNull(),
+  grossMisconduct: boolean("gross_misconduct").notNull().default(false),
+  issuedAt: bigint("issued_at", { mode: "number" }).notNull(),
+  expiresAt: bigint("expires_at", { mode: "number" }), // null = permanent
+  rescindedAt: bigint("rescinded_at", { mode: "number" }),
+  rescindedBy: text("rescinded_by"),
+  rescindedReason: text("rescinded_reason"),
+  issuedBy: text("issued_by").notNull().default("admin"),
+});
+export const insertTradesmanCardSchema = createInsertSchema(tradesmanCards).omit({
+  id: true,
+  issuedAt: true,
+  rescindedAt: true,
+  rescindedBy: true,
+  rescindedReason: true,
+});
+export type InsertTradesmanCard = z.infer<typeof insertTradesmanCardSchema>;
+export type TradesmanCard = typeof tradesmanCards.$inferSelect;
+
+/* ──────────────────────────────────────────────
+   MODERATION LOG — full audit trail of card actions
+   ────────────────────────────────────────────── */
+export const moderationLog = pgTable("moderation_log", {
+  id: serial("id").primaryKey(),
+  tradesmanId: integer("tradesman_id").notNull(),
+  cardId: integer("card_id"),
+  action: text("action").notNull(), // 'issue' | 'rescind'
+  cardType: text("card_type"),
+  reason: text("reason").notNull(),
+  adminId: text("admin_id").notNull().default("admin"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+});
+export type ModerationLogEntry = typeof moderationLog.$inferSelect;

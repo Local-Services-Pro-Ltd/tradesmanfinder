@@ -17,6 +17,7 @@ import ForTradesmen from "@/pages/for-tradesmen";
 import Join from "@/pages/join";
 import Dashboard from "@/pages/dashboard";
 import Admin from "@/pages/admin";
+import AdminModeration from "@/pages/admin-moderation";
 import { About, Contact, Terms, Privacy, Faq } from "@/pages/static-pages";
 
 function AppRouter() {
@@ -33,6 +34,7 @@ function AppRouter() {
       <Route path="/join" component={Join} />
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/admin" component={Admin} />
+      <Route path="/admin/moderation" component={AdminModeration} />
       <Route path="/about" component={About} />
       <Route path="/contact" component={Contact} />
       <Route path="/terms" component={Terms} />

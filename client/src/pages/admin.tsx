@@ -10,13 +10,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { Tradesman, Job } from "@/lib/api-types";
-import { ShieldAlert, Users, BadgeCheck, Clock, Briefcase, PoundSterling, Star } from "lucide-react";
+import { ShieldAlert, Users, BadgeCheck, Clock, Briefcase, PoundSterling, Star, Gavel } from "lucide-react";
+import { Link } from "wouter";
+import { IssueCardDialog } from "@/components/issue-card-dialog";
+import { CardBadge } from "@/components/card-badge";
 
 interface Overview {
   tradesmen: Tradesman[];
   jobs: Job[];
   pending: Tradesman[];
-  stats: { totalTradesmen: number; verified: number; pending: number; totalJobs: number; openJobs: number; totalLeads: number; leadRevenue: number };
+  stats: { totalTradesmen: number; verified: number; pending: number; totalJobs: number; openJobs: number; totalLeads: number; leadRevenue: number; carded: number; banned: number };
 }
 
 function getInitialKey(): string {
@@ -86,6 +89,8 @@ export default function Admin() {
     { label: "Total jobs", value: s.totalJobs, icon: Briefcase },
     { label: "Leads sent", value: s.totalLeads, icon: Star },
     { label: "Lead revenue", value: `£${s.leadRevenue}`, icon: PoundSterling },
+    { label: "Active cards", value: s.carded ?? 0, icon: Gavel },
+    { label: "Banned (Red)", value: s.banned ?? 0, icon: ShieldAlert },
   ];
 
   return (
@@ -98,7 +103,7 @@ export default function Admin() {
       </div>
 
       <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
-        <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="grid gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-8">
           {cards.map((c) => (
             <Card key={c.label} className="p-4" data-testid={`stat-${c.label.toLowerCase().replace(/\s/g, "-")}`}>
               <div className="flex items-center justify-between"><span className="text-xs text-muted-foreground">{c.label}</span><c.icon className="h-4 w-4 text-primary" /></div>
@@ -125,6 +130,13 @@ export default function Admin() {
           </Card>
         )}
 
+        {/* Moderation shortcut */}
+        <div className="mt-6">
+          <Link href="/admin/moderation">
+            <Button variant="outline" data-testid="button-moderation-page"><Gavel className="mr-2 h-4 w-4" /> Moderation &amp; cards</Button>
+          </Link>
+        </div>
+
         {/* All tradesmen */}
         <Card className="mt-8 overflow-hidden">
           <div className="border-b border-border p-6 pb-4"><h2 className="font-display text-lg font-semibold text-foreground">All tradesmen</h2></div>
@@ -146,18 +158,20 @@ export default function Admin() {
                       <p className="text-xs text-muted-foreground">{t.ownerName}</p>
                     </TableCell>
                     <TableCell>
-                      <div className="flex flex-wrap gap-1">
+                      <div className="flex flex-wrap items-center gap-1">
                         {t.verified ? <Badge className="bg-trust text-white hover:bg-trust">Verified</Badge> : <Badge variant="outline">Pending</Badge>}
-                        {t.featured && <Badge className="bg-primary text-primary-foreground hover:bg-primary">Featured</Badge>}
+                        {t.featured && !t.cardSummary?.isFeaturedRevoked && <Badge className="bg-primary text-primary-foreground hover:bg-primary">Featured</Badge>}
+                        <CardBadge summary={t.cardSummary} size="sm" />
                       </div>
                     </TableCell>
                     <TableCell className="text-foreground">{t.ratingAverage.toFixed(1)} ({t.ratingCount})</TableCell>
                     <TableCell className="text-right">
-                      <div className="flex justify-end gap-2">
+                      <div className="flex flex-wrap justify-end gap-2">
                         {!t.verified && <Button size="sm" variant="outline" onClick={() => act(t.id, "verify")} data-testid={`button-verify-row-${t.id}`}>Verify</Button>}
                         <Button size="sm" variant={t.featured ? "secondary" : "outline"} onClick={() => act(t.id, "feature")} data-testid={`button-feature-${t.id}`}>
                           {t.featured ? "Unfeature" : "Feature"}
                         </Button>
+                        <IssueCardDialog tradesman={{ id: t.id, businessName: t.businessName }} adminKey={authKey} />
                       </div>
                     </TableCell>
                   </TableRow>

@@ -7,6 +7,8 @@ import {
   reviews,
   creditTransactions,
   tradesmanCredits,
+  tradesmanCards,
+  moderationLog,
 } from "@shared/schema";
 import type {
   Category, InsertCategory,
@@ -17,10 +19,12 @@ import type {
   Review, InsertReview,
   CreditTransaction, InsertCreditTransaction,
   TradesmanCredits,
+  TradesmanCard, InsertTradesmanCard,
+  ModerationLogEntry,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import { eq, desc, sql } from "drizzle-orm";
+import { eq, desc, sql, and, isNull } from "drizzle-orm";
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -181,6 +185,40 @@ export class DatabaseStorage implements IStorage {
     const map = { tradesmen, jobs, reviews } as const;
     const result = await db.select({ count: sql<number>`count(*)::int` }).from(map[table]);
     return result[0]?.count ?? 0;
+  }
+
+  // ── cards ──
+  async getCardsByTradesman(tradesmanId: number): Promise<TradesmanCard[]> {
+    return db.select().from(tradesmanCards).where(eq(tradesmanCards.tradesmanId, tradesmanId)).orderBy(desc(tradesmanCards.issuedAt));
+  }
+  async getAllCards(): Promise<TradesmanCard[]> {
+    return db.select().from(tradesmanCards).orderBy(desc(tradesmanCards.issuedAt));
+  }
+  async getCardById(id: number): Promise<TradesmanCard | undefined> {
+    return one(db.select().from(tradesmanCards).where(eq(tradesmanCards.id, id)));
+  }
+  async createCard(c: InsertTradesmanCard, issuedAt: number, expiresAt: number | null): Promise<TradesmanCard> {
+    const [row] = await db.insert(tradesmanCards).values({ ...c, issuedAt, expiresAt }).returning();
+    return row;
+  }
+  async rescindCard(id: number, rescindedBy: string, rescindedReason: string, rescindedAt: number): Promise<TradesmanCard | undefined> {
+    const [row] = await db.update(tradesmanCards)
+      .set({ rescindedAt, rescindedBy, rescindedReason })
+      .where(eq(tradesmanCards.id, id))
+      .returning();
+    return row;
+  }
+
+  // ── moderation log ──
+  async logModeration(entry: Omit<ModerationLogEntry, "id" | "createdAt"> & { createdAt?: number }): Promise<ModerationLogEntry> {
+    const [row] = await db.insert(moderationLog).values({ ...entry, createdAt: entry.createdAt ?? now() }).returning();
+    return row;
+  }
+  async getModerationLog(limit = 100): Promise<ModerationLogEntry[]> {
+    return db.select().from(moderationLog).orderBy(desc(moderationLog.createdAt)).limit(limit);
+  }
+  async getModerationLogByTradesman(tradesmanId: number): Promise<ModerationLogEntry[]> {
+    return db.select().from(moderationLog).where(eq(moderationLog.tradesmanId, tradesmanId)).orderBy(desc(moderationLog.createdAt));
   }
 }
 

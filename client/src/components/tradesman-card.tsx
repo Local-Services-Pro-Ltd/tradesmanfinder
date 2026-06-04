@@ -3,6 +3,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { StarRating, VerificationChips, ResponseTimePill, CategoryIcon } from "./brand";
+import { CardBadge } from "./card-badge";
 import type { Tradesman, Category, Area } from "@/lib/api-types";
 import { parseJsonArray } from "@/lib/api-types";
 import { MapPin } from "lucide-react";
@@ -23,10 +24,15 @@ export function TradesmanCard({
           loading="lazy"
           className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
         />
-        {tradesman.featured && (
+        {tradesman.featured && !tradesman.cardSummary?.isFeaturedRevoked && (
           <Badge className="absolute left-3 top-3 bg-navy text-white hover:bg-navy" data-testid={`badge-featured-${tradesman.id}`}>
             Featured
           </Badge>
+        )}
+        {tradesman.cardSummary?.publicBadge && (
+          <div className="absolute right-3 top-3">
+            <CardBadge summary={tradesman.cardSummary} size="sm" />
+          </div>
         )}
         {primaryCat && (
           <span className="absolute bottom-3 left-3 inline-flex items-center gap-1.5 rounded-full bg-background/95 px-2.5 py-1 text-xs font-medium shadow-sm">

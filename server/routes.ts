@@ -4,7 +4,24 @@ import { storage } from "./storage";
 import {
   insertJobSchema, insertQuoteSchema, insertReviewSchema, insertTradesmanSchema,
 } from "@shared/schema";
+import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
+import type { Tradesman, TradesmanCard } from "@shared/schema";
 import { z } from "zod";
+
+// Attach a `cardSummary` field to each tradesman so the UI can render badges
+// and the API consumers can know who's suspended/banned.
+async function attachCardSummary<T extends Tradesman>(t: T): Promise<T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[] }> {
+  const cards = await storage.getCardsByTradesman(t.id);
+  return { ...t, cards, cardSummary: summarizeCards(cards) };
+}
+async function attachCardSummaryMany<T extends Tradesman>(list: T[]): Promise<(T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[] })[]> {
+  // Single batch fetch to avoid N+1
+  const all = await storage.getAllCards();
+  return list.map((t) => {
+    const cards = all.filter((c) => c.tradesmanId === t.id);
+    return { ...t, cards, cardSummary: summarizeCards(cards) };
+  });
+}
 
 const ADMIN_KEY = process.env.ADMIN_KEY || "tradesman-admin-2024";
 
@@ -42,33 +59,50 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // ── Tradesmen ──
   // Optional filters: ?category=<id>&area=<id>
+  // Red-carded (banned) tradesmen are hidden from public listings.
+  // Pass ?includeBanned=1 (admin only) to override.
   app.get("/api/tradesmen", async (req, res) => {
     let list = await storage.getTradesmen();
     const category = req.query.category ? Number(req.query.category) : undefined;
     const area = req.query.area ? Number(req.query.area) : undefined;
+    const includeBanned = req.query.includeBanned === "1" && (req.query.key === ADMIN_KEY || req.headers["x-admin-key"] === ADMIN_KEY);
     if (category !== undefined) {
       list = list.filter((t) => (JSON.parse(t.categories as string) as number[]).includes(category));
     }
     if (area !== undefined) {
       list = list.filter((t) => t.areaId === area);
     }
-    res.json(list);
+    const enriched = await attachCardSummaryMany(list);
+    const visible = includeBanned ? enriched : enriched.filter((t) => !t.cardSummary.isPubliclyHidden);
+    res.json(visible);
   });
   app.get("/api/tradesmen/by-slug/:slug", async (req, res) => {
     const t = await storage.getTradesmanBySlug(req.params.slug);
     if (!t) return res.status(404).json({ message: "Tradesman not found" });
-    res.json(t);
+    const enriched = await attachCardSummary(t);
+    if (enriched.cardSummary.isPubliclyHidden) return res.status(404).json({ message: "Tradesman not found" });
+    res.json(enriched);
   });
   app.get("/api/tradesmen/:id", async (req, res) => {
-    const t = await storage.getTradesmanById(Number(req.params.id));
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid tradesman id" });
+    const t = await storage.getTradesmanById(id);
     if (!t) return res.status(404).json({ message: "Tradesman not found" });
-    res.json(t);
+    const enriched = await attachCardSummary(t);
+    const isAdmin = req.query.key === ADMIN_KEY || req.headers["x-admin-key"] === ADMIN_KEY;
+    if (enriched.cardSummary.isPubliclyHidden && !isAdmin) return res.status(404).json({ message: "Tradesman not found" });
+    res.json(enriched);
   });
   // Pseudo-login by email — MVP shortcut, no real auth
+  // Blocks login for red-carded tradesmen.
   app.get("/api/tradesmen/login/:email", async (req, res) => {
     const t = await storage.getTradesmanByEmail(req.params.email);
     if (!t) return res.status(404).json({ message: "No tradesman found with that email" });
-    res.json(t);
+    const enriched = await attachCardSummary(t);
+    if (enriched.cardSummary.isLoginBlocked) {
+      return res.status(403).json({ message: "This account has been permanently banned and can no longer access the dashboard.", banned: true });
+    }
+    res.json(enriched);
   });
 
   app.post("/api/tradesmen", async (req, res) => {
@@ -119,6 +153,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // Post a job → auto-match top 3 tradesmen in category (+ area if available), create quote placeholders
+  // Red-carded (banned) and currently-suspended-yellow tradesmen are excluded from matching.
+  // Featured-status sort is suppressed for tradesmen with active yellows (Featured is revoked).
   app.post("/api/jobs", async (req, res) => {
     try {
       const parsed = insertJobSchema.parse({
@@ -127,14 +163,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
       const job = await storage.createJob(parsed);
 
-      const all = await storage.getTradesmen();
-      let candidates = all.filter((t) =>
-        (JSON.parse(t.categories as string) as number[]).includes(job.categoryId)
-      );
+      const allRaw = await storage.getTradesmen();
+      const all = await attachCardSummaryMany(allRaw);
+      let candidates = all
+        .filter((t) => (JSON.parse(t.categories as string) as number[]).includes(job.categoryId))
+        .filter((t) => !t.cardSummary.isPubliclyHidden)                            // never match banned
+        .filter((t) => !(t.cardSummary.suspendedUntil && t.cardSummary.suspendedUntil > Date.now())); // skip during yellow suspension
       // prefer same area, then fall back to all in category
       const inArea = candidates.filter((t) => t.areaId === job.areaId);
+      const effectiveFeatured = (t: typeof all[number]) => t.cardSummary.isFeaturedRevoked ? 0 : Number(t.featured);
       const ranked = (inArea.length >= 3 ? inArea : candidates)
-        .sort((a, b) => Number(b.featured) - Number(a.featured) || b.ratingAverage - a.ratingAverage)
+        .sort((a, b) => effectiveFeatured(b) - effectiveFeatured(a) || b.ratingAverage - a.ratingAverage)
         .slice(0, 3);
 
       const matched: number[] = [];
@@ -183,7 +222,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const credits = await storage.getCredits(id);
     const transactions = await storage.getCreditTransactions(id);
     const myReviews = await storage.getReviewsByTradesman(id);
-    res.json({ tradesman, leads, credits: credits?.balance ?? 0, transactions, reviews: myReviews });
+    const myCards = await storage.getCardsByTradesman(id);
+    const cardSummary = summarizeCards(myCards);
+    const cardsWithActive = myCards.map((c) => ({ ...c, active: isCardActive(c) }));
+    res.json({
+      tradesman,
+      leads,
+      credits: credits?.balance ?? 0,
+      transactions,
+      reviews: myReviews,
+      cards: cardsWithActive,
+      cardSummary,
+    });
   });
 
   // ── Credits (fake Stripe — adds credits directly). TODO: real Stripe. ──
@@ -239,10 +289,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/admin/overview", async (req, res) => {
     if (!requireAdmin(req, res)) return;
-    const tradesmen = await storage.getTradesmen();
+    const tradesmenRaw = await storage.getTradesmen();
+    const tradesmen = await attachCardSummaryMany(tradesmenRaw);
     const jobs = await storage.getJobs();
     const quotes = await storage.getQuotes();
-    const pending = tradesmen.filter((t) => !t.verified);
+    const pending = tradesmen.filter((t) => !t.verified && !t.cardSummary.isPubliclyHidden);
+    const banned = tradesmen.filter((t) => t.cardSummary.isPubliclyHidden).length;
+    const carded = tradesmen.filter((t) => t.cardSummary.highestActive !== null).length;
     // revenue model: each sent quote = lead at £5 notional credit value
     const leadRevenue = quotes.length * 5;
     res.json({
@@ -255,6 +308,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         openJobs: jobs.filter((j) => j.status === "open").length,
         totalLeads: quotes.length,
         leadRevenue,
+        carded,
+        banned,
       },
     });
   });
@@ -268,6 +323,138 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!requireAdmin(req, res)) return;
     const t = await storage.getTradesmanById(Number(req.params.id));
     const updated = await storage.updateTradesman(Number(req.params.id), { featured: !t?.featured });
+    res.json(updated);
+  });
+
+  // ════ CARDS / MODERATION ════
+
+  // Public: get cards + summary for a tradesman (used on profile + dashboard).
+  // Returns full history (active and expired/rescinded) but never the private reasons unless admin.
+  app.get("/api/tradesmen/:id/cards", async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid id" });
+    const cards = await storage.getCardsByTradesman(id);
+    const isAdmin = req.query.key === ADMIN_KEY || req.headers["x-admin-key"] === ADMIN_KEY;
+    const isOwner = req.query.email && (await storage.getTradesmanByEmail(String(req.query.email)))?.id === id;
+    const showReasons = isAdmin || isOwner;
+    const safe = cards.map((c) => ({
+      ...c,
+      reason: showReasons ? c.reason : null,
+      rescindedReason: showReasons ? c.rescindedReason : null,
+      rescindedBy: showReasons ? c.rescindedBy : null,
+      issuedBy: showReasons ? c.issuedBy : null,
+      active: isCardActive(c),
+    }));
+    res.json({ cards: safe, summary: summarizeCards(cards) });
+  });
+
+  // Admin: list moderation log (all actions)
+  app.get("/api/admin/moderation/log", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const log = await storage.getModerationLog(200);
+    res.json(log);
+  });
+
+  // Admin: list all carded tradesmen with their active cards summary
+  app.get("/api/admin/moderation/overview", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const allCards = await storage.getAllCards();
+    const tradesmenList = await storage.getTradesmen();
+    const byTradesmanId = new Map<number, typeof allCards>();
+    for (const c of allCards) {
+      const arr = byTradesmanId.get(c.tradesmanId) ?? [];
+      arr.push(c);
+      byTradesmanId.set(c.tradesmanId, arr);
+    }
+    const carded = tradesmenList
+      .filter((t) => byTradesmanId.has(t.id))
+      .map((t) => {
+        const cards = byTradesmanId.get(t.id)!;
+        return { tradesman: t, cards, summary: summarizeCards(cards) };
+      });
+    res.json(carded);
+  });
+
+  // Admin: issue a card
+  // Body: { cardType?: 'warning'|'yellow'|'red'|'auto', reason: string, grossMisconduct?: boolean }
+  // - cardType='auto' (or omitted) triggers football auto-escalation based on history.
+  // - grossMisconduct=true forces an instant Red regardless of cardType (no expiry).
+  app.post("/api/admin/tradesmen/:id/cards", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid id" });
+    const tradesman = await storage.getTradesmanById(id);
+    if (!tradesman) return res.status(404).json({ message: "Tradesman not found" });
+
+    const reason = String(req.body?.reason || "").trim();
+    if (!reason) return res.status(400).json({ message: "A written reason is required." });
+    if (reason.length < 5) return res.status(400).json({ message: "Reason must be at least 5 characters." });
+
+    const grossMisconduct = !!req.body?.grossMisconduct;
+    let cardType: "warning" | "yellow" | "red";
+    const requested = req.body?.cardType;
+
+    if (grossMisconduct) {
+      cardType = "red";
+    } else if (!requested || requested === "auto") {
+      const existing = await storage.getCardsByTradesman(id);
+      cardType = autoEscalate(existing).cardType;
+    } else if (["warning", "yellow", "red"].includes(requested)) {
+      cardType = requested as "warning" | "yellow" | "red";
+    } else {
+      return res.status(400).json({ message: "Invalid cardType" });
+    }
+
+    const now = Date.now();
+    const expiresAt = computeExpiry(cardType, grossMisconduct, now);
+    const adminId = String(req.body?.adminId || req.headers["x-admin-id"] || "admin");
+
+    const created = await storage.createCard(
+      { tradesmanId: id, cardType, reason, grossMisconduct, issuedBy: adminId },
+      now,
+      expiresAt,
+    );
+
+    await storage.logModeration({
+      tradesmanId: id,
+      cardId: created.id,
+      action: "issue",
+      cardType,
+      reason: grossMisconduct ? `[GROSS MISCONDUCT] ${reason}` : reason,
+      adminId,
+    });
+
+    // Side-effect: if card is Red, revoke Featured to prevent stale highlight.
+    if (cardType === "red" || cardType === "yellow") {
+      if (tradesman.featured) await storage.updateTradesman(id, { featured: false });
+    }
+
+    const updatedCards = await storage.getCardsByTradesman(id);
+    res.status(201).json({ card: created, summary: summarizeCards(updatedCards) });
+  });
+
+  // Admin: rescind a card
+  app.post("/api/admin/cards/:cardId/rescind", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const cardId = Number(req.params.cardId);
+    if (!Number.isFinite(cardId)) return res.status(400).json({ message: "Invalid card id" });
+    const card = await storage.getCardById(cardId);
+    if (!card) return res.status(404).json({ message: "Card not found" });
+    if (card.rescindedAt) return res.status(400).json({ message: "Card already rescinded" });
+    const reason = String(req.body?.reason || "").trim();
+    if (!reason || reason.length < 5) return res.status(400).json({ message: "Rescind reason must be at least 5 characters." });
+
+    const adminId = String(req.body?.adminId || req.headers["x-admin-id"] || "admin");
+    const now = Date.now();
+    const updated = await storage.rescindCard(cardId, adminId, reason, now);
+    await storage.logModeration({
+      tradesmanId: card.tradesmanId,
+      cardId,
+      action: "rescind",
+      cardType: card.cardType,
+      reason,
+      adminId,
+    });
     res.json(updated);
   });
 

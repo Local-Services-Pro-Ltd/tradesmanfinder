@@ -13,7 +13,8 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { DashboardData } from "@/lib/api-types";
 import { timeAgo } from "@/lib/api-types";
-import { Wallet, Inbox, Star, TrendingUp, CheckCircle2, Phone, Mail, Plus, LogIn, Zap } from "lucide-react";
+import { Wallet, Inbox, Star, TrendingUp, CheckCircle2, Phone, Mail, Plus, LogIn, Zap, Gavel, AlertTriangle, Ban, Square, Info } from "lucide-react";
+import { CardBadge } from "@/components/card-badge";
 
 const PACKS = [
   { credits: 5, price: "£25" },
@@ -44,16 +45,29 @@ export default function Dashboard() {
     enabled: !!tradesmanId,
   });
 
+  const [bannedNotice, setBannedNotice] = useState<string | null>(null);
+
   const login = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!loginEmail) return;
     setLoggingIn(true);
+    setBannedNotice(null);
     try {
       const res = await apiRequest("GET", `/api/tradesmen/login/${encodeURIComponent(loginEmail)}`);
       const t = await res.json();
       setTradesmanId(t.id);
-    } catch {
-      toast({ title: "No account found", description: "Try the seed account: plumsteadplumbingandheatingltd@example.co.uk", variant: "destructive" });
+    } catch (err: any) {
+      let banned = false;
+      let msg = "";
+      try {
+        const body = await err?.response?.json?.();
+        if (body?.banned) { banned = true; msg = body.message; }
+      } catch {}
+      if (banned) {
+        setBannedNotice(msg || "This account has been permanently banned.");
+      } else {
+        toast({ title: "No account found", description: "Try the seed account: plumsteadplumbingandheatingltd@example.co.uk", variant: "destructive" });
+      }
     } finally {
       setLoggingIn(false);
     }
@@ -90,6 +104,12 @@ export default function Dashboard() {
                 <Input id="le" type="email" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} placeholder="you@yourbusiness.co.uk" data-testid="input-login-email" />
               </div>
               <Button type="submit" className="w-full" disabled={loggingIn} data-testid="button-login">{loggingIn ? "Signing in…" : "Sign in"}</Button>
+              {bannedNotice && (
+                <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive" data-testid="banner-login-banned">
+                  <Ban className="mt-0.5 h-4 w-4 flex-shrink-0" />
+                  <span>{bannedNotice}</span>
+                </div>
+              )}
             </form>
             <div className="mt-4 rounded-lg bg-muted/60 p-3 text-xs text-muted-foreground">
               <p className="font-medium text-foreground">Demo account</p>
@@ -151,11 +171,45 @@ export default function Dashboard() {
           </Card>
         </div>
 
+        {/* Conduct banner */}
+        {data.cardSummary?.publicBadge && (
+          <div
+            className={
+              "mt-6 flex items-start gap-3 rounded-lg border p-4 " +
+              (data.cardSummary.highestActive === "red"
+                ? "border-destructive/40 bg-destructive/5"
+                : data.cardSummary.highestActive === "yellow"
+                ? "border-yellow-300 bg-yellow-50"
+                : "border-amber-300 bg-amber-50")
+            }
+            data-testid="banner-conduct"
+          >
+            <Gavel className="mt-0.5 h-5 w-5 text-foreground/70" />
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-foreground">
+                {data.cardSummary.highestActive === "red" && "Your account has been permanently banned (Red card)."}
+                {data.cardSummary.highestActive === "yellow" && "You have an active Yellow card."}
+                {data.cardSummary.highestActive === "warning" && "You have an active formal warning."}
+              </p>
+              <p className="mt-1 text-sm text-foreground/80">
+                {data.cardSummary.highestActive === "red"
+                  ? "Your profile is hidden from the public directory. Contact support to appeal."
+                  : data.cardSummary.highestActive === "yellow"
+                  ? `Featured status is revoked while this card is active.${data.cardSummary.suspendedUntil ? ` You are excluded from new job matches until ${new Date(data.cardSummary.suspendedUntil).toLocaleDateString("en-GB")}.` : ""}`
+                  : "A third substantiated complaint within the warning window will result in escalation. Reasons are listed in the Conduct tab below."}
+              </p>
+            </div>
+          </div>
+        )}
+
         <Tabs defaultValue="leads" className="mt-8">
           <TabsList>
             <TabsTrigger value="leads" data-testid="tab-leads">Leads</TabsTrigger>
             <TabsTrigger value="credits" data-testid="tab-credits">Credits</TabsTrigger>
             <TabsTrigger value="reviews" data-testid="tab-reviews">Reviews</TabsTrigger>
+            <TabsTrigger value="conduct" data-testid="tab-conduct">
+              Conduct{data.cardSummary && (data.cardSummary.warnings + data.cardSummary.yellows + data.cardSummary.reds) > 0 ? ` (${data.cardSummary.warnings + data.cardSummary.yellows + data.cardSummary.reds})` : ""}
+            </TabsTrigger>
           </TabsList>
 
           {/* Leads */}
@@ -225,6 +279,89 @@ export default function Dashboard() {
             </Card>
           </TabsContent>
 
+          {/* Conduct / Card history */}
+          <TabsContent value="conduct" className="mt-5">
+            <Card className="p-6">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-display text-base font-semibold text-foreground">Disciplinary record</h3>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Cards are issued only for substantiated customer complaints or verified negative reviews.
+                    Three strikes (Warning → Yellow → Red) results in removal from TradesmanFinder.
+                  </p>
+                </div>
+                {data.cardSummary?.publicBadge && <CardBadge summary={data.cardSummary} />}
+              </div>
+
+              <div className="mt-6 grid grid-cols-3 gap-3">
+                <ConductStat icon={<AlertTriangle className="h-4 w-4 text-amber-600" />} label="Warnings" value={data.cardSummary?.warnings ?? 0} />
+                <ConductStat icon={<Square className="h-4 w-4 fill-yellow-400 text-yellow-500" />} label="Yellow cards" value={data.cardSummary?.yellows ?? 0} />
+                <ConductStat icon={<Ban className="h-4 w-4 text-destructive" />} label="Red cards" value={data.cardSummary?.reds ?? 0} tone={data.cardSummary?.reds ? "destructive" : undefined} />
+              </div>
+
+              <h4 className="mt-8 font-display text-sm font-semibold text-foreground">Card history</h4>
+              {(!data.cards || data.cards.length === 0) ? (
+                <div className="mt-3 rounded-md border border-dashed border-border bg-muted/30 p-6 text-center text-sm text-muted-foreground">
+                  <CheckCircle2 className="mx-auto mb-2 h-6 w-6 text-trust" />
+                  Clean record — no disciplinary action on file.
+                </div>
+              ) : (
+                <div className="mt-3 space-y-3">
+                  {[...data.cards].sort((a, b) => b.issuedAt - a.issuedAt).map((c) => {
+                    const active = !c.rescindedAt && (!c.expiresAt || c.expiresAt > Date.now());
+                    const tone =
+                      c.cardType === "red" ? "border-destructive/40 bg-destructive/5" :
+                      c.cardType === "yellow" ? "border-yellow-300 bg-yellow-50/60" :
+                      "border-amber-300 bg-amber-50/60";
+                    return (
+                      <div key={c.id} className={`rounded-lg border p-4 ${tone}`} data-testid={`my-card-${c.id}`}>
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            {c.cardType === "red" && <Ban className="h-4 w-4 text-destructive" />}
+                            {c.cardType === "yellow" && <Square className="h-4 w-4 fill-yellow-400 text-yellow-500" />}
+                            {c.cardType === "warning" && <AlertTriangle className="h-4 w-4 text-amber-600" />}
+                            <span className="font-semibold capitalize text-foreground">{c.cardType} card</span>
+                            {c.grossMisconduct && <Badge variant="destructive" className="text-[10px]">Gross misconduct</Badge>}
+                            {active ? (
+                              <Badge variant="destructive" className="text-[10px]">Active</Badge>
+                            ) : c.rescindedAt ? (
+                              <Badge variant="secondary" className="text-[10px]">Rescinded</Badge>
+                            ) : (
+                              <Badge variant="outline" className="text-[10px]">Expired</Badge>
+                            )}
+                          </div>
+                          <div className="text-right text-xs text-muted-foreground">
+                            <div>Issued {new Date(c.issuedAt).toLocaleDateString("en-GB", { dateStyle: "medium" })}</div>
+                            <div>{c.expiresAt ? `Expires ${new Date(c.expiresAt).toLocaleDateString("en-GB", { dateStyle: "medium" })}` : "Permanent"}</div>
+                          </div>
+                        </div>
+                        {c.reason && (
+                          <div className="mt-3 rounded-md bg-white/60 p-3 text-sm text-foreground/90">
+                            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Reason</div>
+                            <p className="mt-1">{c.reason}</p>
+                          </div>
+                        )}
+                        {c.rescindedAt && (
+                          <div className="mt-2 rounded-md bg-white/60 p-3 text-sm text-foreground/80">
+                            <div className="text-xs font-semibold uppercase tracking-wide text-trust">Rescinded</div>
+                            <p className="mt-1">{new Date(c.rescindedAt).toLocaleDateString("en-GB", { dateStyle: "medium" })}{c.rescindedReason ? ` — ${c.rescindedReason}` : ""}</p>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div className="mt-6 flex items-start gap-2 rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
+                <Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                <span>
+                  To appeal a card, email <a className="text-primary hover:underline" href="mailto:support@tradesmanfinder.com">support@tradesmanfinder.com</a> with the card date and supporting evidence.
+                </span>
+              </div>
+            </Card>
+          </TabsContent>
+
           {/* Reviews */}
           <TabsContent value="reviews" className="mt-5">
             <div className="space-y-3">
@@ -250,5 +387,19 @@ export default function Dashboard() {
         </Tabs>
       </div>
     </Layout>
+  );
+}
+
+function ConductStat({ icon, label, value, tone }: { icon: React.ReactNode; label: string; value: number; tone?: "destructive" }) {
+  return (
+    <div className={"rounded-lg border p-3 " + (tone === "destructive" ? "border-destructive/30 bg-destructive/5" : "border-border bg-card")}>
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-muted-foreground">{label}</span>
+        {icon}
+      </div>
+      <p className={"mt-1 font-display text-xl font-bold " + (tone === "destructive" ? "text-destructive" : "text-foreground")}>
+        {value}
+      </p>
+    </div>
   );
 }

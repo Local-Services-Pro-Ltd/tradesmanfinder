@@ -17,6 +17,45 @@ export interface Area {
   longitude: number;
 }
 
+export interface CardSummary {
+  warnings: number;
+  yellows: number;
+  reds: number;
+  highestActive: "warning" | "yellow" | "red" | null;
+  suspendedUntil: number | null;
+  bannedAt: number | null;
+  publicBadge: { label: string; tone: "warning" | "yellow" | "red"; tooltip: string } | null;
+  isPubliclyHidden: boolean;
+  isLoginBlocked: boolean;
+  isFeaturedRevoked: boolean;
+}
+
+export interface TradesmanCard {
+  id: number;
+  tradesmanId: number;
+  cardType: "warning" | "yellow" | "red";
+  reason: string | null;          // null if redacted (not admin/owner)
+  grossMisconduct: boolean;
+  issuedAt: number;
+  expiresAt: number | null;
+  rescindedAt: number | null;
+  rescindedBy: string | null;
+  rescindedReason: string | null;
+  issuedBy: string | null;
+  active?: boolean;
+}
+
+export interface ModerationLogEntry {
+  id: number;
+  tradesmanId: number;
+  cardId: number | null;
+  action: "issue" | "rescind";
+  cardType: string | null;
+  reason: string;
+  adminId: string;
+  createdAt: number;
+}
+
 export interface Tradesman {
   id: number;
   slug: string;
@@ -39,6 +78,9 @@ export interface Tradesman {
   ratingCount: number;
   responseTimeMinutes: number;
   createdAt: number;
+  // Attached by the server when card data is loaded:
+  cardSummary?: CardSummary;
+  cards?: TradesmanCard[];
 }
 
 export interface Job {
@@ -94,6 +136,8 @@ export interface DashboardData {
   credits: number;
   transactions: { id: number; tradesmanId: number; amount: number; reason: string; relatedJobId: number | null; createdAt: number }[];
   reviews: Review[];
+  cards?: TradesmanCard[];
+  cardSummary?: CardSummary;
 }
 
 export function parseJsonArray<T = unknown>(s: string | undefined | null): T[] {

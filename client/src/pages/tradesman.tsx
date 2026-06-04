@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Layout } from "@/components/layout";
 import { StarRating, VerificationChips, ResponseTimePill, CategoryIcon } from "@/components/brand";
+import { CardBadge } from "@/components/card-badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -101,7 +102,10 @@ export default function TradesmanProfile() {
                   <h1 className="font-display text-2xl font-bold text-foreground" data-testid="text-business-name">{tradesman.businessName}</h1>
                   {area && <p className="mt-1 flex items-center gap-1 text-muted-foreground"><MapPin className="h-4 w-4" /> {area.name}, {area.region}</p>}
                 </div>
-                {tradesman.featured && <Badge className="bg-navy text-white hover:bg-navy">Featured</Badge>}
+                <div className="flex flex-wrap items-center gap-2">
+                  {tradesman.featured && !tradesman.cardSummary?.isFeaturedRevoked && <Badge className="bg-navy text-white hover:bg-navy">Featured</Badge>}
+                  <CardBadge summary={tradesman.cardSummary} />
+                </div>
               </div>
 
               <div className="mt-4 flex flex-wrap items-center gap-4">
