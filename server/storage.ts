@@ -1,0 +1,187 @@
+import {
+  categories,
+  areas,
+  tradesmen,
+  jobs,
+  quotes,
+  reviews,
+  creditTransactions,
+  tradesmanCredits,
+} from "@shared/schema";
+import type {
+  Category, InsertCategory,
+  Area, InsertArea,
+  Tradesman, InsertTradesman,
+  Job, InsertJob,
+  Quote, InsertQuote,
+  Review, InsertReview,
+  CreditTransaction, InsertCreditTransaction,
+  TradesmanCredits,
+} from "@shared/schema";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
+import { eq, desc, sql } from "drizzle-orm";
+
+const connectionString = process.env.DATABASE_URL;
+if (!connectionString) {
+  throw new Error("DATABASE_URL env var is required");
+}
+
+// Use a small pool. Supabase pooler caps connections; Vercel functions are short-lived.
+const client = postgres(connectionString, {
+  max: 5,
+  prepare: false, // required for Supabase transaction pooler (port 6543)
+});
+
+export const db = drizzle(client);
+
+export interface IStorage {
+  // categories
+  getCategories(): Promise<Category[]>;
+  getCategoryBySlug(slug: string): Promise<Category | undefined>;
+  createCategory(c: InsertCategory): Promise<Category>;
+  // areas
+  getAreas(): Promise<Area[]>;
+  getAreaBySlug(slug: string): Promise<Area | undefined>;
+  createArea(a: InsertArea): Promise<Area>;
+  // tradesmen
+  getTradesmen(): Promise<Tradesman[]>;
+  getTradesmanBySlug(slug: string): Promise<Tradesman | undefined>;
+  getTradesmanById(id: number): Promise<Tradesman | undefined>;
+  getTradesmanByEmail(email: string): Promise<Tradesman | undefined>;
+  createTradesman(t: InsertTradesman): Promise<Tradesman>;
+  updateTradesman(id: number, patch: Partial<Tradesman>): Promise<Tradesman | undefined>;
+  // jobs
+  getJobs(): Promise<Job[]>;
+  getJobById(id: number): Promise<Job | undefined>;
+  createJob(j: InsertJob): Promise<Job>;
+  updateJob(id: number, patch: Partial<Job>): Promise<Job | undefined>;
+  // quotes
+  getQuotes(): Promise<Quote[]>;
+  getQuotesByTradesman(tradesmanId: number): Promise<Quote[]>;
+  getQuotesByJob(jobId: number): Promise<Quote[]>;
+  createQuote(q: InsertQuote): Promise<Quote>;
+  // reviews
+  getReviews(): Promise<Review[]>;
+  getReviewsByTradesman(tradesmanId: number): Promise<Review[]>;
+  createReview(r: InsertReview): Promise<Review>;
+  // credits
+  getCredits(tradesmanId: number): Promise<TradesmanCredits | undefined>;
+  setCredits(tradesmanId: number, balance: number): Promise<TradesmanCredits>;
+  getCreditTransactions(tradesmanId: number): Promise<CreditTransaction[]>;
+  createCreditTransaction(t: InsertCreditTransaction): Promise<CreditTransaction>;
+  countRows(table: "tradesmen" | "jobs" | "reviews"): Promise<number>;
+}
+
+const now = () => Date.now();
+
+// Helper: first row from a promise-resolved array, or undefined
+const one = async <T,>(p: Promise<T[]>): Promise<T | undefined> => (await p)[0];
+
+export class DatabaseStorage implements IStorage {
+  // ── categories ──
+  async getCategories() { return db.select().from(categories); }
+  async getCategoryBySlug(slug: string) {
+    return one(db.select().from(categories).where(eq(categories.slug, slug)));
+  }
+  async createCategory(c: InsertCategory) {
+    const [row] = await db.insert(categories).values(c).returning();
+    return row;
+  }
+
+  // ── areas ──
+  async getAreas() { return db.select().from(areas); }
+  async getAreaBySlug(slug: string) {
+    return one(db.select().from(areas).where(eq(areas.slug, slug)));
+  }
+  async createArea(a: InsertArea) {
+    const [row] = await db.insert(areas).values(a).returning();
+    return row;
+  }
+
+  // ── tradesmen ──
+  async getTradesmen() { return db.select().from(tradesmen); }
+  async getTradesmanBySlug(slug: string) {
+    return one(db.select().from(tradesmen).where(eq(tradesmen.slug, slug)));
+  }
+  async getTradesmanById(id: number) {
+    return one(db.select().from(tradesmen).where(eq(tradesmen.id, id)));
+  }
+  async getTradesmanByEmail(email: string) {
+    return one(db.select().from(tradesmen).where(eq(tradesmen.email, email)));
+  }
+  async createTradesman(t: InsertTradesman) {
+    const [row] = await db.insert(tradesmen).values({ ...t, createdAt: now() }).returning();
+    return row;
+  }
+  async updateTradesman(id: number, patch: Partial<Tradesman>) {
+    const [row] = await db.update(tradesmen).set(patch).where(eq(tradesmen.id, id)).returning();
+    return row;
+  }
+
+  // ── jobs ──
+  async getJobs() { return db.select().from(jobs).orderBy(desc(jobs.createdAt)); }
+  async getJobById(id: number) {
+    return one(db.select().from(jobs).where(eq(jobs.id, id)));
+  }
+  async createJob(j: InsertJob) {
+    const [row] = await db.insert(jobs).values({ ...j, createdAt: now() }).returning();
+    return row;
+  }
+  async updateJob(id: number, patch: Partial<Job>) {
+    const [row] = await db.update(jobs).set(patch).where(eq(jobs.id, id)).returning();
+    return row;
+  }
+
+  // ── quotes ──
+  async getQuotes() { return db.select().from(quotes); }
+  async getQuotesByTradesman(tradesmanId: number) {
+    return db.select().from(quotes).where(eq(quotes.tradesmanId, tradesmanId)).orderBy(desc(quotes.createdAt));
+  }
+  async getQuotesByJob(jobId: number) {
+    return db.select().from(quotes).where(eq(quotes.jobId, jobId));
+  }
+  async createQuote(q: InsertQuote) {
+    const [row] = await db.insert(quotes).values({ ...q, createdAt: now() }).returning();
+    return row;
+  }
+
+  // ── reviews ──
+  async getReviews() { return db.select().from(reviews); }
+  async getReviewsByTradesman(tradesmanId: number) {
+    return db.select().from(reviews).where(eq(reviews.tradesmanId, tradesmanId)).orderBy(desc(reviews.createdAt));
+  }
+  async createReview(r: InsertReview) {
+    const [row] = await db.insert(reviews).values({ ...r, createdAt: now() }).returning();
+    return row;
+  }
+
+  // ── credits ──
+  async getCredits(tradesmanId: number) {
+    return one(db.select().from(tradesmanCredits).where(eq(tradesmanCredits.tradesmanId, tradesmanId)));
+  }
+  async setCredits(tradesmanId: number, balance: number) {
+    const existing = await this.getCredits(tradesmanId);
+    if (existing) {
+      const [row] = await db.update(tradesmanCredits).set({ balance }).where(eq(tradesmanCredits.tradesmanId, tradesmanId)).returning();
+      return row;
+    }
+    const [row] = await db.insert(tradesmanCredits).values({ tradesmanId, balance }).returning();
+    return row;
+  }
+  async getCreditTransactions(tradesmanId: number) {
+    return db.select().from(creditTransactions).where(eq(creditTransactions.tradesmanId, tradesmanId)).orderBy(desc(creditTransactions.createdAt));
+  }
+  async createCreditTransaction(t: InsertCreditTransaction) {
+    const [row] = await db.insert(creditTransactions).values({ ...t, createdAt: now() }).returning();
+    return row;
+  }
+
+  async countRows(table: "tradesmen" | "jobs" | "reviews") {
+    const map = { tradesmen, jobs, reviews } as const;
+    const result = await db.select({ count: sql<number>`count(*)::int` }).from(map[table]);
+    return result[0]?.count ?? 0;
+  }
+}
+
+export const storage = new DatabaseStorage();

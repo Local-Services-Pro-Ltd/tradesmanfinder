@@ -1,0 +1,284 @@
+import { db } from "./storage";
+import {
+  categories, areas, tradesmen, jobs, quotes, reviews, tradesmanCredits, creditTransactions,
+} from "@shared/schema";
+
+const TS = (daysAgo: number) => Date.now() - daysAgo * 86400000;
+
+const CATEGORIES: { slug: string; name: string; icon: string; description: string }[] = [
+  { slug: "builder", name: "Builder", icon: "HardHat", description: "Extensions, renovations, structural work and general building." },
+  { slug: "plumber", name: "Plumber", icon: "Droplets", description: "Leaks, bathrooms, pipework, taps and emergency callouts." },
+  { slug: "electrician", name: "Electrician", icon: "Zap", description: "Rewires, fuse boards, lighting, sockets and EICR certificates." },
+  { slug: "painter-decorator", name: "Painter & Decorator", icon: "PaintRoller", description: "Interior and exterior painting, wallpapering and finishes." },
+  { slug: "carpenter", name: "Carpenter", icon: "Hammer", description: "Bespoke joinery, doors, skirting, fitted wardrobes and shelving." },
+  { slug: "roofer", name: "Roofer", icon: "Home", description: "Roof repairs, re-roofing, flat roofs, guttering and chimneys." },
+  { slug: "plasterer", name: "Plasterer", icon: "Layers", description: "Skimming, rendering, coving and plaster repairs." },
+  { slug: "tiler", name: "Tiler", icon: "Grid3x3", description: "Wall and floor tiling for kitchens, bathrooms and wet rooms." },
+  { slug: "gardener-landscaper", name: "Gardener / Landscaper", icon: "Trees", description: "Garden design, fencing, decking, turfing and maintenance." },
+  { slug: "handyman", name: "Handyman", icon: "Wrench", description: "Odd jobs, flat-pack assembly, small repairs and fixes." },
+  { slug: "locksmith", name: "Locksmith", icon: "Lock", description: "Lockouts, lock changes, security upgrades and uPVC repairs." },
+  { slug: "glazier", name: "Glazier", icon: "Square", description: "Window repairs, double glazing, splashbacks and mirrors." },
+  { slug: "cleaner", name: "Cleaner", icon: "Sparkles", description: "Domestic, end-of-tenancy, deep cleans and commercial cleaning." },
+  { slug: "pest-control", name: "Pest Control", icon: "Bug", description: "Rodents, wasps, bed bugs and humane wildlife removal." },
+  { slug: "removals", name: "Removals", icon: "Truck", description: "House moves, man-and-van, packing and storage." },
+  { slug: "bricklayer", name: "Bricklayer", icon: "BrickWall", description: "Walls, repointing, garden walls and brick repairs." },
+  { slug: "flooring-specialist", name: "Flooring Specialist", icon: "LayoutGrid", description: "Laminate, engineered wood, vinyl, carpet and screeding." },
+  { slug: "heating-engineer", name: "Heating Engineer", icon: "Flame", description: "Boilers, central heating, radiators and Gas Safe servicing." },
+  { slug: "damp-specialist", name: "Damp Specialist", icon: "CloudRain", description: "Damp proofing, condensation, tanking and timber treatment." },
+  { slug: "driveway-paving", name: "Driveway / Paving", icon: "Footprints", description: "Block paving, resin, tarmac, patios and drainage." },
+];
+
+const AREAS: { slug: string; name: string; region: string; lat: number; lng: number }[] = [
+  { slug: "abbey-wood", name: "Abbey Wood", region: "London SE2", lat: 51.4869, lng: 0.1185 },
+  { slug: "plumstead", name: "Plumstead", region: "London SE18", lat: 51.4884, lng: 0.0853 },
+  { slug: "greenwich", name: "Greenwich", region: "London SE10", lat: 51.4826, lng: -0.0077 },
+  { slug: "woolwich", name: "Woolwich", region: "London SE18", lat: 51.4906, lng: 0.0639 },
+  { slug: "bexleyheath", name: "Bexleyheath", region: "London DA6", lat: 51.4593, lng: 0.1382 },
+  { slug: "eltham", name: "Eltham", region: "London SE9", lat: 51.4513, lng: 0.0524 },
+  { slug: "lewisham", name: "Lewisham", region: "London SE13", lat: 51.4626, lng: -0.0117 },
+  { slug: "bromley", name: "Bromley", region: "London BR1", lat: 51.4059, lng: 0.0146 },
+  { slug: "dartford", name: "Dartford", region: "Kent DA1", lat: 51.4465, lng: 0.2186 },
+  { slug: "erith", name: "Erith", region: "London DA8", lat: 51.4810, lng: 0.1779 },
+  { slug: "sidcup", name: "Sidcup", region: "London DA14", lat: 51.4254, lng: 0.1037 },
+  { slug: "welling", name: "Welling", region: "London DA16", lat: 51.4640, lng: 0.1058 },
+  { slug: "charlton", name: "Charlton", region: "London SE7", lat: 51.4880, lng: 0.0303 },
+  { slug: "blackheath", name: "Blackheath", region: "London SE3", lat: 51.4656, lng: 0.0083 },
+  { slug: "catford", name: "Catford", region: "London SE6", lat: 51.4452, lng: -0.0207 },
+  { slug: "grimsby", name: "Grimsby", region: "Lincolnshire DN31", lat: 53.5675, lng: -0.0817 },
+  { slug: "manchester", name: "Manchester", region: "Greater Manchester M1", lat: 53.4808, lng: -2.2426 },
+  { slug: "birmingham", name: "Birmingham", region: "West Midlands B1", lat: 52.4862, lng: -1.8904 },
+  { slug: "leeds", name: "Leeds", region: "West Yorkshire LS1", lat: 53.8008, lng: -1.5491 },
+  { slug: "bristol", name: "Bristol", region: "Bristol BS1", lat: 51.4545, lng: -2.5879 },
+];
+
+// Image pool by trade family — reuse generated hero images
+const IMG = {
+  builder: "/assets/hero-builder.png",
+  plumber: "/assets/section-plumber.png",
+  electrician: "/assets/section-electrician.png",
+  general: "/assets/hero-builder.png",
+};
+
+function imgFor(catSlug: string): string {
+  if (["plumber", "heating-engineer", "tiler", "glazier"].includes(catSlug)) return IMG.plumber;
+  if (["electrician"].includes(catSlug)) return IMG.electrician;
+  return IMG.builder;
+}
+
+const REVIEW_NAMES = ["Sarah J.", "Mike T.", "Linda P.", "David R.", "Emma W.", "James K.", "Claire M.", "Tom B.", "Rachel S.", "Paul D.", "Hannah L.", "Steve G.", "Karen H.", "Gary F.", "Nicola A.", "Chris O.", "Joanne E.", "Mark C.", "Lucy V.", "Andrew N.", "Beth T.", "Ian W.", "Sophie R.", "Neil P."];
+
+const REVIEW_BODIES: Record<string, string[]> = {
+  builder: [
+    "Built our rear kitchen extension on time and on budget. Tidy site, friendly crew, kept us informed the whole way.",
+    "Did a loft conversion for us — proper job, building control signed it off first time. Highly recommend.",
+    "Knocked through two rooms and steel beam installed without fuss. Cleaned up every evening.",
+    "Quoted fairly and stuck to it. The brickwork on our side return is spot on.",
+    "Renovated our whole ground floor. A few small delays but the finish is excellent.",
+  ],
+  plumber: [
+    "Sorted a leaking tap and a dodgy stopcock the same morning I called. Reasonable price.",
+    "Fitted a new bathroom suite beautifully. No mess, no fuss, turned up exactly when promised.",
+    "Came out for a burst pipe at 9pm and saved us from a flooded kitchen. Absolute lifesaver.",
+    "Replaced our old radiators and balanced the system. House is warm again at last.",
+    "Friendly, honest and clearly knew his stuff. Will use again for the en-suite.",
+  ],
+  electrician: [
+    "Full rewire of a 1930s house — thorough, certificated and explained everything clearly.",
+    "Fitted downlights and a new consumer unit. Tidy cabling and proper testing afterwards.",
+    "Sorted a tripping circuit that two others couldn't find. Knew exactly what to look for.",
+    "Added sockets and EV charger point. Punctual, polite and good value.",
+    "EICR done quickly for our rental. Clear report and fixed the minor issues same day.",
+  ],
+  general: [
+    "Excellent work, would happily recommend to friends and family.",
+    "Turned up on time, fair price and a lovely job. Couldn't ask for more.",
+    "Really pleased with the result — professional from start to finish.",
+    "Great communication and tidy work. Five stars from us.",
+    "Honest, reliable and skilled. Hard to find tradespeople like this.",
+  ],
+};
+
+const REVIEW_TITLES = ["Brilliant job", "Highly recommended", "Top tradesman", "Would use again", "Excellent service", "Spot on", "Fast and tidy", "Great value", "Professional throughout", "Lifesaver"];
+
+// 40 tradesmen definitions: business name, owner, primary catSlug, areaSlug, extra cats
+const TRADESMEN: { biz: string; owner: string; cat: string; area: string; extra?: string[]; featured?: boolean; verified?: boolean; rating: number }[] = [
+  { biz: "Abbey Wood Building Co", owner: "Daniel Hughes", cat: "builder", area: "abbey-wood", extra: ["bricklayer"], featured: true, verified: true, rating: 4.8 },
+  { biz: "Plumstead Plumbing & Heating Ltd", owner: "Mark Reynolds", cat: "plumber", area: "plumstead", extra: ["heating-engineer"], featured: true, verified: true, rating: 4.9 },
+  { biz: "Greenwich Electrical Services", owner: "Anita Sharma", cat: "electrician", area: "greenwich", featured: true, verified: true, rating: 4.7 },
+  { biz: "Woolwich Roofing Specialists", owner: "Kevin Doyle", cat: "roofer", area: "woolwich", verified: true, rating: 4.6 },
+  { biz: "Bexley Carpentry & Joinery", owner: "Steven Clarke", cat: "carpenter", area: "bexleyheath", extra: ["flooring-specialist"], verified: true, rating: 4.8 },
+  { biz: "Eltham Plastering Pros", owner: "Liam Foster", cat: "plasterer", area: "eltham", verified: true, rating: 4.5 },
+  { biz: "Lewisham Tiling Studio", owner: "Maria Costa", cat: "tiler", area: "lewisham", featured: true, verified: true, rating: 4.9 },
+  { biz: "Bromley Garden Landscapes", owner: "Gary Whitlock", cat: "gardener-landscaper", area: "bromley", extra: ["driveway-paving"], verified: true, rating: 4.7 },
+  { biz: "Dartford Handyman Hub", owner: "Tony Marsh", cat: "handyman", area: "dartford", verified: true, rating: 4.4 },
+  { biz: "Erith Emergency Locksmiths", owner: "Paul Ndiaye", cat: "locksmith", area: "erith", verified: true, rating: 4.8 },
+  { biz: "Sidcup Glazing & Windows", owner: "Robert King", cat: "glazier", area: "sidcup", rating: 4.3 },
+  { biz: "Welling Domestic Cleaners", owner: "Joanna Bird", cat: "cleaner", area: "welling", verified: true, rating: 4.6 },
+  { biz: "Charlton Pest Solutions", owner: "Derek Mills", cat: "pest-control", area: "charlton", verified: true, rating: 4.5 },
+  { biz: "Blackheath Removals Ltd", owner: "Simon Pryce", cat: "removals", area: "blackheath", featured: true, verified: true, rating: 4.7 },
+  { biz: "Catford Brickwork", owner: "Anthony Bell", cat: "bricklayer", area: "catford", extra: ["builder"], verified: true, rating: 4.6 },
+  { biz: "South East Flooring", owner: "Wayne Hart", cat: "flooring-specialist", area: "greenwich", verified: true, rating: 4.8 },
+  { biz: "Riverside Heating Engineers", owner: "Faisal Ahmed", cat: "heating-engineer", area: "woolwich", extra: ["plumber"], featured: true, verified: true, rating: 4.9 },
+  { biz: "Thames Damp Proofing", owner: "Colin Webb", cat: "damp-specialist", area: "abbey-wood", verified: true, rating: 4.4 },
+  { biz: "Premier Driveways SE", owner: "Jason Holt", cat: "driveway-paving", area: "bexleyheath", verified: true, rating: 4.7 },
+  { biz: "Heath & Sons Painters", owner: "Brian Heath", cat: "painter-decorator", area: "blackheath", verified: true, rating: 4.8 },
+  { biz: "Plumstead Property Repairs", owner: "Nathan Cole", cat: "builder", area: "plumstead", extra: ["handyman"], rating: 4.2 },
+  { biz: "Quick Flow Plumbers", owner: "Darren Boyle", cat: "plumber", area: "greenwich", verified: true, rating: 4.6 },
+  { biz: "Voltage Electrical", owner: "Priya Nair", cat: "electrician", area: "lewisham", verified: true, rating: 4.7 },
+  { biz: "Apex Roofing Kent", owner: "Lee Sanders", cat: "roofer", area: "dartford", verified: true, rating: 4.5 },
+  { biz: "Fine Finish Decorators", owner: "Gemma Floyd", cat: "painter-decorator", area: "bromley", featured: true, verified: true, rating: 4.9 },
+  { biz: "Oakwood Carpentry", owner: "Henry Ward", cat: "carpenter", area: "eltham", verified: true, rating: 4.6 },
+  { biz: "Smooth Walls Plastering", owner: "Ricky Dean", cat: "plasterer", area: "catford", rating: 4.3 },
+  { biz: "Mosaic Bathroom Tiling", owner: "Elena Popescu", cat: "tiler", area: "sidcup", verified: true, rating: 4.8 },
+  { biz: "Green Thumb Gardens", owner: "Sam Patel", cat: "gardener-landscaper", area: "welling", verified: true, rating: 4.5 },
+  { biz: "Handy Andy Services", owner: "Andy Pearce", cat: "handyman", area: "charlton", rating: 4.1 },
+  { biz: "Northern Lights Electrical", owner: "Craig Stewart", cat: "electrician", area: "manchester", verified: true, rating: 4.7 },
+  { biz: "Manchester Master Builders", owner: "Ryan O'Connor", cat: "builder", area: "manchester", featured: true, verified: true, rating: 4.8 },
+  { biz: "Brum Plumbing Co", owner: "Sandeep Gill", cat: "plumber", area: "birmingham", verified: true, rating: 4.6 },
+  { biz: "Birmingham Roof Care", owner: "Tariq Hussain", cat: "roofer", area: "birmingham", verified: true, rating: 4.5 },
+  { biz: "Leeds Heating & Gas", owner: "Michael Brook", cat: "heating-engineer", area: "leeds", verified: true, rating: 4.8 },
+  { biz: "Yorkshire Joinery", owner: "Peter Sykes", cat: "carpenter", area: "leeds", rating: 4.4 },
+  { biz: "Bristol Bathroom Fitters", owner: "Owen Pritchard", cat: "tiler", area: "bristol", extra: ["plumber"], verified: true, rating: 4.7 },
+  { biz: "West Country Builders", owner: "George Vincent", cat: "builder", area: "bristol", featured: true, verified: true, rating: 4.9 },
+  { biz: "Humber Cleaning Services", owner: "Donna Fletcher", cat: "cleaner", area: "grimsby", verified: true, rating: 4.5 },
+  { biz: "Grimsby Garden & Drives", owner: "Carl Newton", cat: "driveway-paving", area: "grimsby", extra: ["gardener-landscaper"], rating: 4.3 },
+];
+
+const BIOS: Record<string, (b: string, y: number) => string> = {
+  default: (b, y) =>
+    `${b} has been serving local homeowners for over ${y} years. We pride ourselves on honest pricing, tidy workmanship and turning up when we say we will. Fully covered by public liability insurance and happy to provide references on request.`,
+};
+
+function slugify(s: string) {
+  return s.toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+}
+
+export async function seed() {
+  const existing = db.select().from(categories).all();
+  if (existing.length > 0) return; // already seeded
+
+  console.log("[seed] seeding database…");
+
+  // categories
+  const catRows = CATEGORIES.map((c) => db.insert(categories).values({ ...c }).returning().get());
+  const catBySlug: Record<string, number> = {};
+  catRows.forEach((c) => (catBySlug[c.slug] = c.id));
+
+  // areas
+  const areaRows = AREAS.map((a) =>
+    db.insert(areas).values({ slug: a.slug, name: a.name, region: a.region, latitude: a.lat, longitude: a.lng }).returning().get()
+  );
+  const areaBySlug: Record<string, number> = {};
+  areaRows.forEach((a) => (areaBySlug[a.slug] = a.id));
+
+  // tradesmen
+  let reviewSeed = 0;
+  TRADESMEN.forEach((t, idx) => {
+    const years = 5 + ((idx * 7) % 21);
+    const cats = [catBySlug[t.cat], ...(t.extra || []).map((s) => catBySlug[s])];
+    const reviewCount = 5 + ((idx * 3) % 11); // 5-15
+    const slug = slugify(t.biz);
+    const phone = `07${String(700000000 + idx * 137911).slice(0, 9)}`;
+    const responseTime = [15, 30, 45, 60, 90, 120][idx % 6];
+    const tr = db.insert(tradesmen).values({
+      slug,
+      businessName: t.biz,
+      ownerName: t.owner,
+      email: `${slug.replace(/-/g, "")}@example.co.uk`,
+      phone,
+      bio: BIOS.default(t.biz, years),
+      postcode: AREAS.find((a) => a.slug === t.area)!.region.split(" ").pop()! + " " + (1 + (idx % 9)) + "AB",
+      areaId: areaBySlug[t.area],
+      heroImageUrl: imgFor(t.cat),
+      gallery: JSON.stringify([imgFor(t.cat), IMG.builder, IMG.plumber]),
+      categories: JSON.stringify(cats),
+      yearsExperience: years,
+      verified: t.verified ?? false,
+      insured: true,
+      licensed: t.verified ?? false,
+      featured: t.featured ?? false,
+      ratingAverage: t.rating,
+      ratingCount: reviewCount,
+      responseTimeMinutes: responseTime,
+      createdAt: TS(60 - idx),
+    }).returning().get();
+
+    // credits + opening top-up
+    db.insert(tradesmanCredits).values({ tradesmanId: tr.id, balance: 5 + (idx % 4) * 5 }).returning().get();
+    db.insert(creditTransactions).values({ tradesmanId: tr.id, amount: 10, reason: "Welcome credit pack", relatedJobId: null, createdAt: TS(58 - idx) }).run();
+
+    // reviews — generate reviewCount per tradesman
+    const fam = REVIEW_BODIES[t.cat] ? t.cat : "general";
+    for (let r = 0; r < reviewCount; r++) {
+      reviewSeed++;
+      const bodies = REVIEW_BODIES[fam];
+      // bias rating around the tradesman's average
+      let rating = Math.round(t.rating);
+      if (r % 5 === 0 && rating > 3) rating = rating - 1;
+      if (r % 7 === 0) rating = 5;
+      db.insert(reviews).values({
+        tradesmanId: tr.id,
+        customerName: REVIEW_NAMES[reviewSeed % REVIEW_NAMES.length],
+        rating,
+        title: REVIEW_TITLES[reviewSeed % REVIEW_TITLES.length],
+        body: bodies[r % bodies.length],
+        jobId: null,
+        verified: r % 3 !== 0,
+        createdAt: TS((reviewSeed * 3) % 200 + 2),
+      }).run();
+    }
+  });
+
+  // 10 sample open jobs
+  const allTradesmen = db.select().from(tradesmen).all();
+  const sampleJobs = [
+    { cat: "plumber", area: "abbey-wood", title: "Leaking kitchen tap needs fixing", urgency: "this_week", budget: "£50 – £150", name: "Helen Carter", desc: "Mixer tap in the kitchen has been dripping for a week and the cold side is stiff. Would like it repaired or replaced." },
+    { cat: "builder", area: "plumstead", title: "Single-storey rear extension", urgency: "flexible", budget: "£20,000 – £40,000", name: "Raj Mehta", desc: "Looking to extend the kitchen by 4m into the garden. Have rough plans, need a builder to quote and advise on building regs." },
+    { cat: "electrician", area: "greenwich", title: "Consumer unit upgrade + EICR", urgency: "this_week", budget: "£300 – £600", name: "Olivia Grant", desc: "Old fuse board with rewireable fuses. Need a modern consumer unit fitted and an EICR for our rental." },
+    { cat: "roofer", area: "woolwich", title: "Slipped tiles after storm", urgency: "emergency", budget: "£150 – £400", name: "Frank Dolan", desc: "A few tiles came off in the wind and there's a small leak in the loft. Need someone out quickly." },
+    { cat: "painter-decorator", area: "bromley", title: "Repaint two bedrooms and hallway", urgency: "flexible", budget: "£600 – £1,200", name: "Sue Aldridge", desc: "Walls and ceilings in two bedrooms plus the upstairs hallway. Happy to discuss colours." },
+    { cat: "tiler", area: "lewisham", title: "Bathroom wall and floor tiling", urgency: "this_week", budget: "£800 – £1,500", name: "Marcus Bell", desc: "Full bathroom re-tile, around 14 sqm of walls and 3 sqm floor. Tiles already purchased." },
+    { cat: "gardener-landscaper", area: "bromley", title: "New fencing and turf", urgency: "flexible", budget: "£1,000 – £2,500", name: "Priya Shah", desc: "Replace 12m of rotten fence panels and lay new turf in the back garden." },
+    { cat: "heating-engineer", area: "woolwich", title: "Boiler not firing up", urgency: "emergency", budget: "£100 – £500", name: "Greg Mason", desc: "Combi boiler has no hot water or heating, showing a fault code. Need a Gas Safe engineer asap." },
+    { cat: "handyman", area: "dartford", title: "Flat-pack wardrobes and shelves", urgency: "flexible", budget: "£80 – £200", name: "Tina Brooks", desc: "Two flat-pack wardrobes to assemble and a few shelves to put up. Half a day's work." },
+    { cat: "locksmith", area: "erith", title: "Locked out of the house", urgency: "emergency", budget: "£60 – £150", name: "Wesley Adkins", desc: "Front door slammed shut with keys inside. Need a non-destructive entry if possible." },
+  ];
+
+  sampleJobs.forEach((j, i) => {
+    const cId = db.select().from(categories).all().find((c) => c.slug === j.cat)!.id;
+    const aId = db.select().from(areas).all().find((a) => a.slug === j.area)!.id;
+    const job = db.insert(jobs).values({
+      customerName: j.name,
+      customerEmail: j.name.toLowerCase().replace(/[^a-z]/g, ".") + "@example.com",
+      customerPhone: "07" + String(800000000 + i * 12345).slice(0, 9),
+      postcode: AREAS.find((a) => a.slug === j.area)!.region.split(" ").pop()!,
+      categoryId: cId,
+      areaId: aId,
+      title: j.title,
+      description: j.desc,
+      urgency: j.urgency,
+      budgetRange: j.budget,
+      photos: JSON.stringify([]),
+      status: "open",
+      createdAt: TS(i + 1),
+    }).returning().get();
+
+    // auto-match: create quote placeholders from top tradesmen in category+area
+    const matches = allTradesmen
+      .filter((t) => (JSON.parse(t.categories as string) as number[]).includes(cId))
+      .sort((a, b) => b.ratingAverage - a.ratingAverage)
+      .slice(0, 3);
+    matches.forEach((m) => {
+      db.insert(quotes).values({
+        jobId: job.id,
+        tradesmanId: m.id,
+        priceEstimate: "",
+        message: "",
+        status: "sent",
+        createdAt: TS(i),
+      }).run();
+    });
+  });
+
+  console.log(`[seed] done: ${CATEGORIES.length} categories, ${AREAS.length} areas, ${TRADESMEN.length} tradesmen, ${reviewSeed} reviews, ${sampleJobs.length} jobs`);
+}
