@@ -161,7 +161,7 @@ function Footer() {
           </div>
         </div>
         <div className="mt-12 flex flex-col items-center justify-between gap-3 border-t border-white/10 pt-6 text-xs text-white/60 sm:flex-row">
-          <p>© {new Date().getFullYear()} TradesmanFinder Ltd. All rights reserved.</p>
+          <p>© {new Date().getFullYear()} Local Services Pro Ltd. All rights reserved.</p>
           <p>Registered in England &amp; Wales. A demo MVP — businesses shown are illustrative.</p>
         </div>
       </div>
