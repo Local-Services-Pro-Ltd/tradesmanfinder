@@ -131,12 +131,15 @@ export const reviews = pgTable("reviews", {
   body: text("body").notNull(),
   jobId: integer("job_id"),
   verified: boolean("verified").notNull().default(false),
+   status: text("status").notNull().default("pending"), // pending | approved | rejected
   createdAt: bigint("created_at", { mode: "number" }).notNull().default(0),
 });
 
 export const insertReviewSchema = createInsertSchema(reviews).omit({
   id: true,
   createdAt: true,
+   status: true,    // moderation-controlled, never set by submitter
+verified: true,
 });
 export type InsertReview = z.infer<typeof insertReviewSchema>;
 export type Review = typeof reviews.$inferSelect;
