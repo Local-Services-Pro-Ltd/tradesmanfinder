@@ -8,6 +8,7 @@ import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shar
 import { sendCardIssuedEmail, sendCardRescindedEmail } from "./mailer";
 import type { Tradesman, TradesmanCard } from "@shared/schema";
 import { z } from "zod";
+import { publicFormGuard } from "./spam-guard";
 
 // Attach a `cardSummary` field to each tradesman so the UI can render badges
 // and the API consumers can know who's suspended/banned.
@@ -106,7 +107,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json(enriched);
   });
 
-  app.post("/api/tradesmen", async (req, res) => {
+  app.post("/api/tradesmen", publicFormGuard(), async (req, res) => {
     try {
       const parsed = insertTradesmanSchema.parse({
         ...req.body,
@@ -156,7 +157,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // Post a job → auto-match top 3 tradesmen in category (+ area if available), create quote placeholders
   // Red-carded (banned) and currently-suspended-yellow tradesmen are excluded from matching.
   // Featured-status sort is suppressed for tradesmen with active yellows (Featured is revoked).
-  app.post("/api/jobs", async (req, res) => {
+  app.post("/api/jobs", publicFormGuard(), async (req, res) => {
     try {
       const parsed = insertJobSchema.parse({
         ...req.body,
@@ -198,7 +199,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (req.query.job) return res.json(await storage.getQuotesByJob(Number(req.query.job)));
     res.json(await storage.getQuotes());
   });
-  app.post("/api/quotes", async (req, res) => {
+  app.post("/api/quotes", publicFormGuard(), async (req, res) => {
     try {
       const parsed = insertQuoteSchema.parse(req.body);
       const created = await storage.createQuote(parsed);
@@ -248,7 +249,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Reviews create ──
-  app.post("/api/reviews", async (req, res) => {
+  app.post("/api/reviews", publicFormGuard(), async (req, res) => {
     try {
       const parsed = insertReviewSchema.parse(req.body);
       const created = await storage.createReview(parsed);
