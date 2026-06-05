@@ -139,9 +139,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // ── Reviews ──
   app.get("/api/reviews", async (req, res) => {
     if (req.query.tradesman) {
-      return res.json(await storage.getReviewsByTradesman(Number(req.query.tradesman)));
+      return res.json((await storage.getReviewsByTradesman(Number(req.query.tradesman))).filter((r) => r.status === "approved"));
     }
-    res.json(await storage.getReviews());
+    res.json((await storage.getReviews()).filter((r) => r.status === "approved"));
   });
 
   // ── Jobs ──
@@ -252,10 +252,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/reviews", publicFormGuard(), async (req, res) => {
     try {
       const parsed = insertReviewSchema.parse(req.body);
-      const created = await storage.createReview(parsed);
-      // recompute rating
-      const all = await storage.getReviewsByTradesman(parsed.tradesmanId);
-      const avg = all.reduce((s, r) => s + r.rating, 0) / all.length;
+      const created = await storage.createReview({ ...parsed, status: "pending" });
+      // recompute rating from APPROVED reviews only (pending reviews are not public)
+      const all = (await storage.getReviewsByTradesman(parsed.tradesmanId)).filter((r) => r.status === "approved");
+      const avg = all.length ? all.reduce((s, r) => s + r.rating, 0) / all.length : 0;
       await storage.updateTradesman(parsed.tradesmanId, { ratingAverage: Math.round(avg * 10) / 10, ratingCount: all.length });
       res.status(201).json(created);
     } catch (e) {
@@ -484,6 +484,32 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
     res.json(updated);
   });
+
+  // — Admin: list reviews for moderation (?status=pending|approved|rejected, default all) —
+app.get("/api/admin/reviews", async (req, res) => {
+if (!requireAdmin(req, res)) return;
+const status = req.query.status ? String(req.query.status) : undefined;
+const all = await storage.getReviews();
+res.json(status ? all.filter((r) => r.status === status) : all);
+});
+
+  // — Admin: approve or reject a review (recomputes tradesman rating from approved reviews) —
+app.post("/api/admin/reviews/:id/moderate", async (req, res) => {
+if (!requireAdmin(req, res)) return;
+const id = Number(req.params.id);
+if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid review id" });
+const action = String(req.body?.action || "");
+if (action !== "approve" && action !== "reject") return res.status(400).json({ message: "action must be 'approve' or 'reject'" });
+const review = await storage.getReviewById(id);
+if (!review) return res.status(404).json({ message: "Review not found" });
+const newStatus = action === "approve" ? "approved" : "rejected";
+const updated = await storage.updateReview(id, { status: newStatus, verified: action === "approve" });
+// recompute tradesman rating from approved reviews only
+const approved = (await storage.getReviewsByTradesman(review.tradesmanId)).filter((r) => r.status === "approved");
+const avg = approved.length ? approved.reduce((s, r) => s + r.rating, 0) / approved.length : 0;
+await storage.updateTradesman(review.tradesmanId, { ratingAverage: Math.round(avg * 10) / 10, ratingCount: approved.length });
+res.json(updated);
+});
 
   return httpServer;
 }
