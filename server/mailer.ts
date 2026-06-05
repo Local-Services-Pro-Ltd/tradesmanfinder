@@ -234,3 +234,50 @@ export async function sendCardRescindedEmail(opts: {
 
   return send({ to, subject, html, text, tag: `card_${cardType}_rescinded` });
 }
+
+export async function sendNewLeadEmail(opts: {
+  to: string;
+  businessName: string;
+  ownerName: string;
+  jobTitle: string;
+  postcode: string;
+  trade: string;
+  urgency: string;
+  budgetRange: string;
+  description: string;
+}) {
+  const { to, businessName, ownerName, jobTitle, postcode, trade, urgency, budgetRange, description } = opts;
+  const dashboardUrl = `${PUBLIC_URL}/dashboard`;
+  const subject = `New lead: ${jobTitle} in ${postcode}`;
+  const shortDesc = description.length > 280 ? description.slice(0, 280) + "\u2026" : description;
+  const urgencyLabel = urgency.charAt(0).toUpperCase() + urgency.slice(1);
+  const budgetLine = budgetRange ? `<tr><td style="padding:4px 0;color:#6b7280">Budget</td><td style="padding:4px 0;font-weight:600">${escapeHtml(budgetRange)}</td></tr>` : "";
+  const bodyHtml =
+    `<p style="margin:0 0 12px">Hi ${escapeHtml(ownerName)},</p>` +
+    `<p style="margin:0 0 16px">You have a new lead matched to <strong>${escapeHtml(businessName)}</strong> on TradesmanFinder.</p>` +
+    `<table cellpadding="0" cellspacing="0" border="0" style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111827">` +
+    `<tr><td style="padding:4px 12px 4px 0;color:#6b7280">Job</td><td style="padding:4px 0;font-weight:600">${escapeHtml(jobTitle)}</td></tr>` +
+    `<tr><td style="padding:4px 0;color:#6b7280">Trade</td><td style="padding:4px 0;font-weight:600">${escapeHtml(trade)}</td></tr>` +
+    `<tr><td style="padding:4px 0;color:#6b7280">Area</td><td style="padding:4px 0;font-weight:600">${escapeHtml(postcode)}</td></tr>` +
+    `<tr><td style="padding:4px 0;color:#6b7280">Urgency</td><td style="padding:4px 0;font-weight:600">${escapeHtml(urgencyLabel)}</td></tr>` +
+    budgetLine +
+    `</table>` +
+    `<p style="margin:16px 0 4px;color:#6b7280">Details</p>` +
+    `<p style="margin:0 0 8px">${escapeHtml(shortDesc)}</p>` +
+    `<p style="margin:16px 0 0;color:#6b7280;font-size:13px">Log in to your dashboard to view the customer's contact details and send a quote.</p>`;
+  const html = wrap({
+    title: subject,
+    bodyHtml,
+    ctaUrl: dashboardUrl,
+    ctaLabel: "View lead & quote",
+    accent: "green",
+  });
+  const text =
+    `Hi ${ownerName},\n\n` +
+    `You have a new lead matched to ${businessName} on TradesmanFinder.\n\n` +
+    `Job: ${jobTitle}\nTrade: ${trade}\nArea: ${postcode}\nUrgency: ${urgencyLabel}\n` +
+    (budgetRange ? `Budget: ${budgetRange}\n` : "") +
+    `\nDetails: ${shortDesc}\n\n` +
+    `Log in to your dashboard to view contact details and send a quote: ${dashboardUrl}\n\n— TradesmanFinder`;
+  return send({ to, subject, html, text, tag: "new_lead" });
+}
