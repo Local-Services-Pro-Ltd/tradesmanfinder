@@ -5,7 +5,7 @@ import {
   insertJobSchema, insertQuoteSchema, insertReviewSchema, insertTradesmanSchema,
 } from "@shared/schema";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
-import { sendCardIssuedEmail, sendCardRescindedEmail } from "./mailer";
+import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail } from "./mailer";
 import type { Tradesman, TradesmanCard } from "@shared/schema";
 import { z } from "zod";
 import { publicFormGuard } from "./spam-guard";
