@@ -136,3 +136,6 @@ client/src/
   pages/                # all 16 route pages + static-pages.tsx
   App.tsx               # routes wrapped in <Router hook={useHashLocation}> + ThemeProvider
 ```
+
+
+<!-- Deploy trigger: 2026-06-05 — connect Git auto-deploy & ship footer rebrand to Local Services Pro Ltd. -->
