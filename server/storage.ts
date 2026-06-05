@@ -69,6 +69,8 @@ export interface IStorage {
   getReviews(): Promise<Review[]>;
   getReviewsByTradesman(tradesmanId: number): Promise<Review[]>;
   createReview(r: InsertReview): Promise<Review>;
+  getReviewById(id: number): Promise<Review | undefined>;
+updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
   // credits
   getCredits(tradesmanId: number): Promise<TradesmanCredits | undefined>;
   setCredits(tradesmanId: number, balance: number): Promise<TradesmanCredits>;
@@ -159,6 +161,8 @@ export class DatabaseStorage implements IStorage {
     const [row] = await db.insert(reviews).values({ ...r, createdAt: now() }).returning();
     return row;
   }
+  async getReviewById(id: number) { return one(db.select().from(reviews).where(eq(reviews.id, id))); }
+async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.update(reviews).set(patch).where(eq(reviews.id, id)).returning(); return row; }
 
   // ── credits ──
   async getCredits(tradesmanId: number) {
