@@ -434,15 +434,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const updatedCards = await storage.getCardsByTradesman(id);
     const summary = summarizeCards(updatedCards);
 
-    // Send notification email (fire-and-forget — never blocks the response).
+    // Send notification email and record the Resend result in the moderation log for audit/appeal traceability.
     if (tradesman.email) {
-      sendCardIssuedEmail({
+      const issuedNotify = await sendCardIssuedEmail({
         to: tradesman.email,
         businessName: tradesman.businessName,
         ownerName: tradesman.ownerName || tradesman.businessName,
         card: created,
         suspendedUntil: summary.suspendedUntil,
-      }).catch((err) => console.error("[mailer] card-issued send failed:", err?.message));
+      });       await storage.logModeration({ tradesmanId: id, cardId: created.id, action: "notify", cardType, reason: issuedNotify.ok ? `Card-issued email sent (Resend id: ${issuedNotify.id})` : `Card-issued email FAILED: ${issuedNotify.error}`, adminId });       if (!issuedNotify.ok) console.error("[mailer] card-issued send failed:", issuedNotify.error);
     }
 
     res.status(201).json({ card: created, summary });
@@ -474,12 +474,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     // Notify the tradesman that the card has been rescinded.
     const tm = await storage.getTradesmanById(card.tradesmanId);
     if (tm?.email && updated) {
-      sendCardRescindedEmail({
+      const rescindNotify = await sendCardRescindedEmail({
         to: tm.email,
         businessName: tm.businessName,
         ownerName: tm.ownerName || tm.businessName,
         card: updated,
-      }).catch((err) => console.error("[mailer] card-rescinded send failed:", err?.message));
+      });       await storage.logModeration({ tradesmanId: card.tradesmanId, cardId, action: "notify", cardType: card.cardType, reason: rescindNotify.ok ? `Card-rescinded email sent (Resend id: ${rescindNotify.id})` : `Card-rescinded email FAILED: ${rescindNotify.error}`, adminId });       if (!rescindNotify.ok) console.error("[mailer] card-rescinded send failed:", rescindNotify.error);
     }
 
     res.json(updated);
