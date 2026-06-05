@@ -350,10 +350,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json({ cards: safe, summary: summarizeCards(cards) });
   });
 
-  // Admin: list moderation log (all actions)
+  // Admin: list moderation log (all actions; optional ?action= filter, e.g. ?action=notify for email-delivery records)
   app.get("/api/admin/moderation/log", async (req, res) => {
     if (!requireAdmin(req, res)) return;
-    const log = await storage.getModerationLog(200);
+    const action = req.query.action ? String(req.query.action) : undefined; const all = await storage.getModerationLog(200); const log = action ? all.filter((e) => e.action === action) : all;
     res.json(log);
   });
 
