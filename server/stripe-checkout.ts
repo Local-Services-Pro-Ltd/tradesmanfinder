@@ -59,8 +59,14 @@ export async function createLeadPackCheckoutSession(
   const params: Stripe.Checkout.SessionCreateParams = {
     mode: "payment",
     line_items: [{ price: input.priceId, quantity: 1 }],
-    success_url: `${APP_BASE_URL}/#/dashboard?id=${input.tradesmanId}&purchase=success`,
-    cancel_url: `${APP_BASE_URL}/#/dashboard?id=${input.tradesmanId}&purchase=cancel`,
+    // Stripe redirects via HTTP 303, which historically strips URL fragments
+    // (#/...). Our SPA uses HashRouter, so a bare /#/dashboard?... target
+    // intermittently lost its hash in browsers and produced a 404. To make this
+    // deterministic, we route Stripe back to a server-side bounce endpoint
+    // that issues a 302 to the proper hash-routed URL on the client. The 302
+    // preserves the hash fragment reliably across all browsers we tested.
+    success_url: `${APP_BASE_URL}/checkout/return?id=${input.tradesmanId}&result=success&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${APP_BASE_URL}/checkout/return?id=${input.tradesmanId}&result=cancel`,
     client_reference_id: String(input.tradesmanId),
     metadata: {
       tradesman_id: String(input.tradesmanId),

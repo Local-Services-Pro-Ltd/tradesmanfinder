@@ -328,6 +328,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // ── Stripe Checkout return bounce ──
+  // Stripe's 303 redirect to a hash-routed URL (/#/dashboard?...) intermittently
+  // drops the fragment in some browsers, landing the user on a 404. To work
+  // around that, Checkout sends users here first, and we 302 them onto the
+  // canonical hash route with the query string preserved.
+  app.get("/checkout/return", (req, res) => {
+    const id = String(req.query.id ?? "").replace(/[^0-9]/g, "");
+    const result = req.query.result === "cancel" ? "cancel" : "success";
+    if (!id) {
+      res.redirect(302, "/#/");
+      return;
+    }
+    res.redirect(302, `/#/dashboard?id=${id}&purchase=${result}`);
+  });
+
   // ── Stripe webhook (PR-E2) ──
   // POST /api/stripe/webhook — receives signed events from Stripe. The
   // signature is verified against req.rawBody (attached by express.json's

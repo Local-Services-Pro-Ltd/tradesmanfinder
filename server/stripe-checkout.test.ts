@@ -52,8 +52,11 @@ describe("createLeadPackCheckoutSession", () => {
     expect(params.line_items).toEqual([{ price: "price_pack5", quantity: 1 }]);
     expect(params.client_reference_id).toBe("42");
     expect(params.metadata).toEqual({ tradesman_id: "42", product_kind: "lead_pack_5" });
-    expect(params.success_url).toContain("/dashboard?id=42&purchase=success");
-    expect(params.cancel_url).toContain("/dashboard?id=42&purchase=cancel");
+    // Stripe's 303 redirect strips the hash fragment in some browsers, so we
+    // route through a server-side bounce that 302's onto the hash route.
+    expect(params.success_url).toContain("/checkout/return?id=42&result=success");
+    expect(params.success_url).toContain("session_id={CHECKOUT_SESSION_ID}");
+    expect(params.cancel_url).toContain("/checkout/return?id=42&result=cancel");
     expect(params.customer_email).toBe("trade@example.com");
     expect(params.customer_creation).toBe("always");
     expect(params.customer).toBeUndefined();
