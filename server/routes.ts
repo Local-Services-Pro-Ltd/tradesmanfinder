@@ -185,6 +185,38 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
       if (matched.length > 0) await storage.updateJob(job.id, { status: "matched" });
 
+      // Notify matched tradespeople. One-shot lookups for trade name + area name
+      // outside the loop avoid N+1 queries. Failures are logged but never block
+      // the response — the homeowner's job has already been created.
+      if (ranked.length > 0) {
+        const [allCategories, allAreas] = await Promise.all([
+          storage.getCategories(),
+          storage.getAreas(),
+        ]);
+        const tradeName = allCategories.find((c) => c.id === job.categoryId)?.name ?? "General trade";
+        const areaName = job.areaId != null ? allAreas.find((a) => a.id === job.areaId)?.name : undefined;
+        const locationLabel = areaName ? `${areaName} (${job.postcode})` : job.postcode;
+        await Promise.allSettled(ranked.map(async (t) => {
+          if (!t.email) return;
+          const result = await sendNewLeadEmail({
+            to: t.email,
+            businessName: t.businessName,
+            ownerName: t.ownerName || t.businessName,
+            jobTitle: job.title,
+            postcode: locationLabel,
+            trade: tradeName,
+            urgency: job.urgency,
+            budgetRange: job.budgetRange ?? "",
+            description: job.description,
+          });
+          if (!result.ok) {
+            console.error(`[mailer] new-lead send failed for tradesman ${t.id} (${t.email}):`, result.error);
+          } else {
+            console.log(`[mailer] new-lead sent to tradesman ${t.id} (Resend id: ${result.id})`);
+          }
+        }));
+      }
+
       const matchedTradesmen = ranked.map((t) => ({ id: t.id, businessName: t.businessName, slug: t.slug, ratingAverage: t.ratingAverage, responseTimeMinutes: t.responseTimeMinutes }));
       res.status(201).json({ job: await storage.getJobById(job.id), matched: matchedTradesmen });
     } catch (e) {
