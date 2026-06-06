@@ -309,18 +309,191 @@ export const insertPaymentsLogSchema = createInsertSchema(paymentsLog).omit({ id
 export type InsertPaymentsLog = z.infer<typeof insertPaymentsLogSchema>;
 export type PaymentsLogEntry = typeof paymentsLog.$inferSelect;
 
+/* ──────────────────────────────────────────────
+   AUTH — magic-link tokens & sessions  (PR-A1a)
+
+   We deliberately do NOT enforce Postgres-level RLS on these tables: the app
+   accesses them via a privileged service connection (DATABASE_URL), not via
+   the Supabase anon key. All access is gated in `server/auth.ts`.
+
+   `magic_link_tokens` stores a SHA-256 hash of the bearer token; the raw
+   token is only ever sent to the user's email and never persisted. One-time
+   use: a token's `consumed_at` is set on successful /verify, and a row with
+   `consumed_at != null` is rejected on re-presentation.
+
+   `sessions` holds opaque cookie session ids. The cookie value is the
+   bcrypt-quality random `id` itself (high-entropy, unguessable); we look it
+   up directly. Sliding expiration: every authenticated request bumps
+   `expires_at` so an active tradesperson stays signed in for 30 days from
+   last use, but inactivity for 30 days logs them out.
+   ────────────────────────────────────────────── */
+export const magicLinkTokens = pgTable("magic_link_tokens", {
+  id: serial("id").primaryKey(),
+  tokenHash: text("token_hash").notNull().unique(), // sha256 hex of the random token
+  email: text("email").notNull(), // lowercased; auth target — may not yet have a tradesman row
+  tradesmanId: integer("tradesman_id"), // null when this token is for a future sign-up
+  purpose: text("purpose").notNull(), // 'sign_in' | 'sign_up'
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(), // unix ms
+  consumedAt: bigint("consumed_at", { mode: "number" }), // unix ms; null until first successful verify
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  requestIp: text("request_ip"),
+  requestUserAgent: text("request_user_agent"),
+});
+export const insertMagicLinkTokenSchema = createInsertSchema(magicLinkTokens).omit({ id: true, createdAt: true });
+export type InsertMagicLinkToken = z.infer<typeof insertMagicLinkTokenSchema>;
+export type MagicLinkToken = typeof magicLinkTokens.$inferSelect;
+
+export const sessions = pgTable("sessions", {
+  // 256-bit random hex (cookie value). PRIMARY KEY because it's the lookup key.
+  id: text("id").primaryKey(),
+  tradesmanId: integer("tradesman_id").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(), // sliding; refreshed on each request
+  lastSeenAt: bigint("last_seen_at", { mode: "number" }).notNull(),
+  createdIp: text("created_ip"),
+  createdUserAgent: text("created_user_agent"),
+});
+export const insertSessionSchema = createInsertSchema(sessions).omit({ createdAt: true, lastSeenAt: true });
+export type InsertSession = z.infer<typeof insertSessionSchema>;
+export type Session = typeof sessions.$inferSelect;
+
+/* ─────────────────────────────────────────────
+   PARTNER PROGRAMME (PR-P1) — #22
+
+   Four tables that together let us monetise placements to commercial
+   verticals (builders' merchants, EPC providers, finance/BNPL, etc).
+
+   Key design decision: `commercial_model` and `rate_pence` live on
+   `partner_placements`, NOT on `partners`. One partner may have multiple
+   placements each with its own pricing model (e.g. £200/mo sponsored on
+   the category footer AND £15/lead qualified on the job-confirmation
+   page). Putting the model on `partners` would force us to create
+   multiple partner rows for one real partner — messy and re-migration
+   risk within v1.5.
+
+   No event sampling in v1: `partner_events` records every impression /
+   click / lead. Partner-facing stats page would otherwise need a "these
+   numbers are 10x estimates" disclaimer that invites pricing disputes.
+   At MVP traffic (<100k page views/month) the table grows by tens of
+   thousands per month, not millions; revisit if/when it crosses 5M rows.
+
+   RLS posture matches the rest of the codebase: enabled, no policies.
+   App uses service-role DATABASE_URL connection; the anon browser key
+   is never used for partner tables.
+   ────────────────────────────────────────────── */
+
+export const partners = pgTable("partners", {
+  id: serial("id").primaryKey(),
+  slug: text("slug").notNull().unique(), // url-safe, used in /p/<slug>/stats
+  name: text("name").notNull(),
+  vertical: text("vertical").notNull(),  // 'insurance' | 'epc' | 'solicitor' | 'builders_merchant' | 'finance' | 'other'
+  status: text("status").notNull().default("inactive"), // 'inactive' | 'pilot' | 'active' | 'paused' | 'terminated'
+  billingEmail: text("billing_email"),
+  billingContact: text("billing_contact"),
+  stripeCustomerId: text("stripe_customer_id"), // null until first invoice raised
+  notes: text("notes"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+});
+export const insertPartnerSchema = createInsertSchema(partners).omit({ id: true, createdAt: true });
+export type InsertPartner = z.infer<typeof insertPartnerSchema>;
+export type Partner = typeof partners.$inferSelect;
+
+export const partnerPlacements = pgTable("partner_placements", {
+  id: serial("id").primaryKey(),
+  partnerId: integer("partner_id").notNull(),
+  surface: text("surface").notNull(), // 'category_footer' | 'area_footer' | 'job_confirmation' | 'dashboard_sidebar' | 'lead_email_footer' | 'partners_page'
+  commercialModel: text("commercial_model").notNull(), // 'sponsored' | 'lead_qualified' | 'lead_booked' | 'rev_share'
+  // Pence; semantics depend on commercialModel:
+  //   sponsored        => monthly flat rate
+  //   lead_qualified   => per qualified-lead rate
+  //   lead_booked      => per booked-lead rate
+  //   rev_share        => basis points (e.g. 1000 = 10%); cap held in `rateCapPence`
+  ratePence: integer("rate_pence").notNull(),
+  rateCapPence: integer("rate_cap_pence"), // optional cap for rev_share
+  categoryFilter: text("category_filter").notNull().default("[]"), // JSON array of category ids; [] means all
+  areaFilter: text("area_filter").notNull().default("[]"),         // JSON array of area ids; [] means all
+  priority: integer("priority").notNull().default(100), // lower number = renders first within a surface
+  activeFrom: bigint("active_from", { mode: "number" }).notNull(),
+  activeTo: bigint("active_to", { mode: "number" }), // null = open-ended
+  creativeHtml: text("creative_html"), // sanitised at render time, not at store time
+  creativeUrl: text("creative_url"),   // destination URL for clicks
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+});
+export const insertPartnerPlacementSchema = createInsertSchema(partnerPlacements).omit({ id: true, createdAt: true });
+export type InsertPartnerPlacement = z.infer<typeof insertPartnerPlacementSchema>;
+export type PartnerPlacement = typeof partnerPlacements.$inferSelect;
+
+export const partnerEvents = pgTable("partner_events", {
+  id: serial("id").primaryKey(),
+  partnerId: integer("partner_id").notNull(),
+  placementId: integer("placement_id").notNull(),
+  eventType: text("event_type").notNull(), // 'impression' | 'click' | 'lead_passed' | 'lead_outcome'
+  jobId: integer("job_id"),                 // nullable; populated for lead_* event types
+  tradesmanId: integer("tradesman_id"),     // nullable; populated for lead_outcome
+  // Idempotency key prevents double-counting. Examples:
+  //   impression:<request_id>:<placement_id>
+  //   click:<placement_id>:<request_id>
+  //   lead:<job_id>:<partner_id>
+  //   outcome:<job_id>:<partner_id>:<outcome>
+  idempotencyKey: text("idempotency_key").notNull().unique(),
+  occurredAt: bigint("occurred_at", { mode: "number" }).notNull(),
+  metadata: text("metadata"), // JSON; for lead_outcome carries outcome enum + notes
+});
+export const insertPartnerEventSchema = createInsertSchema(partnerEvents).omit({ id: true });
+export type InsertPartnerEvent = z.infer<typeof insertPartnerEventSchema>;
+export type PartnerEvent = typeof partnerEvents.$inferSelect;
+
+export const partnerInvoices = pgTable("partner_invoices", {
+  id: serial("id").primaryKey(),
+  partnerId: integer("partner_id").notNull(),
+  periodStart: bigint("period_start", { mode: "number" }).notNull(),
+  periodEnd: bigint("period_end", { mode: "number" }).notNull(),
+  lineItems: text("line_items").notNull(), // JSON array of {placement_id, event_type, count, rate_pence, subtotal_pence}
+  totalPence: integer("total_pence").notNull(),
+  status: text("status").notNull().default("draft"), // 'draft' | 'sent' | 'paid' | 'void'
+  stripeInvoiceId: text("stripe_invoice_id"), // populated after manual Stripe Invoice raised
+  generatedAt: bigint("generated_at", { mode: "number" }).notNull(),
+  sentAt: bigint("sent_at", { mode: "number" }),
+  paidAt: bigint("paid_at", { mode: "number" }),
+});
+export const insertPartnerInvoiceSchema = createInsertSchema(partnerInvoices).omit({ id: true, generatedAt: true });
+export type InsertPartnerInvoice = z.infer<typeof insertPartnerInvoiceSchema>;
+export type PartnerInvoice = typeof partnerInvoices.$inferSelect;
+
+// Enum exports for runtime validation in admin endpoints (landing in PR-P3).
+export const PARTNER_VERTICALS = [
+  "insurance", "epc", "solicitor", "builders_merchant", "finance", "other",
+] as const;
+export const PARTNER_STATUSES = [
+  "inactive", "pilot", "active", "paused", "terminated",
+] as const;
+export const PARTNER_SURFACES = [
+  "category_footer", "area_footer", "job_confirmation",
+  "dashboard_sidebar", "lead_email_footer", "partners_page",
+] as const;
+export const PARTNER_COMMERCIAL_MODELS = [
+  "sponsored", "lead_qualified", "lead_booked", "rev_share",
+] as const;
+export const PARTNER_EVENT_TYPES = [
+  "impression", "click", "lead_passed", "lead_outcome",
+] as const;
+export const PARTNER_INVOICE_STATUSES = [
+  "draft", "sent", "paid", "void",
+] as const;
+
 /* ─────────────────────────────────────────────
    PARTNER ENQUIRIES (PR-P2) — #22
 
    Inbound B2B enquiries from the /partners marketing page. Deliberately
-   lives separate from `partners` (added in PR-P1) because most enquiries
-   never become partners; conversion happens via PR-P3 admin tooling.
+   lives separate from `partners` (PR-P1) because most enquiries never
+   become partners; conversion happens via PR-P3 admin tooling.
 
    PR ordering: PR-P2 must merge AFTER PR-P1 in production because the
    partner_enquiries SQL migration declares a FK on partners.id (added in
-   PR-P1's migration). The drizzle schema file does not import `partners`
-   here, so this TypeScript file compiles independently — the ordering
-   constraint is at the database layer only.
+   PR-P1's migration). PR-P1 is now on main, so the ordering constraint
+   is satisfied. The drizzle schema file does not import `partners` here,
+   so this TypeScript file compiles independently — the FK lives only at
+   the database layer.
    ───────────────────────────────────────────── */
 export const partnerEnquiries = pgTable("partner_enquiries", {
   id: serial("id").primaryKey(),
@@ -350,4 +523,3 @@ export const PARTNER_ENQUIRY_VERTICALS = [
 export const PARTNER_ENQUIRY_STATUSES = [
   "new", "contacted", "qualified", "won", "lost",
 ] as const;
-
