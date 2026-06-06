@@ -7,6 +7,7 @@
 //                     Falls back to "TradesmanFinder <onboarding@resend.dev>" if unset.
 
 import type { TradesmanCard } from "@shared/schema";
+import { redactPII } from "./redact-pii";
 
 const RESEND_API = "https://api.resend.com/emails";
 const PUBLIC_URL = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
@@ -249,7 +250,14 @@ export async function sendNewLeadEmail(opts: {
   const { to, businessName, ownerName, jobTitle, postcode, trade, urgency, budgetRange, description } = opts;
   const dashboardUrl = `${PUBLIC_URL}/dashboard`;
   const subject = `New lead: ${jobTitle} in ${postcode}`;
-  const shortDesc = description.length > 280 ? description.slice(0, 280) + "\u2026" : description;
+  // Strip PII (phone / email / full postcode / long digit runs) before the body
+  // ever leaves our server. Full description is still available in-dashboard
+  // once the tradesperson signs in.
+  const { text: safeDesc, redactions } = redactPII(description);
+  const shortDesc = safeDesc.length > 280 ? safeDesc.slice(0, 280) + "\u2026" : safeDesc;
+  if (redactions > 0) {
+    console.log(`[mailer] new_lead: redacted ${redactions} PII item(s) from description before send`);
+  }
   const urgencyLabel = urgency.charAt(0).toUpperCase() + urgency.slice(1);
   const budgetLine = budgetRange ? `<tr><td style="padding:4px 0;color:#6b7280">Budget</td><td style="padding:4px 0;font-weight:600">${escapeHtml(budgetRange)}</td></tr>` : "";
   const bodyHtml =
