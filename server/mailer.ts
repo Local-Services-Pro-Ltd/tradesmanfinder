@@ -7,6 +7,8 @@
 //                     Falls back to "TradesmanFinder <onboarding@resend.dev>" if unset.
 
 import type { TradesmanCard } from "@shared/schema";
+import { emailLog } from "@shared/schema";
+import { db } from "./storage";
 
 const RESEND_API = "https://api.resend.com/emails";
 const PUBLIC_URL = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
@@ -25,40 +27,113 @@ interface SendArgs {
   html: string;
   text: string;
   tag?: string; // analytics label
+  // Persisted to email_log for audit + admin debugging. Optional only to keep
+  // back-compat with callers that have not been updated yet — new callers
+  // should always populate this.
+  log?: {
+    template: string; // e.g. 'new_lead', 'card_warning_issued'
+    jobId?: number | null;
+    tradesmanId?: number | null;
+    partnerId?: number | null;
+    redactionCount?: number;
+  };
 }
 
-async function send({ to, subject, html, text, tag }: SendArgs): Promise<{ ok: boolean; id?: string; error?: string }> {
+// Persist a row to email_log. Never throws — logging must not block sends.
+async function persistEmailLog(args: {
+  template: string;
+  to: string;
+  from: string;
+  subject: string;
+  resendId: string | null;
+  status: "sent" | "failed";
+  errorMessage: string | null;
+  jobId?: number | null;
+  tradesmanId?: number | null;
+  partnerId?: number | null;
+  redactionCount?: number;
+}): Promise<void> {
+  try {
+    await db.insert(emailLog).values({
+      template: args.template,
+      toAddress: args.to,
+      fromAddress: args.from,
+      subject: args.subject,
+      resendId: args.resendId,
+      status: args.status,
+      errorMessage: args.errorMessage,
+      jobId: args.jobId ?? null,
+      tradesmanId: args.tradesmanId ?? null,
+      partnerId: args.partnerId ?? null,
+      redactionCount: args.redactionCount ?? 0,
+      createdAt: Date.now(),
+      deliveredAt: null,
+    });
+  } catch (err: any) {
+    // Audit log failure is non-fatal. Surface in server logs but do not
+    // propagate — the email itself may have succeeded.
+    console.error(`[mailer] email_log insert failed for ${args.to}:`, err?.message);
+  }
+}
+
+async function send({ to, subject, html, text, tag, log }: SendArgs): Promise<{ ok: boolean; id?: string; error?: string }> {
   const key = process.env.RESEND_API_KEY;
+  const from = getFrom();
   if (!key) {
     console.log(`[mailer] RESEND_API_KEY not set — would send to ${to}: ${subject}`);
+    if (log) {
+      await persistEmailLog({
+        template: log.template, to, from, subject,
+        resendId: null, status: "failed", errorMessage: "no_api_key",
+        jobId: log.jobId, tradesmanId: log.tradesmanId, partnerId: log.partnerId,
+        redactionCount: log.redactionCount,
+      });
+    }
     return { ok: false, error: "no_api_key" };
   }
   try {
-    const body: Record<string, unknown> = {
-      from: getFrom(),
-      to: [to],
-      subject,
-      html,
-      text,
-    };
+    const body: Record<string, unknown> = { from, to: [to], subject, html, text };
     if (tag) body.tags = [{ name: "category", value: tag }];
 
     const res = await fetch(RESEND_API, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
-      },
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     const data: any = await res.json().catch(() => ({}));
     if (!res.ok) {
       console.error(`[mailer] Resend ${res.status} for ${to}:`, data);
+      if (log) {
+        await persistEmailLog({
+          template: log.template, to, from, subject,
+          resendId: null, status: "failed",
+          errorMessage: data?.message || `http_${res.status}`,
+          jobId: log.jobId, tradesmanId: log.tradesmanId, partnerId: log.partnerId,
+          redactionCount: log.redactionCount,
+        });
+      }
       return { ok: false, error: data?.message || `http_${res.status}` };
+    }
+    if (log) {
+      await persistEmailLog({
+        template: log.template, to, from, subject,
+        resendId: data?.id || null, status: "sent", errorMessage: null,
+        jobId: log.jobId, tradesmanId: log.tradesmanId, partnerId: log.partnerId,
+        redactionCount: log.redactionCount,
+      });
     }
     return { ok: true, id: data?.id };
   } catch (err: any) {
     console.error(`[mailer] send failed for ${to}:`, err?.message);
+    if (log) {
+      await persistEmailLog({
+        template: log.template, to, from, subject,
+        resendId: null, status: "failed",
+        errorMessage: err?.message || "send_failed",
+        jobId: log.jobId, tradesmanId: log.tradesmanId, partnerId: log.partnerId,
+        redactionCount: log.redactionCount,
+      });
+    }
     return { ok: false, error: err?.message || "send_failed" };
   }
 }
@@ -182,7 +257,17 @@ export async function sendCardIssuedEmail(opts: {
     accent: accentMap[cardType],
   });
 
-  return send({ to, subject: subjectMap[cardType], html, text, tag: `card_${cardType}_issued` });
+  return send({
+    to,
+    subject: subjectMap[cardType],
+    html,
+    text,
+    tag: `card_${cardType}_issued`,
+    log: {
+      template: `card_${cardType}_issued`,
+      tradesmanId: card.tradesmanId,
+    },
+  });
 }
 
 // ── Card-rescinded email ──
@@ -232,7 +317,17 @@ export async function sendCardRescindedEmail(opts: {
     accent: "green",
   });
 
-  return send({ to, subject, html, text, tag: `card_${cardType}_rescinded` });
+  return send({
+    to,
+    subject,
+    html,
+    text,
+    tag: `card_${cardType}_rescinded`,
+    log: {
+      template: `card_${cardType}_rescinded`,
+      tradesmanId: card.tradesmanId,
+    },
+  });
 }
 
 export async function sendNewLeadEmail(opts: {
@@ -245,6 +340,9 @@ export async function sendNewLeadEmail(opts: {
   urgency: string;
   budgetRange: string;
   description: string;
+  jobId?: number;
+  tradesmanId?: number;
+  redactionCount?: number;
 }) {
   const { to, businessName, ownerName, jobTitle, postcode, trade, urgency, budgetRange, description } = opts;
   const dashboardUrl = `${PUBLIC_URL}/dashboard`;
@@ -279,5 +377,17 @@ export async function sendNewLeadEmail(opts: {
     (budgetRange ? `Budget: ${budgetRange}\n` : "") +
     `\nDetails: ${shortDesc}\n\n` +
     `Log in to your dashboard to view contact details and send a quote: ${dashboardUrl}\n\n— TradesmanFinder`;
-  return send({ to, subject, html, text, tag: "new_lead" });
+  return send({
+    to,
+    subject,
+    html,
+    text,
+    tag: "new_lead",
+    log: {
+      template: "new_lead",
+      jobId: opts.jobId ?? null,
+      tradesmanId: opts.tradesmanId ?? null,
+      redactionCount: opts.redactionCount ?? 0,
+    },
+  });
 }
