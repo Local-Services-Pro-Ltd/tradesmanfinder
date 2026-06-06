@@ -20,6 +20,24 @@ import Admin from "@/pages/admin";
 import AdminModeration from "@/pages/admin-moderation";
 import { About, Contact, Terms, Privacy, Faq } from "@/pages/static-pages";
 
+// wouter's useHashLocation returns the raw hash as the path (e.g. for
+// `#/dashboard?id=42` it returns `/dashboard?id=42`). The <Route path="/dashboard">
+// matcher then fails because it sees the query as part of the path, falling
+// through to NotFound. We wrap the hook to strip the query string before the
+// matcher runs. The full hash (including the query) remains in
+// `window.location.hash`, so page-level code that reads search params from the
+// hash (e.g. dashboard's getInitialId(), Stripe Checkout `?purchase=success`)
+// continues to work unchanged.
+const useHashLocationStripQuery: typeof useHashLocation = ((opts) => {
+  const [path, navigate] = useHashLocation(opts);
+  const qIdx = path.indexOf("?");
+  const cleanPath = qIdx === -1 ? path : path.slice(0, qIdx);
+  return [cleanPath, navigate] as const;
+}) as typeof useHashLocation;
+// Preserve the static `.hrefs` helper so wouter's <Link> still produces `#/...` URLs.
+(useHashLocationStripQuery as unknown as { hrefs: (h: string) => string }).hrefs =
+  (useHashLocation as unknown as { hrefs: (h: string) => string }).hrefs;
+
 function AppRouter() {
   return (
     <Switch>
@@ -51,7 +69,7 @@ function App() {
       <ThemeProvider>
         <TooltipProvider>
           <Toaster />
-          <Router hook={useHashLocation}>
+          <Router hook={useHashLocationStripQuery}>
             <AppRouter />
           </Router>
         </TooltipProvider>
