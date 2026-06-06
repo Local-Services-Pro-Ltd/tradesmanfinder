@@ -9,6 +9,9 @@ import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail } from ".
 import type { Tradesman, TradesmanCard } from "@shared/schema";
 import { z } from "zod";
 import { publicFormGuard } from "./spam-guard";
+import { createLeadPackCheckoutSession } from "./stripe-checkout";
+import { handleStripeWebhook } from "./stripe-webhook";
+import { stripeIsConfigured } from "./stripe";
 
 // Attach a `cardSummary` field to each tradesman so the UI can render badges
 // and the API consumers can know who's suspended/banned.
@@ -283,6 +286,54 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const updated = await storage.setCredits(tradesmanId, newBalance);
     await storage.createCreditTransaction({ tradesmanId, amount: credits, reason: reason || `Bought ${credits} credits`, relatedJobId: null });
     res.json({ balance: updated.balance });
+  });
+
+  // ── Stripe Checkout for lead packs (PR-E2) ──
+  // Client posts a tradesmanId + Stripe priceId, we return a hosted-checkout
+  // URL to redirect to. Webhook handles credit grant after payment completes.
+  app.post("/api/checkout/lead-pack", async (req, res) => {
+    if (!stripeIsConfigured()) {
+      res.status(503).json({ message: "Payments are temporarily unavailable. Please try again shortly." });
+      return;
+    }
+    const schema = z.object({
+      tradesmanId: z.number().int().positive(),
+      priceId: z.string().min(1),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ message: "Invalid request", errors: parsed.error.errors });
+      return;
+    }
+    const { tradesmanId, priceId } = parsed.data;
+
+    const tradesman = await storage.getTradesmanById(tradesmanId);
+    if (!tradesman) {
+      res.status(404).json({ message: "Tradesman not found" });
+      return;
+    }
+    try {
+      const result = await createLeadPackCheckoutSession({
+        tradesmanId,
+        tradesmanEmail: tradesman.email,
+        stripeCustomerId: tradesman.stripeCustomerId ?? null,
+        priceId,
+      });
+      res.json({ url: result.url, sessionId: result.sessionId, productKind: result.productKind });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Checkout failed";
+      // Caller-error pricing mistakes → 400; everything else → 502 (Stripe).
+      const isBadPrice = /not a valid lead pack/i.test(message);
+      res.status(isBadPrice ? 400 : 502).json({ message });
+    }
+  });
+
+  // ── Stripe webhook (PR-E2) ──
+  // POST /api/stripe/webhook — receives signed events from Stripe. The
+  // signature is verified against req.rawBody (attached by express.json's
+  // verify hook in server/index.ts).
+  app.post("/api/stripe/webhook", (req, res) => {
+    void handleStripeWebhook(req, res);
   });
 
   // ── Reviews create ──
