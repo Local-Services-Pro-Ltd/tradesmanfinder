@@ -10,6 +10,7 @@ import {
   tradesmanCards,
   moderationLog,
   paymentsLog,
+  authTokens,
 } from "@shared/schema";
 import type {
   Category, InsertCategory,
@@ -23,10 +24,11 @@ import type {
   TradesmanCard, InsertTradesmanCard,
   ModerationLogEntry,
   InsertPaymentsLog, PaymentsLogEntry,
+  AuthToken, InsertAuthToken,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import { eq, desc, sql, and, isNull } from "drizzle-orm";
+import { eq, desc, sql, and, isNull, gte } from "drizzle-orm";
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -82,6 +84,11 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
   // payments_log (Stripe audit trail)
   createPaymentsLog(entry: InsertPaymentsLog): Promise<PaymentsLogEntry>;
   getPaymentsLogByTradesman(tradesmanId: number, limit?: number): Promise<PaymentsLogEntry[]>;
+  // auth_tokens (magic-link sign-in)
+  createAuthToken(entry: InsertAuthToken): Promise<AuthToken>;
+  getAuthTokenByHash(tokenHash: string): Promise<AuthToken | undefined>;
+  consumeAuthToken(id: number, consumedAt: Date): Promise<AuthToken | undefined>;
+  countAuthTokensForTradesmanSince(tradesmanId: number, since: Date): Promise<number>;
 }
 
 const now = () => Date.now();
@@ -197,6 +204,31 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
   }
   async getPaymentsLogByTradesman(tradesmanId: number, limit = 50): Promise<PaymentsLogEntry[]> {
     return db.select().from(paymentsLog).where(eq(paymentsLog.tradesmanId, tradesmanId)).orderBy(desc(paymentsLog.createdAt)).limit(limit);
+  }
+
+  // ── auth_tokens ──
+  async createAuthToken(entry: InsertAuthToken): Promise<AuthToken> {
+    const [row] = await db.insert(authTokens).values(entry).returning();
+    return row;
+  }
+  async getAuthTokenByHash(tokenHash: string): Promise<AuthToken | undefined> {
+    return one(db.select().from(authTokens).where(eq(authTokens.tokenHash, tokenHash)));
+  }
+  async consumeAuthToken(id: number, consumedAt: Date): Promise<AuthToken | undefined> {
+    // Only mark a token consumed if it has not already been consumed. The
+    // isNull guard makes consumption atomic-ish at the row level so a replayed
+    // verify request can't double-spend a token.
+    const [row] = await db.update(authTokens)
+      .set({ consumedAt })
+      .where(and(eq(authTokens.id, id), isNull(authTokens.consumedAt)))
+      .returning();
+    return row;
+  }
+  async countAuthTokensForTradesmanSince(tradesmanId: number, since: Date): Promise<number> {
+    const result = await db.select({ count: sql<number>`count(*)::int` })
+      .from(authTokens)
+      .where(and(eq(authTokens.tradesmanId, tradesmanId), gte(authTokens.createdAt, since)));
+    return result[0]?.count ?? 0;
   }
 
   async countRows(table: "tradesmen" | "jobs" | "reviews") {

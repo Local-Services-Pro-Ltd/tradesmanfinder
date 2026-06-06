@@ -12,6 +12,10 @@ import { publicFormGuard } from "./spam-guard";
 import { createLeadPackCheckoutSession } from "./stripe-checkout";
 import { handleStripeWebhook } from "./stripe-webhook";
 import { stripeIsConfigured } from "./stripe";
+import {
+  requestLinkHandler, verifyHandler, logoutHandler, requireAuth, meHandler,
+  deprecatedLoginHandler,
+} from "./auth";
 
 // Attach a `cardSummary` field to each tradesman so the UI can render badges
 // and the API consumers can know who's suspended/banned.
@@ -41,6 +45,28 @@ function slugify(s: string) {
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   migrate();
+
+  // ════ AUTH (PR-A1: magic-link sign-in) ════
+  //
+  // AUTH AUDIT — what requireAuth protects vs. what stays public:
+  //   PROTECTED (require a valid session cookie):
+  //     - PATCH /api/tradesmen/:id        (edit own profile)
+  //     - GET   /api/dashboard/:id         (private leads, credits, contact info)
+  //     - POST  /api/checkout/lead-pack    (spends money / creates Stripe session)
+  //     - POST  /api/credits/buy           (dev credit grant)
+  //     - GET   /api/auth/me               (current user bootstrap)
+  //   PUBLIC (intentionally unauthenticated):
+  //     - POST  /api/jobs                  (homeowners submit jobs; not tradesmen)
+  //     - POST  /api/quotes, /api/reviews  (public submissions, spam-guarded)
+  //     - GET   /api/tradesmen, /by-slug, /:id, /:id/cards (public profile reads)
+  //     - GET   /api/categories, /api/areas, /api/reviews, /api/jobs, /api/stats
+  //     - POST  /api/stripe/webhook        (MUST stay public — Stripe signature verified, no cookie)
+  //     - /api/admin/*                     (guarded separately by x-admin-key)
+  //     - POST  /api/auth/request-link, GET /api/auth/verify, POST /api/auth/logout
+  app.post("/api/auth/request-link", (req, res) => { void requestLinkHandler(req, res); });
+  app.get("/api/auth/verify", (req, res) => { void verifyHandler(req, res); });
+  app.post("/api/auth/logout", (req, res) => { logoutHandler(req, res); });
+  app.get("/api/auth/me", requireAuth, (req, res) => { void meHandler(req, res); });
 
   // ── Categories ──
   app.get("/api/categories", async (_req, res) => {
@@ -98,17 +124,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (enriched.cardSummary.isPubliclyHidden && !isAdmin) return res.status(404).json({ message: "Tradesman not found" });
     res.json(enriched);
   });
-  // Pseudo-login by email — MVP shortcut, no real auth
-  // Blocks login for red-carded tradesmen.
-  app.get("/api/tradesmen/login/:email", async (req, res) => {
-    const t = await storage.getTradesmanByEmail(req.params.email);
-    if (!t) return res.status(404).json({ message: "No tradesman found with that email" });
-    const enriched = await attachCardSummary(t);
-    if (enriched.cardSummary.isLoginBlocked) {
-      return res.status(403).json({ message: "This account has been permanently banned and can no longer access the dashboard.", banned: true });
-    }
-    res.json(enriched);
-  });
+  // DEPRECATED: the old pseudo-login let anyone sign in as any
+  // tradesperson with just their email — no password, no verification. It is
+  // replaced by the magic-link flow (POST /api/auth/request-link). Returns 410
+  // Gone so any stale client surfaces a clear error instead of silently
+  // authenticating.
+  app.get("/api/tradesmen/login/:email", deprecatedLoginHandler);
 
   app.post("/api/tradesmen", publicFormGuard(), async (req, res) => {
     try {
@@ -133,7 +154,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.patch("/api/tradesmen/:id", async (req, res) => {
+  app.patch("/api/tradesmen/:id", requireAuth, async (req, res) => {
+    // A tradesperson may only edit their own profile.
+    if (req.tradesman!.id !== Number(req.params.id)) {
+      return res.status(403).json({ error: "forbidden" });
+    }
     const updated = await storage.updateTradesman(Number(req.params.id), req.body);
     if (!updated) return res.status(404).json({ message: "Tradesman not found" });
     res.json(updated);
@@ -251,10 +276,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Dashboard: leads (jobs matched to a tradesman) ──
-  app.get("/api/dashboard/:tradesmanId", async (req, res) => {
+  app.get("/api/dashboard/:tradesmanId", requireAuth, async (req, res) => {
     const id = Number(req.params.tradesmanId);
-    const tradesman = await storage.getTradesmanById(id);
-    if (!tradesman) return res.status(404).json({ message: "Tradesman not found" });
+    // Only the authenticated tradesperson may read their own dashboard.
+    if (req.tradesman!.id !== id) {
+      return res.status(403).json({ error: "forbidden" });
+    }
+    const tradesman = req.tradesman!;
     const myQuotes = await storage.getQuotesByTradesman(id);
     const leads = [];
     for (const q of myQuotes) {
@@ -279,8 +307,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Credits (fake Stripe — adds credits directly). TODO: real Stripe. ──
-  app.post("/api/credits/buy", async (req, res) => {
+  app.post("/api/credits/buy", requireAuth, async (req, res) => {
     const { tradesmanId, credits, reason } = req.body as { tradesmanId: number; credits: number; reason?: string };
+    if (req.tradesman!.id !== tradesmanId) {
+      return res.status(403).json({ error: "forbidden" });
+    }
     const existing = await storage.getCredits(tradesmanId);
     const newBalance = (existing?.balance ?? 0) + credits;
     const updated = await storage.setCredits(tradesmanId, newBalance);
@@ -291,7 +322,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // ── Stripe Checkout for lead packs (PR-E2) ──
   // Client posts a tradesmanId + Stripe priceId, we return a hosted-checkout
   // URL to redirect to. Webhook handles credit grant after payment completes.
-  app.post("/api/checkout/lead-pack", async (req, res) => {
+  app.post("/api/checkout/lead-pack", requireAuth, async (req, res) => {
     if (!stripeIsConfigured()) {
       res.status(503).json({ message: "Payments are temporarily unavailable. Please try again shortly." });
       return;
@@ -306,6 +337,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       return;
     }
     const { tradesmanId, priceId } = parsed.data;
+    // A tradesperson may only buy credits for their own account.
+    if (req.tradesman!.id !== tradesmanId) {
+      res.status(403).json({ error: "forbidden" });
+      return;
+    }
 
     const tradesman = await storage.getTradesmanById(tradesmanId);
     if (!tradesman) {

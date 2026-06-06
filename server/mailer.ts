@@ -331,6 +331,51 @@ export async function sendCardRescindedEmail(opts: {
   });
 }
 
+// ── Magic-link sign-in email ──
+// Sent by POST /api/auth/request-link when a tradesperson record exists for
+// the supplied email. The link carries a single-use 15-min token.
+export async function sendSignInLinkEmail(opts: {
+  to: string;
+  ownerName: string;
+  businessName: string;
+  verifyUrl: string;
+  tradesmanId?: number;
+}) {
+  const { to, ownerName, businessName, verifyUrl } = opts;
+  const subject = "Your TradesmanFinder sign-in link";
+  const bodyHtml =
+    `<p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">Hi ${escapeHtml(ownerName)},</p>` +
+    `<p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">` +
+    `Click the button below to sign in to your <strong>${escapeHtml(businessName)}</strong> dashboard on TradesmanFinder. ` +
+    `This link expires in <strong>15 minutes</strong> and can only be used once.</p>` +
+    `<p style="margin:18px 0 0;font-size:13px;line-height:1.55;color:#6b7280">` +
+    `If you didn't request this, you can safely ignore this email — no one can access your account without the link.</p>`;
+  const text =
+    `Hi ${ownerName},\n\n` +
+    `Click the link below to sign in to your ${businessName} dashboard on TradesmanFinder.\n` +
+    `This link expires in 15 minutes and can only be used once.\n\n` +
+    `${verifyUrl}\n\n` +
+    `If you didn't request this, you can safely ignore this email.\n\n— TradesmanFinder`;
+  const html = wrap({
+    title: subject,
+    bodyHtml,
+    ctaUrl: verifyUrl,
+    ctaLabel: "Sign in to your dashboard",
+    accent: "green",
+  });
+  return send({
+    to,
+    subject,
+    html,
+    text,
+    tag: "auth_sign_in_link",
+    log: {
+      template: "auth_sign_in_link",
+      tradesmanId: opts.tradesmanId ?? null,
+    },
+  });
+}
+
 export async function sendNewLeadEmail(opts: {
   to: string;
   businessName: string;

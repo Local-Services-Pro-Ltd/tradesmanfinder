@@ -6,15 +6,18 @@ import { StarRating } from "@/components/brand";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import type { DashboardData } from "@/lib/api-types";
+import type { DashboardData, Tradesman } from "@/lib/api-types";
 import { timeAgo } from "@/lib/api-types";
-import { Wallet, Inbox, Star, TrendingUp, CheckCircle2, Phone, Mail, Plus, LogIn, Zap, Gavel, AlertTriangle, Ban, Square, Info } from "lucide-react";
+import { Wallet, Inbox, Star, TrendingUp, CheckCircle2, Phone, Mail, Plus, Zap, Gavel, AlertTriangle, Ban, Square, Info, LogOut } from "lucide-react";
 import { CardBadge } from "@/components/card-badge";
+
+// Send the user to the magic-link login page (hash route).
+function goToLogin() {
+  window.location.hash = "#/login";
+}
 
 // Lead pack catalogue. The `priceEnvKey` matches a STRIPE_PRICE_LEAD_PACK_*
 // env var exposed to the client via Vite's VITE_ prefix. If the env var is
@@ -26,55 +29,52 @@ const PACKS = [
   { credits: 20, price: "£80", priceId: import.meta.env.VITE_STRIPE_PRICE_LEAD_PACK_20 as string | undefined },
 ];
 
-// Read ?id= from the hash query string (hash router keeps query after the path).
-function getInitialId(): number | null {
-  const hash = window.location.hash; // e.g. #/dashboard?id=2
-  const qIdx = hash.indexOf("?");
-  if (qIdx === -1) return null;
-  const params = new URLSearchParams(hash.slice(qIdx + 1));
-  const id = params.get("id");
-  return id ? Number(id) : null;
-}
-
 export default function Dashboard() {
   const { toast } = useToast();
-  const [tradesmanId, setTradesmanId] = useState<number | null>(getInitialId());
-  const [loginEmail, setLoginEmail] = useState("");
-  const [loggingIn, setLoggingIn] = useState(false);
   const [buying, setBuying] = useState<number | null>(null);
+
+  // Bootstrap the current user from the session cookie. On 401 (no/expired
+  // session) redirect to the magic-link login page.
+  const { data: me, isLoading: meLoading, isError: meError } = useQuery<{ tradesman: Tradesman }>({
+    queryKey: ["/api/auth/me"],
+    queryFn: async () => {
+      try {
+        return await (await apiRequest("GET", "/api/auth/me")).json();
+      } catch (err: any) {
+        if (typeof err?.message === "string" && err.message.startsWith("401")) {
+          goToLogin();
+        }
+        throw err;
+      }
+    },
+    retry: false,
+  });
+
+  const tradesmanId = me?.tradesman?.id ?? null;
 
   const { data, isLoading } = useQuery<DashboardData>({
     queryKey: ["/api/dashboard", tradesmanId],
-    queryFn: async () => (await apiRequest("GET", `/api/dashboard/${tradesmanId}`)).json(),
+    queryFn: async () => {
+      try {
+        return await (await apiRequest("GET", `/api/dashboard/${tradesmanId}`)).json();
+      } catch (err: any) {
+        if (typeof err?.message === "string" && err.message.startsWith("401")) {
+          goToLogin();
+        }
+        throw err;
+      }
+    },
     enabled: !!tradesmanId,
   });
 
-  const [bannedNotice, setBannedNotice] = useState<string | null>(null);
-
-  const login = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!loginEmail) return;
-    setLoggingIn(true);
-    setBannedNotice(null);
+  const logout = async () => {
     try {
-      const res = await apiRequest("GET", `/api/tradesmen/login/${encodeURIComponent(loginEmail)}`);
-      const t = await res.json();
-      setTradesmanId(t.id);
-    } catch (err: any) {
-      let banned = false;
-      let msg = "";
-      try {
-        const body = await err?.response?.json?.();
-        if (body?.banned) { banned = true; msg = body.message; }
-      } catch {}
-      if (banned) {
-        setBannedNotice(msg || "This account has been permanently banned.");
-      } else {
-        toast({ title: "No account found", description: "Try the seed account: plumsteadplumbingandheatingltd@example.co.uk", variant: "destructive" });
-      }
-    } finally {
-      setLoggingIn(false);
+      await apiRequest("POST", "/api/auth/logout");
+    } catch {
+      // Even if the request fails, clear client state and head to login.
     }
+    queryClient.clear();
+    goToLogin();
   };
 
   // Redirect to Stripe Checkout for a lead pack purchase. Credits are
@@ -102,44 +102,10 @@ export default function Dashboard() {
     }
   };
 
-  // ── Login gate ──
-  if (!tradesmanId) {
-    return (
-      <Layout>
-        <div className="mx-auto flex max-w-md flex-col px-4 py-20">
-          <div className="text-center">
-            <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 text-primary"><LogIn className="h-7 w-7" /></span>
-            <h1 className="mt-4 font-display text-2xl font-bold text-foreground">Tradesman sign in</h1>
-            <p className="mt-2 text-muted-foreground">Enter your registered email to view your leads and credits.</p>
-          </div>
-          <Card className="mt-8 p-6">
-            <form onSubmit={login} className="space-y-4">
-              <div>
-                <Label htmlFor="le">Email address</Label>
-                <Input id="le" type="email" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} placeholder="you@yourbusiness.co.uk" data-testid="input-login-email" />
-              </div>
-              <Button type="submit" className="w-full" disabled={loggingIn} data-testid="button-login">{loggingIn ? "Signing in…" : "Sign in"}</Button>
-              {bannedNotice && (
-                <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive" data-testid="banner-login-banned">
-                  <Ban className="mt-0.5 h-4 w-4 flex-shrink-0" />
-                  <span>{bannedNotice}</span>
-                </div>
-              )}
-            </form>
-            <div className="mt-4 rounded-lg bg-muted/60 p-3 text-xs text-muted-foreground">
-              <p className="font-medium text-foreground">Demo account</p>
-              <button className="mt-1 underline hover:text-primary" onClick={() => setLoginEmail("plumsteadplumbingandheatingltd@example.co.uk")} data-testid="button-demo-fill">
-                plumsteadplumbingandheatingltd@example.co.uk
-              </button>
-            </div>
-            <p className="mt-4 text-center text-sm text-muted-foreground">No account? <Link href="/join" className="font-medium text-primary hover:underline">Create one free</Link></p>
-          </Card>
-        </div>
-      </Layout>
-    );
-  }
-
-  if (isLoading || !data) {
+  // ── Auth gate ──
+  // While bootstrapping the session (or after a 401 that triggered a redirect)
+  // show a neutral loading state. goToLogin() handles the actual redirect.
+  if (meLoading || meError || !tradesmanId || isLoading || !data) {
     return <Layout><div className="mx-auto max-w-7xl px-4 py-20"><div className="h-72 animate-pulse rounded-xl bg-muted" /></div></Layout>;
   }
 
@@ -161,7 +127,10 @@ export default function Dashboard() {
               <p className="text-sm text-white/60">Welcome back, {t.ownerName.split(" ")[0]}</p>
             </div>
           </div>
-          <Link href={`/tradesman/${t.slug}`}><Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" data-testid="button-view-public">View public profile</Button></Link>
+          <div className="flex items-center gap-2">
+            <Link href={`/tradesman/${t.slug}`}><Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" data-testid="button-view-public">View public profile</Button></Link>
+            <Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" onClick={logout} data-testid="button-logout"><LogOut className="mr-1.5 h-4 w-4" />Log out</Button>
+          </div>
         </div>
       </div>
 

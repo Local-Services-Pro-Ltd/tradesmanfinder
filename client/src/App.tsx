@@ -16,6 +16,7 @@ import PostAJob from "@/pages/post-a-job";
 import ForTradesmen from "@/pages/for-tradesmen";
 import Join from "@/pages/join";
 import Dashboard from "@/pages/dashboard";
+import Login from "@/pages/login";
 import Admin from "@/pages/admin";
 import AdminModeration from "@/pages/admin-moderation";
 import { About, Contact, Terms, Privacy, Faq } from "@/pages/static-pages";
@@ -51,6 +52,7 @@ function AppRouter() {
       <Route path="/for-tradesmen" component={ForTradesmen} />
       <Route path="/join" component={Join} />
       <Route path="/dashboard" component={Dashboard} />
+      <Route path="/login" component={Login} />
       <Route path="/admin" component={Admin} />
       <Route path="/admin/moderation" component={AdminModeration} />
       <Route path="/about" component={About} />

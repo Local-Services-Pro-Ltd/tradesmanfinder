@@ -1,4 +1,4 @@
-import { pgTable, text, integer, real, bigint, boolean, serial } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, real, bigint, boolean, serial, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -73,6 +73,11 @@ export const tradesmen = pgTable("tradesmen", {
   stripeSubscriptionId: text("stripe_subscription_id"),
   subscriptionStatus: text("subscription_status"),
   featuredUntil: bigint("featured_until", { mode: "number" }),
+  /* ── Magic-link auth (PR-A1) ──
+     Set the first time a tradesperson successfully verifies a sign-in link.
+     timestamptz (not the epoch-ms bigint convention used elsewhere) because
+     the auth tables are new and use native Postgres timestamps. */
+  emailVerifiedAt: timestamp("email_verified_at", { withTimezone: true }),
 });
 
 export const insertTradesmanSchema = createInsertSchema(tradesmen).omit({
@@ -308,3 +313,32 @@ export const paymentsLog = pgTable("payments_log", {
 export const insertPaymentsLogSchema = createInsertSchema(paymentsLog).omit({ id: true, createdAt: true });
 export type InsertPaymentsLog = z.infer<typeof insertPaymentsLogSchema>;
 export type PaymentsLogEntry = typeof paymentsLog.$inferSelect;
+
+/* ──────────────────────────────────────────────
+   AUTH TOKENS — single-use magic-link sign-in tokens (PR-A1)
+
+   Replaces the insecure GET /api/tradesmen/login/:email endpoint (which let
+   anyone sign in as any tradesperson with just their email — a P0 gap now
+   that Stripe payments are live).
+
+   Flow: POST /api/auth/request-link generates a 32-byte random token, stores
+   ONLY its sha256 hash here (never plaintext), emails the plaintext to the
+   tradesperson. GET /api/auth/verify hashes the supplied token, looks up an
+   unconsumed/unexpired row, marks it consumed, and issues a signed session
+   cookie. Tokens are 15-min TTL, single-use.
+   ────────────────────────────────────────────── */
+export const authTokens = pgTable("auth_tokens", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  tradesmanId: bigint("tradesman_id", { mode: "number" }).notNull(),
+  tokenHash: text("token_hash").notNull(), // sha256 hex of the random token
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  ip: text("ip"), // stored as text; column type is inet in Postgres
+  userAgent: text("user_agent"),
+}, (t) => ({
+  tokenHashUnique: uniqueIndex("auth_tokens_token_hash_key").on(t.tokenHash),
+  tradesmanCreatedIdx: index("auth_tokens_tradesman_created_idx").on(t.tradesmanId, t.createdAt),
+}));
+export type AuthToken = typeof authTokens.$inferSelect;
+export type InsertAuthToken = typeof authTokens.$inferInsert;
