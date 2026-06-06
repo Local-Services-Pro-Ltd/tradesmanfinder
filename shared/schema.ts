@@ -356,3 +356,127 @@ export const sessions = pgTable("sessions", {
 export const insertSessionSchema = createInsertSchema(sessions).omit({ createdAt: true, lastSeenAt: true });
 export type InsertSession = z.infer<typeof insertSessionSchema>;
 export type Session = typeof sessions.$inferSelect;
+
+/* ─────────────────────────────────────────────
+   PARTNER PROGRAMME (PR-P1) — #22
+
+   Four tables that together let us monetise placements to commercial
+   verticals (builders' merchants, EPC providers, finance/BNPL, etc).
+
+   Key design decision: `commercial_model` and `rate_pence` live on
+   `partner_placements`, NOT on `partners`. One partner may have multiple
+   placements each with its own pricing model (e.g. £200/mo sponsored on
+   the category footer AND £15/lead qualified on the job-confirmation
+   page). Putting the model on `partners` would force us to create
+   multiple partner rows for one real partner — messy and re-migration
+   risk within v1.5.
+
+   No event sampling in v1: `partner_events` records every impression /
+   click / lead. Partner-facing stats page would otherwise need a "these
+   numbers are 10x estimates" disclaimer that invites pricing disputes.
+   At MVP traffic (<100k page views/month) the table grows by tens of
+   thousands per month, not millions; revisit if/when it crosses 5M rows.
+
+   RLS posture matches the rest of the codebase: enabled, no policies.
+   App uses service-role DATABASE_URL connection; the anon browser key
+   is never used for partner tables.
+   ────────────────────────────────────────────── */
+
+export const partners = pgTable("partners", {
+  id: serial("id").primaryKey(),
+  slug: text("slug").notNull().unique(), // url-safe, used in /p/<slug>/stats
+  name: text("name").notNull(),
+  vertical: text("vertical").notNull(),  // 'insurance' | 'epc' | 'solicitor' | 'builders_merchant' | 'finance' | 'other'
+  status: text("status").notNull().default("inactive"), // 'inactive' | 'pilot' | 'active' | 'paused' | 'terminated'
+  billingEmail: text("billing_email"),
+  billingContact: text("billing_contact"),
+  stripeCustomerId: text("stripe_customer_id"), // null until first invoice raised
+  notes: text("notes"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+});
+export const insertPartnerSchema = createInsertSchema(partners).omit({ id: true, createdAt: true });
+export type InsertPartner = z.infer<typeof insertPartnerSchema>;
+export type Partner = typeof partners.$inferSelect;
+
+export const partnerPlacements = pgTable("partner_placements", {
+  id: serial("id").primaryKey(),
+  partnerId: integer("partner_id").notNull(),
+  surface: text("surface").notNull(), // 'category_footer' | 'area_footer' | 'job_confirmation' | 'dashboard_sidebar' | 'lead_email_footer' | 'partners_page'
+  commercialModel: text("commercial_model").notNull(), // 'sponsored' | 'lead_qualified' | 'lead_booked' | 'rev_share'
+  // Pence; semantics depend on commercialModel:
+  //   sponsored        => monthly flat rate
+  //   lead_qualified   => per qualified-lead rate
+  //   lead_booked      => per booked-lead rate
+  //   rev_share        => basis points (e.g. 1000 = 10%); cap held in `rateCapPence`
+  ratePence: integer("rate_pence").notNull(),
+  rateCapPence: integer("rate_cap_pence"), // optional cap for rev_share
+  categoryFilter: text("category_filter").notNull().default("[]"), // JSON array of category ids; [] means all
+  areaFilter: text("area_filter").notNull().default("[]"),         // JSON array of area ids; [] means all
+  priority: integer("priority").notNull().default(100), // lower number = renders first within a surface
+  activeFrom: bigint("active_from", { mode: "number" }).notNull(),
+  activeTo: bigint("active_to", { mode: "number" }), // null = open-ended
+  creativeHtml: text("creative_html"), // sanitised at render time, not at store time
+  creativeUrl: text("creative_url"),   // destination URL for clicks
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+});
+export const insertPartnerPlacementSchema = createInsertSchema(partnerPlacements).omit({ id: true, createdAt: true });
+export type InsertPartnerPlacement = z.infer<typeof insertPartnerPlacementSchema>;
+export type PartnerPlacement = typeof partnerPlacements.$inferSelect;
+
+export const partnerEvents = pgTable("partner_events", {
+  id: serial("id").primaryKey(),
+  partnerId: integer("partner_id").notNull(),
+  placementId: integer("placement_id").notNull(),
+  eventType: text("event_type").notNull(), // 'impression' | 'click' | 'lead_passed' | 'lead_outcome'
+  jobId: integer("job_id"),                 // nullable; populated for lead_* event types
+  tradesmanId: integer("tradesman_id"),     // nullable; populated for lead_outcome
+  // Idempotency key prevents double-counting. Examples:
+  //   impression:<request_id>:<placement_id>
+  //   click:<placement_id>:<request_id>
+  //   lead:<job_id>:<partner_id>
+  //   outcome:<job_id>:<partner_id>:<outcome>
+  idempotencyKey: text("idempotency_key").notNull().unique(),
+  occurredAt: bigint("occurred_at", { mode: "number" }).notNull(),
+  metadata: text("metadata"), // JSON; for lead_outcome carries outcome enum + notes
+});
+export const insertPartnerEventSchema = createInsertSchema(partnerEvents).omit({ id: true });
+export type InsertPartnerEvent = z.infer<typeof insertPartnerEventSchema>;
+export type PartnerEvent = typeof partnerEvents.$inferSelect;
+
+export const partnerInvoices = pgTable("partner_invoices", {
+  id: serial("id").primaryKey(),
+  partnerId: integer("partner_id").notNull(),
+  periodStart: bigint("period_start", { mode: "number" }).notNull(),
+  periodEnd: bigint("period_end", { mode: "number" }).notNull(),
+  lineItems: text("line_items").notNull(), // JSON array of {placement_id, event_type, count, rate_pence, subtotal_pence}
+  totalPence: integer("total_pence").notNull(),
+  status: text("status").notNull().default("draft"), // 'draft' | 'sent' | 'paid' | 'void'
+  stripeInvoiceId: text("stripe_invoice_id"), // populated after manual Stripe Invoice raised
+  generatedAt: bigint("generated_at", { mode: "number" }).notNull(),
+  sentAt: bigint("sent_at", { mode: "number" }),
+  paidAt: bigint("paid_at", { mode: "number" }),
+});
+export const insertPartnerInvoiceSchema = createInsertSchema(partnerInvoices).omit({ id: true, generatedAt: true });
+export type InsertPartnerInvoice = z.infer<typeof insertPartnerInvoiceSchema>;
+export type PartnerInvoice = typeof partnerInvoices.$inferSelect;
+
+// Enum exports for runtime validation in admin endpoints (landing in PR-P3).
+export const PARTNER_VERTICALS = [
+  "insurance", "epc", "solicitor", "builders_merchant", "finance", "other",
+] as const;
+export const PARTNER_STATUSES = [
+  "inactive", "pilot", "active", "paused", "terminated",
+] as const;
+export const PARTNER_SURFACES = [
+  "category_footer", "area_footer", "job_confirmation",
+  "dashboard_sidebar", "lead_email_footer", "partners_page",
+] as const;
+export const PARTNER_COMMERCIAL_MODELS = [
+  "sponsored", "lead_qualified", "lead_booked", "rev_share",
+] as const;
+export const PARTNER_EVENT_TYPES = [
+  "impression", "click", "lead_passed", "lead_outcome",
+] as const;
+export const PARTNER_INVOICE_STATUSES = [
+  "draft", "sent", "paid", "void",
+] as const;
