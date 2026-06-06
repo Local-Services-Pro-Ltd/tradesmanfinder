@@ -308,3 +308,51 @@ export const paymentsLog = pgTable("payments_log", {
 export const insertPaymentsLogSchema = createInsertSchema(paymentsLog).omit({ id: true, createdAt: true });
 export type InsertPaymentsLog = z.infer<typeof insertPaymentsLogSchema>;
 export type PaymentsLogEntry = typeof paymentsLog.$inferSelect;
+
+/* ──────────────────────────────────────────────
+   AUTH — magic-link tokens & sessions  (PR-A1a)
+
+   We deliberately do NOT enforce Postgres-level RLS on these tables: the app
+   accesses them via a privileged service connection (DATABASE_URL), not via
+   the Supabase anon key. All access is gated in `server/auth.ts`.
+
+   `magic_link_tokens` stores a SHA-256 hash of the bearer token; the raw
+   token is only ever sent to the user's email and never persisted. One-time
+   use: a token's `consumed_at` is set on successful /verify, and a row with
+   `consumed_at != null` is rejected on re-presentation.
+
+   `sessions` holds opaque cookie session ids. The cookie value is the
+   bcrypt-quality random `id` itself (high-entropy, unguessable); we look it
+   up directly. Sliding expiration: every authenticated request bumps
+   `expires_at` so an active tradesperson stays signed in for 30 days from
+   last use, but inactivity for 30 days logs them out.
+   ────────────────────────────────────────────── */
+export const magicLinkTokens = pgTable("magic_link_tokens", {
+  id: serial("id").primaryKey(),
+  tokenHash: text("token_hash").notNull().unique(), // sha256 hex of the random token
+  email: text("email").notNull(), // lowercased; auth target — may not yet have a tradesman row
+  tradesmanId: integer("tradesman_id"), // null when this token is for a future sign-up
+  purpose: text("purpose").notNull(), // 'sign_in' | 'sign_up'
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(), // unix ms
+  consumedAt: bigint("consumed_at", { mode: "number" }), // unix ms; null until first successful verify
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  requestIp: text("request_ip"),
+  requestUserAgent: text("request_user_agent"),
+});
+export const insertMagicLinkTokenSchema = createInsertSchema(magicLinkTokens).omit({ id: true, createdAt: true });
+export type InsertMagicLinkToken = z.infer<typeof insertMagicLinkTokenSchema>;
+export type MagicLinkToken = typeof magicLinkTokens.$inferSelect;
+
+export const sessions = pgTable("sessions", {
+  // 256-bit random hex (cookie value). PRIMARY KEY because it's the lookup key.
+  id: text("id").primaryKey(),
+  tradesmanId: integer("tradesman_id").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(), // sliding; refreshed on each request
+  lastSeenAt: bigint("last_seen_at", { mode: "number" }).notNull(),
+  createdIp: text("created_ip"),
+  createdUserAgent: text("created_user_agent"),
+});
+export const insertSessionSchema = createInsertSchema(sessions).omit({ createdAt: true, lastSeenAt: true });
+export type InsertSession = z.infer<typeof insertSessionSchema>;
+export type Session = typeof sessions.$inferSelect;
