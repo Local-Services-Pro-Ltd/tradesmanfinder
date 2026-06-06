@@ -60,6 +60,19 @@ export const tradesmen = pgTable("tradesmen", {
   ratingCount: integer("rating_count").notNull().default(0),
   responseTimeMinutes: integer("response_time_minutes").notNull().default(120),
   createdAt: bigint("created_at", { mode: "number" }).notNull().default(0),
+  /* ── Stripe linkage (PR-E1) ──
+     stripeCustomerId is created lazily the first time a tradesperson opens
+     checkout, and reused across all subsequent payments + subscriptions.
+     subscriptionStatus mirrors Stripe's subscription.status enum verbatim:
+       'active' | 'trialing' | 'past_due' | 'unpaid' | 'canceled' | 'incomplete' | 'incomplete_expired' | 'paused' | null
+     featuredUntil is the timestamp the Featured Listing is paid through.
+     The legacy `featured` boolean above is retained for back-compat with
+     existing query paths; new code should derive featured-ness from
+     `featuredUntil != null && featuredUntil > Date.now()`. */
+  stripeCustomerId: text("stripe_customer_id"),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  subscriptionStatus: text("subscription_status"),
+  featuredUntil: bigint("featured_until", { mode: "number" }),
 });
 
 export const insertTradesmanSchema = createInsertSchema(tradesmen).omit({
@@ -251,3 +264,45 @@ export const emailLog = pgTable("email_log", {
 export const insertEmailLogSchema = createInsertSchema(emailLog).omit({ id: true });
 export type InsertEmailLog = z.infer<typeof insertEmailLogSchema>;
 export type EmailLogEntry = typeof emailLog.$inferSelect;
+
+/* ──────────────────────────────────────────────
+   PAYMENTS LOG — audit trail of every Stripe event we processed
+
+   Append-only. Every webhook delivery + every checkout-session creation
+   writes a row. Used for:
+     - reconciliation (Stripe dashboard vs our ledger)
+     - idempotency (event_id is unique — duplicate webhook deliveries from
+       Stripe's retry logic are no-ops)
+     - refund-decision context (admin view in PR-E4)
+     - dispute / chargeback audit trail
+   ───────────────────────────────────────────── */
+export const paymentsLog = pgTable("payments_log", {
+  id: serial("id").primaryKey(),
+  // Stripe identity
+  eventId: text("event_id").notNull().unique(), // evt_... — dedupe key, never insert twice
+  eventType: text("event_type").notNull(), // 'checkout.session.completed', 'invoice.paid', 'charge.refunded', ...
+  // What was paid
+  amountPence: integer("amount_pence"), // gross amount in pence; null for non-financial events
+  currency: text("currency"), // 'gbp' (lowercased per Stripe convention)
+  // Stripe object refs (any may be null depending on event type)
+  stripeCustomerId: text("stripe_customer_id"),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  stripeCheckoutSessionId: text("stripe_checkout_session_id"),
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  stripeInvoiceId: text("stripe_invoice_id"),
+  stripeChargeId: text("stripe_charge_id"),
+  // Our side
+  tradesmanId: integer("tradesman_id"), // resolved via stripeCustomerId; nullable for events we couldn't attribute
+  productKind: text("product_kind"), // 'lead_pack_5' | 'lead_pack_10' | 'lead_pack_20' | 'featured_monthly' | null
+  // Outcome of our handler
+  action: text("action").notNull(), // 'credits_granted' | 'credits_revoked' | 'featured_extended' | 'featured_degraded' | 'flagged_for_review' | 'noop' | 'failed'
+  creditsDelta: integer("credits_delta").notNull().default(0), // signed: +10 grant, -5 partial revoke, 0 if non-credit event
+  notes: text("notes"), // freeform: error_message, admin_reason, etc.
+  // Raw payload for debugging — stored as JSON text to avoid jsonb operator
+  // confusion in the rare query against this column.
+  rawPayload: text("raw_payload"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+});
+export const insertPaymentsLogSchema = createInsertSchema(paymentsLog).omit({ id: true });
+export type InsertPaymentsLog = z.infer<typeof insertPaymentsLogSchema>;
+export type PaymentsLogEntry = typeof paymentsLog.$inferSelect;
