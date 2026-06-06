@@ -1,0 +1,139 @@
+# CodeRabbit configuration for Local-Services-Pro-Ltd/tradesmanfinder
+# Docs: https://docs.coderabbit.ai/guides/configure-coderabbit
+# Mirrors specialcarer-com/specialcarer's profile, retargeted to TradesmanFinder.
+
+language: en-GB
+early_access: false
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: false
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: false
+  auto_apply_labels: false
+  suggested_reviewers: false
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    base_branches:
+      - main
+  path_filters:
+    - "!**/*.lock"
+    - "!**/node_modules/**"
+    - "!**/dist/**"
+    - "!**/build/**"
+    - "!**/coverage/**"
+    - "!**/*.snap"
+    - "!attached_assets/**"
+    - "!**/migrations/**"
+    - "!data.db"
+
+  path_instructions:
+    - path: "server/**/*.ts"
+      instructions: |
+        Backend (Express 5 + Drizzle + Postgres via Supabase).
+
+        Flag as BLOCKING:
+        - Any new public POST/PUT/DELETE route that does NOT use publicFormGuard (honeypot + rate limit)
+        - Any admin route that does NOT call requireAdmin(req, res)
+        - Raw SQL strings instead of Drizzle query builder
+        - Hard-coded secrets, API keys, or connection strings
+        - process.env.* accessed without a fallback or explicit "required" assertion at boot
+        - Resend / mailer call sites that do NOT persist the returned id + status to a structured log
+        - PII (homeowner phone, full postcode, surname, email) rendered into outbound email bodies without going through a redaction helper
+
+        Flag as ATTENTION:
+        - N+1 query patterns (loops calling storage.* per iteration)
+        - Missing await on async storage calls
+        - Try/catch swallowing errors silently (no console.error or rethrow)
+
+    - path: "shared/schema.ts"
+      instructions: |
+        Source of truth for the data model. Any change here needs:
+        - A matching Drizzle migration file
+        - Backwards-compatible default values for new NOT NULL columns
+        - Zod insert schema updates if a new column is user-writable
+
+        Flag as BLOCKING:
+        - DROP TABLE or DROP COLUMN without an explicit "destructive: confirmed" line in the PR description
+        - Renaming columns without a two-step add-new + backfill + drop-old plan
+        - Mixing pgTable with sqliteTable in the same file (Postgres is the current target)
+
+    - path: "server/mailer.ts"
+      instructions: |
+        Resend integration. Flag as BLOCKING:
+        - Any new mail function that does NOT return { ok, id, error } from send()
+        - Hard-coded "from" addresses outside getFrom()
+        - HTML bodies that interpolate untrusted strings without escapeHtml()
+        - New mail kinds that do not include a `tag` for analytics
+
+    - path: "client/src/**/*.{ts,tsx}"
+      instructions: |
+        Frontend (React 18 + Vite + Tailwind + shadcn/ui + wouter + TanStack Query v5).
+
+        Brand constants — flag DEVIATIONS:
+        - Primary navy #0F2A44, warm amber/orange accent, off-white surfaces
+        - Body type: Inter; Display type: Manrope semibold
+        - Legal footer must read "© Local Services Pro Ltd"
+        - Dark mode must remain supported
+
+        Flag as ATTENTION:
+        - fetch() calls that bypass the shared apiRequest helper
+        - useEffect data fetching instead of useQuery
+        - Hard-coded GBP amounts in components (centralise in a pricing constants file)
+
+    - path: "api/**"
+      instructions: |
+        Vercel serverless function entry points. Flag as BLOCKING:
+        - Long-running work without explicit maxDuration consideration
+        - Filesystem writes outside /tmp (Vercel functions have ephemeral, read-only filesystems elsewhere)
+
+    - path: ".github/workflows/**"
+      instructions: |
+        CI workflows. Flag as BLOCKING:
+        - Workflows that run on pull_request_target without explicit permission scoping
+        - Secrets referenced without `secrets.` prefix
+        - Third-party actions pinned by tag rather than SHA
+
+  tools:
+    github-checks:
+      enabled: true
+      timeout_ms: 90000
+    languagetool:
+      enabled: true
+      language: en-GB
+      level: default
+      disabled_rules:
+        - EN_UNPAIRED_BRACKETS
+        - EN_GB_SIMPLE_REPLACE
+    markdownlint:
+      enabled: true
+    eslint:
+      enabled: true
+    yamllint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    actionlint:
+      enabled: true
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false
+  learnings:
+    scope: auto
+  issues:
+    scope: auto
+  pull_requests:
+    scope: auto
