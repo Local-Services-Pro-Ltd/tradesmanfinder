@@ -105,19 +105,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (enriched.cardSummary.isPubliclyHidden && !isAdmin) return res.status(404).json({ message: "Tradesman not found" });
     res.json(enriched);
   });
-  // Pseudo-login by email — LEGACY (insecure). Kept temporarily so the
-  // existing /dashboard page keeps working while PR-A1c migrates the frontend
-  // to the magic-link flow. Will be removed in PR-A1c.
-  // SECURITY: This endpoint is the root cause of #28. Do not extend it.
-  app.get("/api/tradesmen/login/:email", async (req, res) => {
-    const t = await storage.getTradesmanByEmail(req.params.email);
-    if (!t) return res.status(404).json({ message: "No tradesman found with that email" });
-    const enriched = await attachCardSummary(t);
-    if (enriched.cardSummary.isLoginBlocked) {
-      return res.status(403).json({ message: "This account has been permanently banned and can no longer access the dashboard.", banned: true });
-    }
-    res.json(enriched);
-  });
+  // NOTE: The legacy `GET /api/tradesmen/login/:email` (email-only pseudo-login)
+  // was removed in PR-A1c. It was the root cause of #28 — anyone could sign in
+  // as anyone by knowing their email. The replacement is the magic-link flow
+  // below (POST /api/auth/request-link → GET /api/auth/verify → cookie session).
 
   /* ═══════════════════════════════════════════════════════════════
      MAGIC-LINK AUTH (PR-A1b) — closes #28.
@@ -220,24 +211,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const raw = String(req.query.token ?? "").trim();
     // Token format is 64 hex chars (32 bytes). Reject anything else fast.
     if (!/^[0-9a-f]{64}$/i.test(raw)) {
-      return res.redirect(302, "/#/join?auth=invalid");
+      return res.redirect(302, "/#/sign-in?auth=invalid");
     }
     const tokenHash = hashToken(raw);
     const tokenRow = await storage.getMagicLinkTokenByHash(tokenHash);
     if (!tokenRow) {
-      return res.redirect(302, "/#/join?auth=invalid");
+      return res.redirect(302, "/#/sign-in?auth=invalid");
     }
     if (tokenRow.consumedAt !== null) {
-      return res.redirect(302, "/#/join?auth=used");
+      return res.redirect(302, "/#/sign-in?auth=used");
     }
     if (tokenRow.expiresAt <= Date.now()) {
-      return res.redirect(302, "/#/join?auth=expired");
+      return res.redirect(302, "/#/sign-in?auth=expired");
     }
 
     // Atomic consume — if zero rows come back, somebody else won the race.
     const consumed = await storage.consumeMagicLinkToken(tokenRow.id, Date.now());
     if (!consumed) {
-      return res.redirect(302, "/#/join?auth=used");
+      return res.redirect(302, "/#/sign-in?auth=used");
     }
 
     // Resolve / create the tradesman.
@@ -291,7 +282,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     // Refuse to sign in banned accounts.
     const enriched = await attachCardSummary((await storage.getTradesmanById(tradesmanId))!);
     if (enriched.cardSummary.isLoginBlocked) {
-      return res.redirect(302, "/#/join?auth=banned");
+      return res.redirect(302, "/#/sign-in?auth=banned");
     }
 
     // Mint a session.
