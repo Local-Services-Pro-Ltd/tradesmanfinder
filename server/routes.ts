@@ -208,6 +208,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             urgency: job.urgency,
             budgetRange: job.budgetRange ?? "",
             description: job.description,
+            // Correlation ids — persisted to email_log so the audit trail can
+            // be filtered per job (admin debug) or per tradesperson
+            // (dashboard 'recent leads sent to you' view).
+            jobId: job.id,
+            tradesmanId: t.id,
           });
           if (!result.ok) {
             console.error(`[mailer] new-lead send failed for tradesman ${t.id} (${t.email}):`, result.error);
