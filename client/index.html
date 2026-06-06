@@ -22,6 +22,22 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // SPA path → hash bounce.
+      // Our router is HashRouter, so canonical URLs are /#/path. When a user
+      // (or a 3rd-party link, or our /partners marketing email) hits /path
+      // directly, the Vercel catch-all rewrite serves this index.html but
+      // window.location.hash is empty — the SPA would render NotFound. This
+      // tiny script translates /path[?qs] → /#/path[?qs] before React mounts,
+      // using replaceState so the bad URL never appears in browser history.
+      (function () {
+        var p = window.location.pathname;
+        if (p && p !== "/" && p.indexOf("/api/") !== 0 && p.indexOf("/checkout/") !== 0) {
+          var hash = "#" + p + window.location.search;
+          window.history.replaceState(null, "", "/" + hash);
+        }
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

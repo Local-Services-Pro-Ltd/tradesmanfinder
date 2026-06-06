@@ -12,6 +12,7 @@
   },
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index.js" },
-    { "source": "/checkout/return", "destination": "/api/index.js" }
+    { "source": "/checkout/return", "destination": "/api/index.js" },
+    { "source": "/((?!api/|assets/|.*\\.[a-zA-Z0-9]+$).*)", "destination": "/index.html" }
   ]
 }
