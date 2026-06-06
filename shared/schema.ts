@@ -217,3 +217,37 @@ export const moderationLog = pgTable("moderation_log", {
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 });
 export type ModerationLogEntry = typeof moderationLog.$inferSelect;
+
+/* ──────────────────────────────────────────────
+   EMAIL LOG — structured audit trail of outbound transactional emails
+
+   Replaces the prior hack of cramming Resend message ids into
+   moderation_log.reason as freeform text. Used to:
+     - prove deliverability per-recipient (#12 acceptance criterion)
+     - power admin debugging when a lead email doesn't arrive
+     - feed future bounce/complaint webhook processing from Resend
+   ────────────────────────────────────────────── */
+export const emailLog = pgTable("email_log", {
+  id: serial("id").primaryKey(),
+  // What was sent
+  template: text("template").notNull(), // 'new_lead' | 'job_confirmation' | 'partner_outcome' | ...
+  toAddress: text("to_address").notNull(),
+  fromAddress: text("from_address").notNull(),
+  subject: text("subject").notNull(),
+  // Resend correlation
+  resendId: text("resend_id"), // null if request failed before send
+  status: text("status").notNull(), // 'sent' | 'failed' | 'bounced' | 'complained' | 'delivered'
+  errorMessage: text("error_message"), // populated when status='failed'
+  // Optional FK-style links (kept as integer not enforced FK so deletes don't cascade-nuke audit history)
+  jobId: integer("job_id"),
+  tradesmanId: integer("tradesman_id"),
+  partnerId: integer("partner_id"),
+  // Privacy: count of PII redactions performed before send (does NOT store the PII itself)
+  redactionCount: integer("redaction_count").notNull().default(0),
+  // Timing
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  deliveredAt: bigint("delivered_at", { mode: "number" }), // populated by future Resend webhook
+});
+export const insertEmailLogSchema = createInsertSchema(emailLog).omit({ id: true });
+export type InsertEmailLog = z.infer<typeof insertEmailLogSchema>;
+export type EmailLogEntry = typeof emailLog.$inferSelect;
