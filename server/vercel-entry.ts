@@ -4,13 +4,29 @@ import type { Request, Response, NextFunction } from "express";
 import { createServer } from "node:http";
 import { registerRoutes } from "./routes";
 
+// Mirror the rawBody hook from server/index.ts so the Stripe webhook handler
+// can verify signatures. Without `verify`, express.json() consumes the stream
+// and req.rawBody is undefined, which makes stripe.webhooks.constructEvent
+// throw before we can read the signature.
+declare module "http" {
+  interface IncomingMessage {
+    rawBody: unknown;
+  }
+}
+
 let appPromise: Promise<express.Express> | null = null;
 
 function getApp(): Promise<express.Express> {
   if (!appPromise) {
     appPromise = (async () => {
       const app = express();
-      app.use(express.json());
+      app.use(
+        express.json({
+          verify: (req, _res, buf) => {
+            (req as any).rawBody = buf;
+          },
+        }),
+      );
       app.use(express.urlencoded({ extended: false }));
 
       const httpServer = createServer(app);
