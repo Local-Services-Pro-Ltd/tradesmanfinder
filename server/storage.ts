@@ -10,6 +10,7 @@ import {
   tradesmanCards,
   moderationLog,
   paymentsLog,
+  partnerEnquiries,
 } from "@shared/schema";
 import type {
   Category, InsertCategory,
@@ -23,6 +24,7 @@ import type {
   TradesmanCard, InsertTradesmanCard,
   ModerationLogEntry,
   InsertPaymentsLog, PaymentsLogEntry,
+  InsertPartnerEnquiry, PartnerEnquiry,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -82,6 +84,10 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
   // payments_log (Stripe audit trail)
   createPaymentsLog(entry: InsertPaymentsLog): Promise<PaymentsLogEntry>;
   getPaymentsLogByTradesman(tradesmanId: number, limit?: number): Promise<PaymentsLogEntry[]>;
+  // partner_enquiries (inbound B2B from /partners)
+  createPartnerEnquiry(entry: InsertPartnerEnquiry & { requestIp?: string | null; requestUserAgent?: string | null }): Promise<PartnerEnquiry>;
+  getPartnerEnquiries(limit?: number): Promise<PartnerEnquiry[]>;
+  getPartnerEnquiryById(id: number): Promise<PartnerEnquiry | undefined>;
 }
 
 const now = () => Date.now();
@@ -237,6 +243,31 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
   }
   async getModerationLogByTradesman(tradesmanId: number): Promise<ModerationLogEntry[]> {
     return db.select().from(moderationLog).where(eq(moderationLog.tradesmanId, tradesmanId)).orderBy(desc(moderationLog.createdAt));
+  }
+
+  // ── partner_enquiries ──
+  async createPartnerEnquiry(
+    entry: InsertPartnerEnquiry & { requestIp?: string | null; requestUserAgent?: string | null },
+  ): Promise<PartnerEnquiry> {
+    const [row] = await db.insert(partnerEnquiries).values({
+      companyName: entry.companyName,
+      contactName: entry.contactName,
+      email: entry.email.toLowerCase().trim(),
+      phone: entry.phone ?? null,
+      vertical: entry.vertical,
+      monthlyBudget: entry.monthlyBudget ?? null,
+      message: entry.message,
+      requestIp: entry.requestIp ?? null,
+      requestUserAgent: entry.requestUserAgent ?? null,
+      createdAt: now(),
+    }).returning();
+    return row;
+  }
+  async getPartnerEnquiries(limit = 100): Promise<PartnerEnquiry[]> {
+    return db.select().from(partnerEnquiries).orderBy(desc(partnerEnquiries.createdAt)).limit(limit);
+  }
+  async getPartnerEnquiryById(id: number): Promise<PartnerEnquiry | undefined> {
+    return one(db.select().from(partnerEnquiries).where(eq(partnerEnquiries.id, id)));
   }
 }
 

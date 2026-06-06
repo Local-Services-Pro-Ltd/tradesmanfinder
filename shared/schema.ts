@@ -480,3 +480,46 @@ export const PARTNER_EVENT_TYPES = [
 export const PARTNER_INVOICE_STATUSES = [
   "draft", "sent", "paid", "void",
 ] as const;
+
+/* ─────────────────────────────────────────────
+   PARTNER ENQUIRIES (PR-P2) — #22
+
+   Inbound B2B enquiries from the /partners marketing page. Deliberately
+   lives separate from `partners` (PR-P1) because most enquiries never
+   become partners; conversion happens via PR-P3 admin tooling.
+
+   PR ordering: PR-P2 must merge AFTER PR-P1 in production because the
+   partner_enquiries SQL migration declares a FK on partners.id (added in
+   PR-P1's migration). PR-P1 is now on main, so the ordering constraint
+   is satisfied. The drizzle schema file does not import `partners` here,
+   so this TypeScript file compiles independently — the FK lives only at
+   the database layer.
+   ───────────────────────────────────────────── */
+export const partnerEnquiries = pgTable("partner_enquiries", {
+  id: serial("id").primaryKey(),
+  companyName: text("company_name").notNull(),
+  contactName: text("contact_name").notNull(),
+  email: text("email").notNull(),
+  phone: text("phone"),
+  vertical: text("vertical").notNull(),
+  monthlyBudget: text("monthly_budget"), // free text: '£500-2k', 'TBC', etc — partners hate brackets
+  message: text("message").notNull(),
+  status: text("status").notNull().default("new"), // 'new' | 'contacted' | 'qualified' | 'won' | 'lost'
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  requestIp: text("request_ip"),
+  requestUserAgent: text("request_user_agent"),
+  promotedPartnerId: integer("promoted_partner_id"), // set once admin converts enquiry → partner
+});
+export const insertPartnerEnquirySchema = createInsertSchema(partnerEnquiries).omit({
+  id: true, createdAt: true, status: true, promotedPartnerId: true,
+  requestIp: true, requestUserAgent: true,
+});
+export type InsertPartnerEnquiry = z.infer<typeof insertPartnerEnquirySchema>;
+export type PartnerEnquiry = typeof partnerEnquiries.$inferSelect;
+
+export const PARTNER_ENQUIRY_VERTICALS = [
+  "insurance", "epc", "solicitor", "builders_merchant", "finance", "other",
+] as const;
+export const PARTNER_ENQUIRY_STATUSES = [
+  "new", "contacted", "qualified", "won", "lost",
+] as const;

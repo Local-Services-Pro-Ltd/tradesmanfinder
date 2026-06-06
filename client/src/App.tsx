@@ -14,6 +14,7 @@ import Hyperlocal from "@/pages/hyperlocal";
 import TradesmanProfile from "@/pages/tradesman";
 import PostAJob from "@/pages/post-a-job";
 import ForTradesmen from "@/pages/for-tradesmen";
+import Partners from "@/pages/partners";
 import Join from "@/pages/join";
 import Dashboard from "@/pages/dashboard";
 import Admin from "@/pages/admin";
@@ -49,6 +50,7 @@ function AppRouter() {
       <Route path="/tradesman/:slug" component={TradesmanProfile} />
       <Route path="/post-a-job" component={PostAJob} />
       <Route path="/for-tradesmen" component={ForTradesmen} />
+      <Route path="/partners" component={Partners} />
       <Route path="/join" component={Join} />
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/admin" component={Admin} />

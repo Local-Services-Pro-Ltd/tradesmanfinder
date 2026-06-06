@@ -153,6 +153,7 @@ function Footer() {
             <ul className="space-y-2 text-sm">
               <li><Link href="/about" className="text-white/70 hover:text-primary">About</Link></li>
               <li><Link href="/for-tradesmen" className="text-white/70 hover:text-primary">For Tradesmen</Link></li>
+              <li><Link href="/partners" className="text-white/70 hover:text-primary">Partners</Link></li>
               <li><Link href="/contact" className="text-white/70 hover:text-primary">Contact</Link></li>
               <li><Link href="/faq" className="text-white/70 hover:text-primary">FAQ</Link></li>
               <li><Link href="/terms" className="text-white/70 hover:text-primary">Terms</Link></li>
