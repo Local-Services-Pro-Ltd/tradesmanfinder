@@ -72,7 +72,7 @@ function TopNav() {
 
         <div className="flex items-center gap-2">
           <ThemeToggle />
-          <Link href="/dashboard" className="hidden sm:block">
+          <Link href="/sign-in" className="hidden sm:block">
             <Button variant="outline" size="sm" data-testid="button-nav-signin">Sign In</Button>
           </Link>
           <Link href="/post-a-job" className="hidden sm:block">
@@ -98,7 +98,7 @@ function TopNav() {
                 <Link href="/for-tradesmen" onClick={() => setOpen(false)}>
                   <Button variant="ghost" className="w-full justify-start">For Tradesmen</Button>
                 </Link>
-                <Link href="/dashboard" onClick={() => setOpen(false)}>
+                <Link href="/sign-in" onClick={() => setOpen(false)}>
                   <Button variant="ghost" className="w-full justify-start">Sign In</Button>
                 </Link>
                 <div className="my-2 border-t border-border" />
