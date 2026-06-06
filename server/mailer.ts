@@ -401,3 +401,71 @@ export async function sendNewLeadEmail(opts: {
     },
   });
 }
+
+// ── Partner enquiry notification — sent to ops on each /partners form submission ──
+// Single-recipient internal notification; no public-facing email is sent to the
+// prospective partner from here (PR-P3 admin tooling will add an explicit ack).
+export async function sendPartnerEnquiryNotification(opts: {
+  enquiryId: number;
+  companyName: string;
+  contactName: string;
+  email: string;
+  phone: string | null;
+  vertical: string;
+  monthlyBudget: string | null;
+  message: string;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const adminUrl = `${PUBLIC_URL}/admin#partner-enquiry-${opts.enquiryId}`;
+  const subject = `New partner enquiry — ${opts.companyName} (${opts.vertical})`;
+
+  const bodyHtml = `
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">A new partner enquiry has come in from the <strong>/partners</strong> marketing page.</p>
+    <table cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:18px 0;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px">
+      <tr><td style="padding:14px 16px;font-size:13px;line-height:1.7;color:#374151">
+        <div><strong>Company:</strong> ${escapeHtml(opts.companyName)}</div>
+        <div><strong>Contact:</strong> ${escapeHtml(opts.contactName)}</div>
+        <div><strong>Email:</strong> <a href="mailto:${escapeHtml(opts.email)}" style="color:#1d4ed8">${escapeHtml(opts.email)}</a></div>
+        ${opts.phone ? `<div><strong>Phone:</strong> ${escapeHtml(opts.phone)}</div>` : ""}
+        <div><strong>Vertical:</strong> ${escapeHtml(opts.vertical)}</div>
+        ${opts.monthlyBudget ? `<div><strong>Budget:</strong> ${escapeHtml(opts.monthlyBudget)}</div>` : ""}
+        <div style="margin-top:10px"><strong>Message:</strong></div>
+        <div style="margin-top:4px;color:#111827;white-space:pre-wrap">${escapeHtml(opts.message)}</div>
+      </td></tr>
+    </table>
+    <p style="margin:0 0 14px 0;font-size:13px;line-height:1.55;color:#6b7280">Enquiry #${opts.enquiryId} — reply within 24h for best conversion. Convert to a partner record in the admin console once the call is booked.</p>
+  `;
+
+  const text =
+    `New partner enquiry — ${opts.companyName} (${opts.vertical})\n\n` +
+    `Contact: ${opts.contactName}\n` +
+    `Email: ${opts.email}\n` +
+    (opts.phone ? `Phone: ${opts.phone}\n` : "") +
+    `Vertical: ${opts.vertical}\n` +
+    (opts.monthlyBudget ? `Budget: ${opts.monthlyBudget}\n` : "") +
+    `\nMessage:\n${opts.message}\n\n` +
+    `Enquiry #${opts.enquiryId}\nAdmin: ${adminUrl}\n`;
+
+  const html = wrap({
+    title: subject,
+    bodyHtml,
+    ctaUrl: adminUrl,
+    ctaLabel: "Open admin console",
+  });
+
+  // Recipient: env-driven, defaults to moderation@ which already exists in DNS.
+  // We don't reuse SUPPORT_EMAIL because that's the customer-facing reply-to;
+  // partner enquiries are an internal sales notification.
+  const to = process.env.PARTNER_NOTIFICATION_EMAIL || "moderation@tradesmanfinder.com";
+
+  return send({
+    to,
+    subject,
+    html,
+    text,
+    tag: "partner_enquiry",
+    log: {
+      template: "partner_enquiry",
+      partnerId: null,
+    },
+  });
+}

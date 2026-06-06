@@ -3,9 +3,10 @@ import type { Server } from "node:http";
 import { storage } from "./storage";
 import {
   insertJobSchema, insertQuoteSchema, insertReviewSchema, insertTradesmanSchema,
+  insertPartnerEnquirySchema, PARTNER_ENQUIRY_VERTICALS,
 } from "@shared/schema";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
-import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail } from "./mailer";
+import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification } from "./mailer";
 import type { Tradesman, TradesmanCard } from "@shared/schema";
 import { z } from "zod";
 import { publicFormGuard } from "./spam-guard";
@@ -350,6 +351,59 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/stripe/webhook", (req, res) => {
     void handleStripeWebhook(req, res);
   });
+
+  // ── Partner enquiries (inbound from /partners marketing page) ──
+  // Tighter rate limit than other public forms (3/10min/IP) because partner
+  // enquiries are low-volume by nature — anything more is probably a bot.
+  app.post(
+    "/api/partner-enquiries",
+    publicFormGuard({ windowMs: 10 * 60 * 1000, max: 3 }),
+    async (req, res) => {
+      try {
+        const parsed = insertPartnerEnquirySchema.parse(req.body);
+        if (!(PARTNER_ENQUIRY_VERTICALS as readonly string[]).includes(parsed.vertical)) {
+          return res.status(400).json({
+            message: "Validation failed",
+            errors: [{ path: ["vertical"], message: `Must be one of: ${PARTNER_ENQUIRY_VERTICALS.join(", ")}` }],
+          });
+        }
+        const fwd = (req.headers["x-forwarded-for"] as string | undefined) || "";
+        const requestIp = fwd.split(",")[0].trim() || req.socket.remoteAddress || null;
+        const requestUserAgent = (req.headers["user-agent"] as string | undefined) || null;
+
+        const enquiry = await storage.createPartnerEnquiry({
+          ...parsed,
+          requestIp,
+          requestUserAgent,
+        });
+
+        // Fire-and-forget the ops notification. Storage row is the system of
+        // record; if Resend fails the enquiry is still safely persisted and
+        // visible in the admin enquiries view (PR-P3).
+        sendPartnerEnquiryNotification({
+          enquiryId: enquiry.id,
+          companyName: enquiry.companyName,
+          contactName: enquiry.contactName,
+          email: enquiry.email,
+          phone: enquiry.phone,
+          vertical: enquiry.vertical,
+          monthlyBudget: enquiry.monthlyBudget,
+          message: enquiry.message,
+        }).catch((err) => {
+          console.error(`[partner-enquiry] notification email failed for #${enquiry.id}:`, err?.message);
+        });
+
+        // Return only the id + a confirmation flag — never echo the submission
+        // (defends against reflected-XSS scenarios and reduces enumeration risk).
+        res.status(201).json({ id: enquiry.id, ok: true });
+      } catch (e) {
+        if (e instanceof z.ZodError) {
+          return res.status(400).json({ message: "Validation failed", errors: e.errors });
+        }
+        throw e;
+      }
+    },
+  );
 
   // ── Reviews create ──
   app.post("/api/reviews", publicFormGuard(), async (req, res) => {
