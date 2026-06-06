@@ -303,6 +303,8 @@ export const paymentsLog = pgTable("payments_log", {
   rawPayload: text("raw_payload"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
 });
-export const insertPaymentsLogSchema = createInsertSchema(paymentsLog).omit({ id: true });
+// createdAt is set by storage.createPaymentsLog (single source of timestamp),
+// so callers must not pass it.
+export const insertPaymentsLogSchema = createInsertSchema(paymentsLog).omit({ id: true, createdAt: true });
 export type InsertPaymentsLog = z.infer<typeof insertPaymentsLogSchema>;
 export type PaymentsLogEntry = typeof paymentsLog.$inferSelect;

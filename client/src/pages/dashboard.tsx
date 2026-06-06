@@ -16,10 +16,14 @@ import { timeAgo } from "@/lib/api-types";
 import { Wallet, Inbox, Star, TrendingUp, CheckCircle2, Phone, Mail, Plus, LogIn, Zap, Gavel, AlertTriangle, Ban, Square, Info } from "lucide-react";
 import { CardBadge } from "@/components/card-badge";
 
+// Lead pack catalogue. The `priceEnvKey` matches a STRIPE_PRICE_LEAD_PACK_*
+// env var exposed to the client via Vite's VITE_ prefix. If the env var is
+// missing at build time the pack falls back to the legacy /api/credits/buy
+// path so dev environments without Stripe still work.
 const PACKS = [
-  { credits: 5, price: "£25" },
-  { credits: 10, price: "£45" },
-  { credits: 20, price: "£80" },
+  { credits: 5,  price: "£25", priceId: import.meta.env.VITE_STRIPE_PRICE_LEAD_PACK_5  as string | undefined },
+  { credits: 10, price: "£45", priceId: import.meta.env.VITE_STRIPE_PRICE_LEAD_PACK_10 as string | undefined },
+  { credits: 20, price: "£80", priceId: import.meta.env.VITE_STRIPE_PRICE_LEAD_PACK_20 as string | undefined },
 ];
 
 // Read ?id= from the hash query string (hash router keeps query after the path).
@@ -73,13 +77,24 @@ export default function Dashboard() {
     }
   };
 
-  const buyCredits = async (credits: number) => {
+  // Redirect to Stripe Checkout for a lead pack purchase. Credits are
+  // granted by the webhook handler after Stripe confirms payment — the user
+  // returns to /#/dashboard?id=...&purchase=success.
+  const buyCredits = async (credits: number, priceId: string | undefined) => {
     if (!tradesmanId) return;
     setBuying(credits);
     try {
-      await apiRequest("POST", "/api/credits/buy", { tradesmanId, credits, reason: `Purchased ${credits} credit pack` });
+      if (priceId) {
+        const res = await apiRequest("POST", "/api/checkout/lead-pack", { tradesmanId, priceId });
+        const body = await res.json();
+        if (!body?.url) throw new Error("No checkout URL returned");
+        window.location.href = body.url;
+        return; // do not clear `buying` — page is unloading
+      }
+      // Fallback (dev environments without Stripe env vars): legacy fake path.
+      await apiRequest("POST", "/api/credits/buy", { tradesmanId, credits, reason: `Purchased ${credits} credit pack (dev)` });
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard", tradesmanId] });
-      toast({ title: "Credits added", description: `${credits} lead credits added to your balance.` });
+      toast({ title: "Credits added", description: `${credits} lead credits added to your balance (dev mode).` });
     } catch {
       toast({ title: "Payment failed", description: "Please try again.", variant: "destructive" });
     } finally {
@@ -259,13 +274,13 @@ export default function Dashboard() {
                   <Card key={p.credits} className="p-4 text-center">
                     <p className="font-display text-xl font-bold text-foreground">{p.credits}</p>
                     <p className="text-sm text-muted-foreground">credits · {p.price}</p>
-                    <Button className="mt-3 w-full" size="sm" disabled={buying === p.credits} onClick={() => buyCredits(p.credits)} data-testid={`button-buy-${p.credits}`}>
+                    <Button className="mt-3 w-full" size="sm" disabled={buying === p.credits} onClick={() => buyCredits(p.credits, p.priceId)} data-testid={`button-buy-${p.credits}`}>
                       <Plus className="mr-1 h-4 w-4" />{buying === p.credits ? "Processing…" : "Buy"}
                     </Button>
                   </Card>
                 ))}
               </div>
-              <p className="mt-3 text-xs text-muted-foreground">Demo checkout — no real payment is taken. Stripe integration is on the roadmap.</p>
+              <p className="mt-3 text-xs text-muted-foreground">Secure checkout via Stripe. Credits are added automatically after payment.</p>
 
               <h3 className="mt-8 font-display text-base font-semibold text-foreground">Transaction history</h3>
               <div className="mt-3 divide-y divide-border">

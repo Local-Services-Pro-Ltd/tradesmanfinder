@@ -9,6 +9,7 @@ import {
   tradesmanCredits,
   tradesmanCards,
   moderationLog,
+  paymentsLog,
 } from "@shared/schema";
 import type {
   Category, InsertCategory,
@@ -21,6 +22,7 @@ import type {
   TradesmanCredits,
   TradesmanCard, InsertTradesmanCard,
   ModerationLogEntry,
+  InsertPaymentsLog, PaymentsLogEntry,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -77,6 +79,9 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
   getCreditTransactions(tradesmanId: number): Promise<CreditTransaction[]>;
   createCreditTransaction(t: InsertCreditTransaction): Promise<CreditTransaction>;
   countRows(table: "tradesmen" | "jobs" | "reviews"): Promise<number>;
+  // payments_log (Stripe audit trail)
+  createPaymentsLog(entry: InsertPaymentsLog): Promise<PaymentsLogEntry>;
+  getPaymentsLogByTradesman(tradesmanId: number, limit?: number): Promise<PaymentsLogEntry[]>;
 }
 
 const now = () => Date.now();
@@ -183,6 +188,15 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
   async createCreditTransaction(t: InsertCreditTransaction) {
     const [row] = await db.insert(creditTransactions).values({ ...t, createdAt: now() }).returning();
     return row;
+  }
+
+  // ── payments_log ──
+  async createPaymentsLog(entry: InsertPaymentsLog): Promise<PaymentsLogEntry> {
+    const [row] = await db.insert(paymentsLog).values({ ...entry, createdAt: now() }).returning();
+    return row;
+  }
+  async getPaymentsLogByTradesman(tradesmanId: number, limit = 50): Promise<PaymentsLogEntry[]> {
+    return db.select().from(paymentsLog).where(eq(paymentsLog.tradesmanId, tradesmanId)).orderBy(desc(paymentsLog.createdAt)).limit(limit);
   }
 
   async countRows(table: "tradesmen" | "jobs" | "reviews") {
