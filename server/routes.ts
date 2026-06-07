@@ -398,8 +398,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // Featured-status sort is suppressed for tradesmen with active yellows (Featured is revoked).
   app.post("/api/jobs", publicFormGuard(), async (req, res) => {
     try {
+      // Source attribution: prefer the server-resolved microsite host so the
+      // client can't spoof attribution. Falls back to 'web' for main-site
+      // submissions. The schema-validated `source` field on the body is
+      // ignored to keep the surface tamper-resistant.
+      const source = req.microsite
+        ? `microsite:${req.microsite.host}`
+        : 'web';
       const parsed = insertJobSchema.parse({
         ...req.body,
+        source,
         photos: JSON.stringify(req.body.photos || []),
       });
       const job = await storage.createJob(parsed);

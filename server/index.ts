@@ -3,6 +3,9 @@ import express, { Response, NextFunction } from 'express';
 import type { Request } from 'express';
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
+import { micrositeMiddleware } from "./microsite-middleware";
+import { registerMicrositeRoutes } from "./microsite-routes";
+import { registerMicrositeSpa } from "./microsite-spa";
 import { createServer } from "node:http";
 
 const app = express();
@@ -23,6 +26,11 @@ app.use(
 );
 
 app.use(express.urlencoded({ extended: false }));
+
+// Mini-site host resolution must run before route handlers so /api/* can
+// read req.microsite for source attribution, and before serveStatic so the
+// per-host SPA SEO injector can intercept HTML responses.
+app.use(micrositeMiddleware);
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -64,6 +72,10 @@ app.use((req, res, next) => {
 (async () => {
   await registerRoutes(httpServer, app);
 
+  // Per-host sitemap.xml + robots.txt for mini-sites. Registered after the
+  // main API so /api/* takes precedence on every host.
+  registerMicrositeRoutes(app);
+
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
@@ -81,6 +93,9 @@ app.use((req, res, next) => {
   // setting up all the other routes so the catch-all route
   // doesn't interfere with the other routes
   if (process.env.NODE_ENV === "production") {
+    // SEO injector for mini-site hosts must run BEFORE serveStatic's
+    // catch-all, otherwise the un-injected index.html wins.
+    registerMicrositeSpa(app);
     serveStatic(app);
   } else {
     const { setupVite } = await import("./vite");
