@@ -10,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { Tradesman, Job } from "@/lib/api-types";
-import { ShieldAlert, Users, BadgeCheck, Clock, Briefcase, PoundSterling, Star, Gavel } from "lucide-react";
+import { ShieldAlert, Users, BadgeCheck, Clock, Briefcase, PoundSterling, Star, Gavel, Globe } from "lucide-react";
 import { Link } from "wouter";
 import { IssueCardDialog } from "@/components/issue-card-dialog";
 import { CardBadge } from "@/components/card-badge";
@@ -130,10 +130,13 @@ export default function Admin() {
           </Card>
         )}
 
-        {/* Moderation shortcut */}
-        <div className="mt-6">
+        {/* Admin shortcuts */}
+        <div className="mt-6 flex flex-wrap gap-2">
           <Link href="/admin/moderation">
             <Button variant="outline" data-testid="button-moderation-page"><Gavel className="mr-2 h-4 w-4" /> Moderation &amp; cards</Button>
+          </Link>
+          <Link href={`/admin/microsites?key=${encodeURIComponent(authKey)}`}>
+            <Button variant="outline" data-testid="button-microsites-page"><Globe className="mr-2 h-4 w-4" /> Mini-site stats</Button>
           </Link>
         </div>
 
