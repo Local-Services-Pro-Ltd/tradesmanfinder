@@ -10,6 +10,8 @@ import type { TradesmanCard } from "@shared/schema";
 import { emailLog } from "@shared/schema";
 import { db } from "./storage";
 import { redactPII } from "./redact-pii";
+import { selectPlacements } from "./placement-engine";
+import { storage } from "./storage";
 
 const RESEND_API = "https://api.resend.com/emails";
 const PUBLIC_URL = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
@@ -331,6 +333,47 @@ export async function sendCardRescindedEmail(opts: {
   });
 }
 
+/**
+ * Appends a single placement block to email body HTML.
+ * Returns the original html unchanged if no placement found or on any error.
+ * The event_id is embedded as ?eid=<uuid> on the target URL for PR-P6 click attribution.
+ */
+async function appendEmailPlacement(bodyHtml: string, categoryId?: number | null): Promise<string> {
+  try {
+    const result = await selectPlacements({
+      surface: "lead_email_footer",
+      category: categoryId ?? null,
+      limit: 1,
+      storage,
+    });
+    const placement = result.placements[0];
+    if (!placement) return bodyHtml;
+
+    const targetUrl = placement.event_id
+      ? `${placement.target_url}${placement.target_url.includes("?") ? "&" : "?"}eid=${placement.event_id}`
+      : placement.target_url;
+    const headline = escapeHtml(placement.creative.headline);
+    const bodyText = placement.creative.body ? `<p style="margin:6px 0 0;font-size:12px;color:#6b7280">${escapeHtml(placement.creative.body)}</p>` : "";
+    const ctaLabel = escapeHtml(placement.creative.cta || "Learn more");
+
+    const snippet =
+      `<hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0">` +
+      `<table cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px">` +
+      `<tr><td style="padding:12px 14px">` +
+      `<p style="margin:0 0 2px;font-size:10px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.5px">Sponsored</p>` +
+      `<p style="margin:0;font-size:13px;font-weight:600;color:#111827">${headline}</p>` +
+      bodyText +
+      `<a href="${targetUrl}" rel="sponsored noopener" target="_blank" ` +
+      `style="display:inline-block;margin-top:8px;padding:6px 14px;background:#2563eb;color:#fff;font-size:12px;font-weight:600;text-decoration:none;border-radius:4px">${ctaLabel}</a>` +
+      `</td></tr></table>`;
+
+    return bodyHtml + snippet;
+  } catch (err: any) {
+    console.error("[mailer] placement append failed — skipping:", err?.message);
+    return bodyHtml;
+  }
+}
+
 export async function sendNewLeadEmail(opts: {
   to: string;
   businessName: string;
@@ -341,6 +384,7 @@ export async function sendNewLeadEmail(opts: {
   urgency: string;
   budgetRange: string;
   description: string;
+  categoryId?: number | null;
   jobId?: number;
   tradesmanId?: number;
   redactionCount?: number;
@@ -371,9 +415,10 @@ export async function sendNewLeadEmail(opts: {
     `<p style="margin:16px 0 4px;color:#6b7280">Details</p>` +
     `<p style="margin:0 0 8px">${escapeHtml(shortDesc)}</p>` +
     `<p style="margin:16px 0 0;color:#6b7280;font-size:13px">Log in to your dashboard to view the customer's contact details and send a quote.</p>`;
+  const bodyHtmlWithPlacement = await appendEmailPlacement(bodyHtml, opts.categoryId);
   const html = wrap({
     title: subject,
-    bodyHtml,
+    bodyHtml: bodyHtmlWithPlacement,
     ctaUrl: dashboardUrl,
     ctaLabel: "View lead & quote",
     accent: "green",
