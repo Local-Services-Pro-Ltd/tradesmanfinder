@@ -1,10 +1,10 @@
 # Mini-Site Programme
 
-TradesmanFinder operates **83 mini-site domains** as a hyper-local SEO surface. They all point at the main TradesmanFinder app — the server resolves each request's `Host` header against a typed registry and renders a host-specific landing page with its own `<title>`, meta, canonical, JSON-LD, sitemap, and robots.
+TradesmanFinder operates **82 mini-site domains** as a hyper-local SEO surface. They all point at the main TradesmanFinder app — the server resolves each request's `Host` header against a typed registry and renders a host-specific landing page with its own `<title>`, meta, canonical, JSON-LD, sitemap, and robots.
 
-## Why one app, not 83
+## Why one app, not 82
 
-Running 83 separate Vercel projects (or 83 separate repos) would multiply build minutes, secrets, and review surface for zero functional benefit. The mini-sites differ only in copy + SEO; the underlying data (categories, areas, tradesmen, jobs) is shared. We attach all 83 domains to the same Vercel project (`tradesmanfinder`) and discriminate per-request via middleware.
+Running 82 separate Vercel projects (or 82 separate repos) would multiply build minutes, secrets, and review surface for zero functional benefit. The mini-sites differ only in copy + SEO; the underlying data (categories, areas, tradesmen, jobs) is shared. We attach all 82 domains to the same Vercel project (`tradesmanfinder`) and discriminate per-request via middleware.
 
 ## Registry shape
 
@@ -28,12 +28,12 @@ Counts (enforced by `shared/microsites.test.ts`):
 
 | Kind | Count | Behaviour |
 |---|---|---|
-| `geo-trade` | 57 | Renders mini-site page with trade + area copy |
+| `geo-trade` | 56 | Renders mini-site page with trade + area copy |
 | `generic-directory` | 20 | Renders mini-site page with national trade copy |
 | `vertical` | 3 | Renders mini-site page with custom title |
 | `redirect` | 3 | 301s to `redirectTo` (no content served) |
 
-`MICROSITE_COUNT = 83`.
+`MICROSITE_COUNT = 82`.
 
 ## Request flow
 
@@ -74,10 +74,10 @@ The middleware mounts in `server/index.ts` **before** `registerRoutes`, so API h
 
 ## IONOS DNS
 
-All 83 domains are at IONOS. For each host, set:
+All 82 domains are at IONOS. For each host, set:
 
 ```
-@   A    76.76.21.21        (Vercel's anycast)
+@   A    216.150.1.1        (Vercel's anycast)
 www CNAME cname.vercel-dns.com.
 ```
 

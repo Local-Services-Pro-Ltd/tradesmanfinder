@@ -39,7 +39,7 @@ const DB_AREAS = new Set([
 describe('microsite registry', () => {
   it('contains MICROSITE_COUNT entries matching the array length', () => {
     expect(MICROSITES).toHaveLength(MICROSITE_COUNT);
-    expect(MICROSITE_COUNT).toBe(83);
+    expect(MICROSITE_COUNT).toBe(82);
   });
 
   it('has unique hostnames (no duplicate registrations)', () => {
@@ -106,17 +106,20 @@ describe('microsite registry', () => {
   it('expected kind counts (sanity check on portfolio shape)', () => {
     const counts: Record<string, number> = {};
     for (const m of MICROSITES) counts[m.kind] = (counts[m.kind] ?? 0) + 1;
-    expect(counts['geo-trade']).toBe(57);
+    expect(counts['geo-trade']).toBe(56);
     expect(counts['generic-directory']).toBe(20);
     expect(counts['vertical']).toBe(3);
     expect(counts['redirect']).toBe(3);
   });
 
-  // PR-M6 — closes #16 and #17. Both areas already exist in the DB seed
-  // (abbey-wood, plumstead), so these entries activate the moment DNS is
-  // pointed at Vercel. Note: per Issue #16 the domain is singular
-  // 'abbeywoodbuilder.co.uk', not the plural form used elsewhere in the
-  // cluster (e.g. blackheathbuilders.co.uk).
+  // PR-M6 — closes #16. The area 'abbey-wood' already exists in the DB seed,
+  // so this entry activates the moment DNS is pointed at Vercel. Note: per
+  // Issue #16 the domain is singular 'abbeywoodbuilder.co.uk', not the plural
+  // form used elsewhere in the cluster (e.g. blackheathbuilders.co.uk).
+  //
+  // Note: plumsteadplumbers.co.uk was de-registered (issue #17 reopened) —
+  // its nameservers were delegated to Smarthost.pl, making DNS unmanageable
+  // through IONOS without an NS transfer that wasn't worth the toil.
   it('includes abbeywoodbuilder.co.uk → builder × abbey-wood (Issue #16)', () => {
     const m = resolveMicrositeByHost('abbeywoodbuilder.co.uk');
     expect(m).not.toBeNull();
@@ -125,12 +128,9 @@ describe('microsite registry', () => {
     expect(m?.area).toBe('abbey-wood');
   });
 
-  it('includes plumsteadplumbers.co.uk → plumber × plumstead (Issue #17)', () => {
+  it('does not include plumsteadplumbers.co.uk (de-registered)', () => {
     const m = resolveMicrositeByHost('plumsteadplumbers.co.uk');
-    expect(m).not.toBeNull();
-    expect(m?.kind).toBe('geo-trade');
-    expect(m?.trade).toBe('plumber');
-    expect(m?.area).toBe('plumstead');
+    expect(m).toBeNull();
   });
 });
 

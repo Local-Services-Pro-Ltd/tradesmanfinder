@@ -39,7 +39,7 @@ export type Microsite = {
   redirectTo?: string;
 };
 
-/** All 83 registered mini-site domains. */
+/** All 82 registered mini-site domains. */
 export const MICROSITES: ReadonlyArray<Microsite> = [
   { host: 'abbeywoodbuilder.co.uk', kind: 'geo-trade', trade: 'builder', area: 'abbey-wood' },
   { host: 'abingdonbuilders.co.uk', kind: 'geo-trade', trade: 'builder', area: 'abingdon' },
@@ -114,7 +114,6 @@ export const MICROSITES: ReadonlyArray<Microsite> = [
   { host: 'mortlakebuilders.co.uk', kind: 'geo-trade', trade: 'builder', area: 'mortlake' },
   { host: 'newhambuilders.co.uk', kind: 'geo-trade', trade: 'builder', area: 'newham' },
   { host: 'pimlicobuilders.co.uk', kind: 'geo-trade', trade: 'builder', area: 'pimlico' },
-  { host: 'plumsteadplumbers.co.uk', kind: 'geo-trade', trade: 'plumber', area: 'plumstead' },
   { host: 'redbridgebuilders.co.uk', kind: 'geo-trade', trade: 'builder', area: 'redbridge' },
   { host: 'repairmyproperty.co.uk', kind: 'vertical', vertical: 'property-repair', title: 'Repair my property — find local property repair specialists' },
   { host: 'repairyourproperty.co.uk', kind: 'vertical', vertical: 'property-repair', title: 'Repair your property — UK property repair directory' },
@@ -150,4 +149,4 @@ export function resolveMicrositeByHost(rawHost: string | undefined | null): Micr
 }
 
 /** Total number of registered domains (for tests / observability). */
-export const MICROSITE_COUNT = 83;
+export const MICROSITE_COUNT = 82;
