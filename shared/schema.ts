@@ -101,6 +101,11 @@ export const jobs = pgTable("jobs", {
   budgetRange: text("budget_range").notNull().default(""),
   photos: text("photos").notNull().default("[]"), // JSON array
   status: text("status").notNull().default("open"), // open | matched | completed | cancelled
+  // Attribution: where the job originated. 'web' for the main site, or
+  // 'microsite:<host>' for a mini-site lead so we can report per-domain
+  // conversion. Defaults to 'web' for backwards compatibility with existing
+  // jobs and the public POST path when no microsite is resolved.
+  source: text("source").notNull().default("web"),
   createdAt: bigint("created_at", { mode: "number" }).notNull().default(0),
 });
 
@@ -108,6 +113,10 @@ export const insertJobSchema = createInsertSchema(jobs).omit({
   id: true,
   status: true,
   createdAt: true,
+}).extend({
+  // `source` is server-attributed in the route handler from req.microsite,
+  // not user input. Allow it through validation but treat it as optional.
+  source: z.string().max(120).optional(),
 });
 export type InsertJob = z.infer<typeof insertJobSchema>;
 export type Job = typeof jobs.$inferSelect;

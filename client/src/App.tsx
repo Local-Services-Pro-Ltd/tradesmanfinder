@@ -11,6 +11,7 @@ import Categories from "@/pages/categories";
 import Category from "@/pages/category";
 import AreaPage from "@/pages/area";
 import Hyperlocal from "@/pages/hyperlocal";
+import MicrositePage from "@/pages/microsite";
 import TradesmanProfile from "@/pages/tradesman";
 import PostAJob from "@/pages/post-a-job";
 import ForTradesmen from "@/pages/for-tradesmen";
@@ -42,9 +43,15 @@ const useHashLocationStripQuery: typeof useHashLocation = ((opts) => {
   (useHashLocation as unknown as { hrefs: (h: string) => string }).hrefs;
 
 function AppRouter() {
+  // When the server has resolved this host as a mini-site it injects
+  // window.__MICROSITE__ into the SPA bootstrap. We route the root path to
+  // a dedicated mini-site renderer instead of the generic homepage; all
+  // other client-side routes work unchanged.
+  const HomeOrMicrosite =
+    typeof window !== "undefined" && window.__MICROSITE__ ? MicrositePage : Home;
   return (
     <Switch>
-      <Route path="/" component={Home} />
+      <Route path="/" component={HomeOrMicrosite} />
       <Route path="/categories" component={Categories} />
       <Route path="/category/:catSlug/in/:areaSlug" component={Hyperlocal} />
       <Route path="/category/:slug" component={Category} />
