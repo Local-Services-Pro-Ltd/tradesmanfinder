@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { PartnerPlacement } from "@/components/partner-placement";
 import { Layout } from "@/components/layout";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -295,6 +296,7 @@ export default function Partners() {
           )}
         </div>
       </section>
+      <PartnerPlacement surface="partners_page" className="mx-auto max-w-3xl px-4 pb-12 sm:px-6" />
     </Layout>
   );
 }

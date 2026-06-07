@@ -1,4 +1,5 @@
 import { useRoute, Link } from "wouter";
+import { PartnerPlacement } from "@/components/partner-placement";
 import { useQuery } from "@tanstack/react-query";
 import { Layout } from "@/components/layout";
 import { TradesmanGrid } from "@/components/tradesman-grid";
@@ -59,6 +60,7 @@ export default function AreaPage() {
           </div>
         )}
       </div>
+      <PartnerPlacement surface="area_footer" area={area?.id} className="mx-auto max-w-7xl px-4 pb-10 sm:px-6" />
     </Layout>
   );
 }

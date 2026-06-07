@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { PartnerPlacement } from "@/components/partner-placement";
 import { Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { Layout } from "@/components/layout";
@@ -400,6 +401,7 @@ export default function Dashboard() {
             </div>
           </TabsContent>
         </Tabs>
+        <PartnerPlacement surface="dashboard_sidebar" className="mt-6" />
       </div>
     </Layout>
   );

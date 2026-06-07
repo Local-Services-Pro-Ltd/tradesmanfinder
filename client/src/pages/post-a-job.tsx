@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { PartnerPlacement } from "@/components/partner-placement";
 import { Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { Layout } from "@/components/layout";
@@ -107,6 +108,7 @@ export default function PostAJob() {
             <Link href="/"><Button variant="outline" data-testid="button-home">Back to home</Button></Link>
             <Link href="/categories"><Button data-testid="button-browse">Browse more trades</Button></Link>
           </div>
+          <PartnerPlacement surface="job_confirmation" category={cat?.id} className="mt-8" />
         </div>
       </Layout>
     );

@@ -219,6 +219,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             urgency: job.urgency,
             budgetRange: job.budgetRange ?? "",
             description: job.description,
+            categoryId: job.categoryId,
             // Correlation ids — persisted to email_log so the audit trail can
             // be filtered per job (admin debug) or per tradesperson
             // (dashboard 'recent leads sent to you' view).
