@@ -10,6 +10,8 @@ import {
 import { selectPlacements, debugPlacements } from "./placement-engine";
 import { computeInvoice, computeStats } from "./invoice-generator";
 import { registerClickRoute } from "./click-tracking";
+import { registerOutcomeCaptureRoute } from "./outcome-capture";
+import { signOutcomeToken, buildOutcomeLink } from "./outcome-tokens";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
 import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail } from "./mailer";
 import type { Tradesman, TradesmanCard } from "@shared/schema";
@@ -58,6 +60,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // ── Partner click tracking ── (PR-P6)
   // Must be registered BEFORE admin routes to avoid route conflicts.
   registerClickRoute(app);
+
+  // ── Partner outcome capture ── (PR-P8)
+  // Public signed-link endpoint at /p/o/:token. Same priority as click.
+  registerOutcomeCaptureRoute(app);
 
   // Admin auth: header x-admin-key OR ?key=ADMIN_KEY query param
   const isAdminReq = (req: any): boolean =>
@@ -1296,6 +1302,154 @@ res.json(updated);
     let parsedLineItems: unknown = [];
     try { parsedLineItems = JSON.parse(updated.lineItems); } catch { /* ignore */ }
     res.json({ ...updated, lineItems: parsedLineItems });
+  });
+
+  // ──── PR-P8: OUTCOME CAPTURE (admin views) ────
+
+  // GET /api/admin/partners/:partnerId/outcomes?from=<ms>&to=<ms>
+  // Lists lead_outcome events with parsed metadata. Default range: last 90 days.
+  app.get('/api/admin/partners/:partnerId/outcomes', async (req, res) => {
+    if (!isAdminReq(req)) return res.status(401).json({ message: 'Unauthorized' });
+    const partnerId = Number(req.params.partnerId);
+    if (!Number.isFinite(partnerId)) return res.status(400).json({ message: 'Invalid partnerId' });
+
+    const now = Date.now();
+    const fromMs = req.query.from ? Number(req.query.from) : now - 90 * 24 * 60 * 60 * 1000;
+    const toMs = req.query.to ? Number(req.query.to) : now;
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs >= toMs) {
+      return res.status(400).json({ message: 'Invalid from/to range' });
+    }
+
+    const events = await storage.getPartnerEventsInRange(partnerId, fromMs, toMs);
+    const outcomes = events
+      .filter((e) => e.eventType === 'lead_outcome')
+      .map((e) => {
+        let meta: Record<string, unknown> = {};
+        try { meta = e.metadata ? JSON.parse(e.metadata) : {}; } catch { /* ignore */ }
+        const outcome = typeof meta.outcome === 'string' ? meta.outcome : null;
+        const dealValuePence =
+          typeof meta.deal_value_pence === 'number' ? meta.deal_value_pence : null;
+        return {
+          id: e.id,
+          placementId: e.placementId,
+          jobId: e.jobId ?? (typeof meta.job_id === 'number' ? meta.job_id : null),
+          outcome,
+          dealValuePence,
+          recordedVia: typeof meta.recorded_via === 'string' ? meta.recorded_via : 'unknown',
+          occurredAt: e.occurredAt,
+        };
+      });
+
+    const summary = {
+      total: outcomes.length,
+      won: outcomes.filter((o) => o.outcome === 'won').length,
+      lost: outcomes.filter((o) => o.outcome === 'lost').length,
+      quoted: outcomes.filter((o) => o.outcome === 'quoted').length,
+      totalDealValuePence: outcomes
+        .filter((o) => o.outcome === 'won' && o.dealValuePence != null)
+        .reduce((acc, o) => acc + (o.dealValuePence as number), 0),
+    };
+
+    res.json({ partnerId, from: fromMs, to: toMs, summary, outcomes });
+  });
+
+  // POST /api/admin/partners/:partnerId/outcomes/manual
+  //   { placementId, jobId, outcome: 'won'|'lost'|'quoted', dealValuePence?, notes? }
+  // Allows admin/finance to record an outcome manually when the partner didn't
+  // click the email link (phoned in, replied by email, etc.).
+  app.post('/api/admin/partners/:partnerId/outcomes/manual', async (req, res) => {
+    if (!isAdminReq(req)) return res.status(401).json({ message: 'Unauthorized' });
+    const partnerId = Number(req.params.partnerId);
+    if (!Number.isFinite(partnerId)) return res.status(400).json({ message: 'Invalid partnerId' });
+
+    const placementId = Number(req.body?.placementId);
+    const jobId = Number(req.body?.jobId);
+    const outcome = String(req.body?.outcome ?? '');
+    const dealValuePence =
+      req.body?.dealValuePence !== undefined && req.body?.dealValuePence !== null
+        ? Number(req.body.dealValuePence)
+        : null;
+    const notes = req.body?.notes ? String(req.body.notes) : null;
+
+    if (!Number.isFinite(placementId) || !Number.isFinite(jobId)) {
+      return res.status(400).json({ message: 'placementId and jobId are required integers' });
+    }
+    if (!['won', 'lost', 'quoted'].includes(outcome)) {
+      return res.status(400).json({ message: 'outcome must be won|lost|quoted' });
+    }
+    if (dealValuePence !== null && (!Number.isFinite(dealValuePence) || dealValuePence < 0 || !Number.isInteger(dealValuePence))) {
+      return res.status(400).json({ message: 'dealValuePence must be a non-negative integer' });
+    }
+
+    const placement = await storage.getPartnerPlacementById(placementId);
+    if (!placement || placement.partnerId !== partnerId) {
+      return res.status(404).json({ message: 'Placement not found for partner' });
+    }
+
+    const eventId = `manual-${jobId}-${outcome}`;
+    try {
+      await storage.createPartnerEvent({
+        placement_id: placementId,
+        partner_id: partnerId,
+        event_type: 'lead_outcome',
+        event_id: eventId,
+        surface: placement.surface,
+        amount_pence: 0,
+        metadata: {
+          outcome,
+          job_id: jobId,
+          deal_value_pence: dealValuePence,
+          recorded_via: 'manual_admin',
+          notes,
+        },
+      });
+      return res.status(201).json({ ok: true, eventId });
+    } catch (err: unknown) {
+      console.warn('[outcomes-manual] duplicate or failed event:', (err as Error)?.message);
+      return res.status(200).json({ ok: true, eventId, _existing: true });
+    }
+  });
+
+  // POST /api/admin/partners/:partnerId/outcomes/sign
+  //   { placementId, jobId, ttlDays? }  →  { token, links: {won, lost, quoted} }
+  // Generates signed outcome links so admins/finance can manually email
+  // partners and ask them to mark a lead.
+  app.post('/api/admin/partners/:partnerId/outcomes/sign', async (req, res) => {
+    if (!isAdminReq(req)) return res.status(401).json({ message: 'Unauthorized' });
+    const partnerId = Number(req.params.partnerId);
+    if (!Number.isFinite(partnerId)) return res.status(400).json({ message: 'Invalid partnerId' });
+
+    const placementId = Number(req.body?.placementId);
+    const jobId = Number(req.body?.jobId);
+    const ttlDays = req.body?.ttlDays ? Number(req.body.ttlDays) : 90;
+
+    if (!Number.isFinite(placementId) || !Number.isFinite(jobId)) {
+      return res.status(400).json({ message: 'placementId and jobId are required integers' });
+    }
+    if (!Number.isFinite(ttlDays) || ttlDays <= 0 || ttlDays > 365) {
+      return res.status(400).json({ message: 'ttlDays must be 1–365' });
+    }
+
+    const placement = await storage.getPartnerPlacementById(placementId);
+    if (!placement || placement.partnerId !== partnerId) {
+      return res.status(404).json({ message: 'Placement not found for partner' });
+    }
+
+    const token = signOutcomeToken({
+      partnerId,
+      placementId,
+      jobId,
+      ttlMs: ttlDays * 24 * 60 * 60 * 1000,
+    });
+    res.json({
+      token,
+      links: {
+        won: buildOutcomeLink(token, 'won'),
+        lost: buildOutcomeLink(token, 'lost'),
+        quoted: buildOutcomeLink(token, 'quoted'),
+      },
+      expiresInDays: ttlDays,
+    });
   });
 
   // ════ PR-P4: PLACEMENT ENGINE ════

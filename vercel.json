@@ -14,6 +14,7 @@
     { "source": "/api/(.*)", "destination": "/api/index.js" },
     { "source": "/checkout/return", "destination": "/api/index.js" },
     { "source": "/p/c/(.*)", "destination": "/api/index.js" },
-    { "source": "/((?!api/|p/c/|assets/|.*\\.[a-zA-Z0-9]+$).*)", "destination": "/index.html" }
+    { "source": "/p/o/(.*)", "destination": "/api/index.js" },
+    { "source": "/((?!api/|p/c/|p/o/|assets/|.*\\.[a-zA-Z0-9]+$).*)", "destination": "/index.html" }
   ]
 }
