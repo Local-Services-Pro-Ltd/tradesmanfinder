@@ -36,7 +36,7 @@ import type {
   Partner, InsertPartner,
   PartnerPlacement, InsertPartnerPlacement,
   PartnerEvent,
-  PartnerInvoice,
+  PartnerInvoice, InsertPartnerInvoice,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -132,8 +132,14 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
   // events (read-only)
   getPartnerEventsByPartner(partnerId: number, filters?: { eventType?: string; from?: number; to?: number; limit?: number }): Promise<PartnerEvent[]>;
   getPartnerEventCountsByPartner(partnerId: number, sinceMs: number): Promise<Record<string, number>>;
-  // invoices (read-only stub)
+  // invoices
   getPartnerInvoicesByPartner(partnerId: number): Promise<PartnerInvoice[]>;
+  getPartnerInvoiceById(id: number): Promise<PartnerInvoice | undefined>;
+  findPartnerInvoiceForPeriod(partnerId: number, periodStart: number, periodEnd: number): Promise<PartnerInvoice | undefined>;
+  createPartnerInvoice(input: InsertPartnerInvoice): Promise<PartnerInvoice>;
+  updatePartnerInvoice(id: number, patch: Partial<PartnerInvoice>): Promise<PartnerInvoice | undefined>;
+  /** All events for a partner within [from, to). Used by the invoice generator and the stats endpoint. */
+  getPartnerEventsInRange(partnerId: number, from: number, to: number): Promise<PartnerEvent[]>;
   // ── placement engine (PR-P4) ──
   /** Returns all placements for a surface (time-active filtering done client-side). */
   getActivePlacementsBySurface(surface: string): Promise<PartnerPlacement[]>;
@@ -526,12 +532,72 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
     return Object.fromEntries(rows.map((r) => [r.eventType, r.count]));
   }
 
-  // -- invoices (read-only stub) --
+  // -- invoices --
 
   async getPartnerInvoicesByPartner(partnerId: number): Promise<PartnerInvoice[]> {
     return db.select().from(partnerInvoices)
       .where(eq(partnerInvoices.partnerId, partnerId))
       .orderBy(desc(partnerInvoices.generatedAt));
+  }
+
+  async getPartnerInvoiceById(id: number): Promise<PartnerInvoice | undefined> {
+    return one(db.select().from(partnerInvoices).where(eq(partnerInvoices.id, id)).limit(1));
+  }
+
+  /**
+   * Idempotency helper for the generate-invoice endpoint. Two invoices for
+   * the same (partner, periodStart, periodEnd) triple would let admins
+   * accidentally double-bill, so we look up before insert.
+   */
+  async findPartnerInvoiceForPeriod(partnerId: number, periodStart: number, periodEnd: number): Promise<PartnerInvoice | undefined> {
+    return one(
+      db.select().from(partnerInvoices)
+        .where(and(
+          eq(partnerInvoices.partnerId, partnerId),
+          eq(partnerInvoices.periodStart, periodStart),
+          eq(partnerInvoices.periodEnd, periodEnd),
+        ))
+        .limit(1),
+    );
+  }
+
+  async createPartnerInvoice(input: InsertPartnerInvoice): Promise<PartnerInvoice> {
+    const [row] = await db.insert(partnerInvoices).values({
+      ...input,
+      generatedAt: now(),
+    }).returning();
+    return row;
+  }
+
+  async updatePartnerInvoice(id: number, patch: Partial<PartnerInvoice>): Promise<PartnerInvoice | undefined> {
+    // Whitelist updatable fields. We never let callers rewrite the period,
+    // line items, or total — those are immutable once generated. To change
+    // amounts, void the invoice and generate a new one.
+    const safe: Record<string, unknown> = {};
+    if (patch.status !== undefined) safe.status = patch.status;
+    if (patch.stripeInvoiceId !== undefined) safe.stripeInvoiceId = patch.stripeInvoiceId;
+    if (patch.sentAt !== undefined) safe.sentAt = patch.sentAt;
+    if (patch.paidAt !== undefined) safe.paidAt = patch.paidAt;
+    if (Object.keys(safe).length === 0) {
+      return this.getPartnerInvoiceById(id);
+    }
+    const [row] = await db.update(partnerInvoices).set(safe).where(eq(partnerInvoices.id, id)).returning();
+    return row;
+  }
+
+  /**
+   * All partner_events rows for a partner with occurredAt in [from, to).
+   * Used by both the invoice generator (single period) and the admin stats
+   * page (rolling window).
+   */
+  async getPartnerEventsInRange(partnerId: number, from: number, to: number): Promise<PartnerEvent[]> {
+    return db.select().from(partnerEvents)
+      .where(and(
+        eq(partnerEvents.partnerId, partnerId),
+        gte(partnerEvents.occurredAt, from),
+        lt(partnerEvents.occurredAt, to),
+      ))
+      .orderBy(desc(partnerEvents.occurredAt));
   }
 
   // ── placement engine (PR-P4) ──
