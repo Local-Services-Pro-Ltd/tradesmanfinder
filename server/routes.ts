@@ -4,6 +4,8 @@ import { storage } from "./storage";
 import {
   insertJobSchema, insertQuoteSchema, insertReviewSchema, insertTradesmanSchema,
   insertPartnerEnquirySchema, PARTNER_ENQUIRY_VERTICALS,
+  insertPartnerSchema, insertPartnerPlacementSchema,
+  PARTNER_ENQUIRY_STATUSES, PARTNER_STATUSES, PARTNER_SURFACES, PARTNER_COMMERCIAL_MODELS, PARTNER_VERTICALS,
 } from "@shared/schema";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
 import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification } from "./mailer";
@@ -667,6 +669,279 @@ const avg = approved.length ? approved.reduce((s, r) => s + r.rating, 0) / appro
 await storage.updateTradesman(review.tradesmanId, { ratingAverage: Math.round(avg * 10) / 10, ratingCount: approved.length });
 res.json(updated);
 });
+
+  // ════ ADMIN PARTNER PROGRAMME (PR-P3) ════
+
+  // ── Enquiries ──
+
+  // GET /api/admin/partner-enquiries?status=new  — list, optional status filter, newest first
+  app.get('/api/admin/partner-enquiries', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const status = req.query.status ? String(req.query.status) : undefined;
+    const enquiries = await storage.getPartnerEnquiriesByStatus(status, 100);
+    res.json(enquiries);
+  });
+
+  // GET /api/admin/partner-enquiries/:id  — single enquiry
+  app.get('/api/admin/partner-enquiries/:id', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'Invalid id' });
+    const enquiry = await storage.getPartnerEnquiryById(id);
+    if (!enquiry) return res.status(404).json({ message: 'Enquiry not found' });
+    res.json(enquiry);
+  });
+
+  // POST /api/admin/partner-enquiries/:id/status  { status }
+  app.post('/api/admin/partner-enquiries/:id/status', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'Invalid id' });
+    const statusVal = String(req.body?.status || '');
+    if (!(PARTNER_ENQUIRY_STATUSES as readonly string[]).includes(statusVal)) {
+      return res.status(400).json({ message: `status must be one of: ${PARTNER_ENQUIRY_STATUSES.join(', ')}` });
+    }
+    const enquiry = await storage.getPartnerEnquiryById(id);
+    if (!enquiry) return res.status(404).json({ message: 'Enquiry not found' });
+    const updated = await storage.updatePartnerEnquiryStatus(id, statusVal);
+    res.json(updated);
+  });
+
+  // POST /api/admin/partner-enquiries/:id/convert  { slug, billingEmail?, billingContact?, notes? }
+  app.post('/api/admin/partner-enquiries/:id/convert', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'Invalid id' });
+
+    const slugRaw = String(req.body?.slug || '').trim();
+    const slugSchema = z.string().min(2).max(60).regex(/^[a-z0-9-]+$/, 'slug must be lowercase letters, numbers, and hyphens only');
+    const slugParse = slugSchema.safeParse(slugRaw);
+    if (!slugParse.success) {
+      return res.status(400).json({ message: 'Validation failed', errors: slugParse.error.errors });
+    }
+
+    try {
+      const result = await storage.promoteEnquiryToPartner(id, {
+        slug: slugParse.data,
+        billingEmail: req.body?.billingEmail ?? null,
+        billingContact: req.body?.billingContact ?? null,
+        notes: req.body?.notes ?? null,
+      });
+      res.status(201).json(result);
+    } catch (err: any) {
+      if (err?.code === 'SLUG_CONFLICT') return res.status(409).json({ message: 'Slug already in use — choose a different one' });
+      if (err?.message === 'Enquiry not found') return res.status(404).json({ message: 'Enquiry not found' });
+      throw err;
+    }
+  });
+
+  // ── Partners CRUD ──
+
+  // GET /api/admin/partners
+  app.get('/api/admin/partners', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const all = await storage.getPartners();
+    res.json(all);
+  });
+
+  // GET /api/admin/partners/:id  — full record with placements + event counts
+  app.get('/api/admin/partners/:id', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'Invalid id' });
+    const partner = await storage.getPartnerById(id);
+    if (!partner) return res.status(404).json({ message: 'Partner not found' });
+    const placements = await storage.getPartnerPlacementsByPartner(id);
+    const recentPlacements = placements.slice(0, 20);
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const eventCounts = await storage.getPartnerEventCountsByPartner(id, thirtyDaysAgo);
+    res.json({ ...partner, recentPlacements, eventCounts });
+  });
+
+  // POST /api/admin/partners  — create directly
+  app.post('/api/admin/partners', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+
+    const slugRaw = String(req.body?.slug || '').trim();
+    const slugSchema = z.string().min(2).max(60).regex(/^[a-z0-9-]+$/, 'slug must be lowercase letters, numbers, and hyphens only');
+    const slugParse = slugSchema.safeParse(slugRaw);
+    if (!slugParse.success) {
+      return res.status(400).json({ message: 'Validation failed', errors: slugParse.error.errors });
+    }
+
+    const verticalVal = String(req.body?.vertical || '');
+    if (!(PARTNER_VERTICALS as readonly string[]).includes(verticalVal)) {
+      return res.status(400).json({ message: `vertical must be one of: ${PARTNER_VERTICALS.join(', ')}` });
+    }
+
+    const nameVal = String(req.body?.name || '').trim();
+    if (!nameVal) return res.status(400).json({ message: 'name is required' });
+
+    const existing = await storage.getPartnerBySlug(slugParse.data);
+    if (existing) return res.status(409).json({ message: 'Slug already in use' });
+
+    const partner = await storage.createPartner({
+      slug: slugParse.data,
+      name: nameVal,
+      vertical: verticalVal,
+      status: req.body?.status && (PARTNER_STATUSES as readonly string[]).includes(String(req.body.status)) ? String(req.body.status) : 'inactive',
+      billingEmail: req.body?.billingEmail ?? null,
+      billingContact: req.body?.billingContact ?? null,
+      notes: req.body?.notes ?? null,
+    });
+    res.status(201).json(partner);
+  });
+
+  // PATCH /api/admin/partners/:id  — partial update
+  app.patch('/api/admin/partners/:id', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'Invalid id' });
+    const partner = await storage.getPartnerById(id);
+    if (!partner) return res.status(404).json({ message: 'Partner not found' });
+
+    const patch: Record<string, unknown> = {};
+    if (req.body?.name !== undefined) patch.name = String(req.body.name).trim();
+    if (req.body?.status !== undefined) {
+      if (!(PARTNER_STATUSES as readonly string[]).includes(String(req.body.status))) {
+        return res.status(400).json({ message: `status must be one of: ${PARTNER_STATUSES.join(', ')}` });
+      }
+      patch.status = String(req.body.status);
+    }
+    if (req.body?.billingEmail !== undefined) patch.billingEmail = req.body.billingEmail;
+    if (req.body?.billingContact !== undefined) patch.billingContact = req.body.billingContact;
+    if (req.body?.notes !== undefined) patch.notes = req.body.notes;
+
+    const updated = await storage.updatePartner(id, patch);
+    res.json(updated);
+  });
+
+  // DELETE /api/admin/partners/:id
+  app.delete('/api/admin/partners/:id', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'Invalid id' });
+    const result = await storage.deletePartner(id);
+    if (!result.ok) return res.status(409).json({ message: result.reason });
+    res.status(204).end();
+  });
+
+  // ── Placements CRUD ──
+
+  // GET /api/admin/partners/:partnerId/placements
+  app.get('/api/admin/partners/:partnerId/placements', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const partnerId = Number(req.params.partnerId);
+    if (!Number.isFinite(partnerId)) return res.status(400).json({ message: 'Invalid partnerId' });
+    const placements = await storage.getPartnerPlacementsByPartner(partnerId);
+    res.json(placements);
+  });
+
+  // POST /api/admin/partners/:partnerId/placements
+  app.post('/api/admin/partners/:partnerId/placements', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const partnerId = Number(req.params.partnerId);
+    if (!Number.isFinite(partnerId)) return res.status(400).json({ message: 'Invalid partnerId' });
+    const partner = await storage.getPartnerById(partnerId);
+    if (!partner) return res.status(404).json({ message: 'Partner not found' });
+
+    const surfaceVal = String(req.body?.surface || '');
+    if (!(PARTNER_SURFACES as readonly string[]).includes(surfaceVal)) {
+      return res.status(400).json({ message: `surface must be one of: ${PARTNER_SURFACES.join(', ')}` });
+    }
+    const modelVal = String(req.body?.commercialModel || '');
+    if (!(PARTNER_COMMERCIAL_MODELS as readonly string[]).includes(modelVal)) {
+      return res.status(400).json({ message: `commercialModel must be one of: ${PARTNER_COMMERCIAL_MODELS.join(', ')}` });
+    }
+    const ratePence = Number(req.body?.ratePence);
+    if (!Number.isFinite(ratePence) || ratePence < 0) return res.status(400).json({ message: 'ratePence must be a non-negative integer' });
+    const activeFrom = Number(req.body?.activeFrom);
+    if (!Number.isFinite(activeFrom)) return res.status(400).json({ message: 'activeFrom is required (unix ms)' });
+
+    const placement = await storage.createPartnerPlacement({
+      partnerId,
+      surface: surfaceVal,
+      commercialModel: modelVal,
+      ratePence: Math.floor(ratePence),
+      rateCapPence: req.body?.rateCapPence != null ? Math.floor(Number(req.body.rateCapPence)) : null,
+      categoryFilter: req.body?.categoryFilter ?? '[]',
+      areaFilter: req.body?.areaFilter ?? '[]',
+      priority: req.body?.priority != null ? Number(req.body.priority) : 100,
+      activeFrom,
+      activeTo: req.body?.activeTo != null ? Number(req.body.activeTo) : null,
+      creativeHtml: req.body?.creativeHtml ?? null,
+      creativeUrl: req.body?.creativeUrl ?? null,
+    });
+    res.status(201).json(placement);
+  });
+
+  // PATCH /api/admin/placements/:id
+  app.patch('/api/admin/placements/:id', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'Invalid id' });
+    const placement = await storage.getPartnerPlacementById(id);
+    if (!placement) return res.status(404).json({ message: 'Placement not found' });
+
+    const patch: Record<string, unknown> = {};
+    if (req.body?.surface !== undefined) {
+      if (!(PARTNER_SURFACES as readonly string[]).includes(String(req.body.surface))) {
+        return res.status(400).json({ message: `surface must be one of: ${PARTNER_SURFACES.join(', ')}` });
+      }
+      patch.surface = String(req.body.surface);
+    }
+    if (req.body?.commercialModel !== undefined) {
+      if (!(PARTNER_COMMERCIAL_MODELS as readonly string[]).includes(String(req.body.commercialModel))) {
+        return res.status(400).json({ message: `commercialModel must be one of: ${PARTNER_COMMERCIAL_MODELS.join(', ')}` });
+      }
+      patch.commercialModel = String(req.body.commercialModel);
+    }
+    const patchFields = ['ratePence', 'rateCapPence', 'categoryFilter', 'areaFilter', 'priority', 'activeFrom', 'activeTo', 'creativeHtml', 'creativeUrl'] as const;
+    for (const field of patchFields) {
+      if (req.body?.[field] !== undefined) patch[field] = req.body[field];
+    }
+
+    const updated = await storage.updatePartnerPlacement(id, patch);
+    res.json(updated);
+  });
+
+  // DELETE /api/admin/placements/:id  — hard delete
+  app.delete('/api/admin/placements/:id', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'Invalid id' });
+    const placement = await storage.getPartnerPlacementById(id);
+    if (!placement) return res.status(404).json({ message: 'Placement not found' });
+    await storage.deletePartnerPlacement(id);
+    res.status(204).end();
+  });
+
+  // ── Events (read-only) ──
+
+  // GET /api/admin/partners/:partnerId/events?eventType=&from=&to=&limit=200
+  app.get('/api/admin/partners/:partnerId/events', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const partnerId = Number(req.params.partnerId);
+    if (!Number.isFinite(partnerId)) return res.status(400).json({ message: 'Invalid partnerId' });
+    const filters: { eventType?: string; from?: number; to?: number; limit?: number } = {};
+    if (req.query.eventType) filters.eventType = String(req.query.eventType);
+    if (req.query.from) filters.from = Number(req.query.from);
+    if (req.query.to) filters.to = Number(req.query.to);
+    filters.limit = req.query.limit ? Math.min(Number(req.query.limit), 500) : 200;
+    const events = await storage.getPartnerEventsByPartner(partnerId, filters);
+    res.json(events);
+  });
+
+  // ── Invoices (read-only stub) ──
+
+  // GET /api/admin/partners/:partnerId/invoices
+  app.get('/api/admin/partners/:partnerId/invoices', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const partnerId = Number(req.params.partnerId);
+    if (!Number.isFinite(partnerId)) return res.status(400).json({ message: 'Invalid partnerId' });
+    const invoices = await storage.getPartnerInvoicesByPartner(partnerId);
+    res.json(invoices);
+  });
 
   return httpServer;
 }

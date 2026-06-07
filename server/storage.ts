@@ -11,6 +11,10 @@ import {
   moderationLog,
   paymentsLog,
   partnerEnquiries,
+  partners,
+  partnerPlacements,
+  partnerEvents,
+  partnerInvoices,
 } from "@shared/schema";
 import type {
   Category, InsertCategory,
@@ -25,10 +29,14 @@ import type {
   ModerationLogEntry,
   InsertPaymentsLog, PaymentsLogEntry,
   InsertPartnerEnquiry, PartnerEnquiry,
+  Partner, InsertPartner,
+  PartnerPlacement, InsertPartnerPlacement,
+  PartnerEvent,
+  PartnerInvoice,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import { eq, desc, sql, and, isNull } from "drizzle-orm";
+import { eq, desc, sql, and, isNull, gte, lte } from "drizzle-orm";
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -88,6 +96,28 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
   createPartnerEnquiry(entry: InsertPartnerEnquiry & { requestIp?: string | null; requestUserAgent?: string | null }): Promise<PartnerEnquiry>;
   getPartnerEnquiries(limit?: number): Promise<PartnerEnquiry[]>;
   getPartnerEnquiryById(id: number): Promise<PartnerEnquiry | undefined>;
+  // ── partner admin (PR-P3) ──
+  getPartnerEnquiriesByStatus(status?: string, limit?: number): Promise<PartnerEnquiry[]>;
+  updatePartnerEnquiryStatus(id: number, status: string): Promise<PartnerEnquiry | undefined>;
+  promoteEnquiryToPartner(enquiryId: number, opts: { slug: string; billingEmail?: string | null; billingContact?: string | null; notes?: string | null }): Promise<{ partner: Partner; enquiry: PartnerEnquiry }>;
+  // partners CRUD
+  createPartner(input: InsertPartner): Promise<Partner>;
+  getPartners(): Promise<Partner[]>;
+  getPartnerById(id: number): Promise<Partner | undefined>;
+  getPartnerBySlug(slug: string): Promise<Partner | undefined>;
+  updatePartner(id: number, patch: Partial<Partner>): Promise<Partner | undefined>;
+  deletePartner(id: number): Promise<{ ok: true } | { ok: false; reason: string }>;
+  // placements CRUD
+  createPartnerPlacement(input: InsertPartnerPlacement): Promise<PartnerPlacement>;
+  getPartnerPlacementsByPartner(partnerId: number): Promise<PartnerPlacement[]>;
+  getPartnerPlacementById(id: number): Promise<PartnerPlacement | undefined>;
+  updatePartnerPlacement(id: number, patch: Partial<PartnerPlacement>): Promise<PartnerPlacement | undefined>;
+  deletePartnerPlacement(id: number): Promise<void>;
+  // events (read-only)
+  getPartnerEventsByPartner(partnerId: number, filters?: { eventType?: string; from?: number; to?: number; limit?: number }): Promise<PartnerEvent[]>;
+  getPartnerEventCountsByPartner(partnerId: number, sinceMs: number): Promise<Record<string, number>>;
+  // invoices (read-only stub)
+  getPartnerInvoicesByPartner(partnerId: number): Promise<PartnerInvoice[]>;
 }
 
 const now = () => Date.now();
@@ -268,6 +298,154 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
   }
   async getPartnerEnquiryById(id: number): Promise<PartnerEnquiry | undefined> {
     return one(db.select().from(partnerEnquiries).where(eq(partnerEnquiries.id, id)));
+  }
+
+  // -- partner admin (PR-P3) --
+
+  async getPartnerEnquiriesByStatus(status?: string, limit = 100): Promise<PartnerEnquiry[]> {
+    const q = db.select().from(partnerEnquiries);
+    if (status) {
+      return q.where(eq(partnerEnquiries.status, status)).orderBy(desc(partnerEnquiries.createdAt)).limit(limit);
+    }
+    return q.orderBy(desc(partnerEnquiries.createdAt)).limit(limit);
+  }
+
+  async updatePartnerEnquiryStatus(id: number, status: string): Promise<PartnerEnquiry | undefined> {
+    const [row] = await db.update(partnerEnquiries).set({ status }).where(eq(partnerEnquiries.id, id)).returning();
+    return row;
+  }
+
+  async promoteEnquiryToPartner(
+    enquiryId: number,
+    opts: { slug: string; billingEmail?: string | null; billingContact?: string | null; notes?: string | null },
+  ): Promise<{ partner: Partner; enquiry: PartnerEnquiry }> {
+    // Check slug uniqueness before writing
+    const existing = await this.getPartnerBySlug(opts.slug);
+    if (existing) throw Object.assign(new Error('Slug already in use'), { code: 'SLUG_CONFLICT' });
+
+    const enquiry = await this.getPartnerEnquiryById(enquiryId);
+    if (!enquiry) throw new Error('Enquiry not found');
+
+    const [newPartner] = await db.insert(partners).values({
+      slug: opts.slug,
+      name: enquiry.companyName,
+      vertical: enquiry.vertical,
+      status: 'pilot',
+      billingEmail: opts.billingEmail ?? null,
+      billingContact: opts.billingContact ?? null,
+      notes: opts.notes ?? null,
+      createdAt: now(),
+    }).returning();
+
+    const [updatedEnquiry] = await db
+      .update(partnerEnquiries)
+      .set({ status: 'won', promotedPartnerId: newPartner.id })
+      .where(eq(partnerEnquiries.id, enquiryId))
+      .returning();
+
+    return { partner: newPartner, enquiry: updatedEnquiry };
+  }
+
+  // -- partners CRUD --
+
+  async createPartner(input: InsertPartner): Promise<Partner> {
+    const [row] = await db.insert(partners).values({ ...input, createdAt: now() }).returning();
+    return row;
+  }
+
+  async getPartners(): Promise<Partner[]> {
+    return db.select().from(partners).orderBy(desc(partners.createdAt));
+  }
+
+  async getPartnerById(id: number): Promise<Partner | undefined> {
+    return one(db.select().from(partners).where(eq(partners.id, id)));
+  }
+
+  async getPartnerBySlug(slug: string): Promise<Partner | undefined> {
+    return one(db.select().from(partners).where(eq(partners.slug, slug)));
+  }
+
+  async updatePartner(id: number, patch: Partial<Partner>): Promise<Partner | undefined> {
+    const [row] = await db.update(partners).set(patch).where(eq(partners.id, id)).returning();
+    return row;
+  }
+
+  async deletePartner(id: number): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const partner = await this.getPartnerById(id);
+    if (!partner) return { ok: false, reason: 'Partner not found' };
+    if (partner.status !== 'inactive') {
+      return { ok: false, reason: 'Only inactive partners can be hard-deleted; use status=terminated to soft-delete' };
+    }
+    const placements = await this.getPartnerPlacementsByPartner(id);
+    if (placements.length > 0) return { ok: false, reason: 'Partner has placements -- remove them first' };
+    const events = await this.getPartnerEventsByPartner(id, { limit: 1 });
+    if (events.length > 0) return { ok: false, reason: 'Partner has events -- cannot delete' };
+    await db.delete(partners).where(eq(partners.id, id));
+    return { ok: true };
+  }
+
+  // -- placements CRUD --
+
+  async createPartnerPlacement(input: InsertPartnerPlacement): Promise<PartnerPlacement> {
+    const [row] = await db.insert(partnerPlacements).values({ ...input, createdAt: now() }).returning();
+    return row;
+  }
+
+  async getPartnerPlacementsByPartner(partnerId: number): Promise<PartnerPlacement[]> {
+    return db.select().from(partnerPlacements)
+      .where(eq(partnerPlacements.partnerId, partnerId))
+      .orderBy(desc(partnerPlacements.createdAt));
+  }
+
+  async getPartnerPlacementById(id: number): Promise<PartnerPlacement | undefined> {
+    return one(db.select().from(partnerPlacements).where(eq(partnerPlacements.id, id)));
+  }
+
+  async updatePartnerPlacement(id: number, patch: Partial<PartnerPlacement>): Promise<PartnerPlacement | undefined> {
+    const [row] = await db.update(partnerPlacements).set(patch).where(eq(partnerPlacements.id, id)).returning();
+    return row;
+  }
+
+  async deletePartnerPlacement(id: number): Promise<void> {
+    await db.delete(partnerPlacements).where(eq(partnerPlacements.id, id));
+  }
+
+  // -- events (read-only) --
+
+  async getPartnerEventsByPartner(
+    partnerId: number,
+    filters: { eventType?: string; from?: number; to?: number; limit?: number } = {},
+  ): Promise<PartnerEvent[]> {
+    const conditions = [eq(partnerEvents.partnerId, partnerId)] as any[];
+    if (filters.eventType) conditions.push(eq(partnerEvents.eventType, filters.eventType));
+    if (filters.from) conditions.push(gte(partnerEvents.occurredAt, filters.from));
+    if (filters.to) conditions.push(lte(partnerEvents.occurredAt, filters.to));
+    return db
+      .select()
+      .from(partnerEvents)
+      .where(and(...conditions))
+      .orderBy(desc(partnerEvents.occurredAt))
+      .limit(filters.limit ?? 200);
+  }
+
+  async getPartnerEventCountsByPartner(partnerId: number, sinceMs: number): Promise<Record<string, number>> {
+    const rows = await db
+      .select({
+        eventType: partnerEvents.eventType,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(partnerEvents)
+      .where(and(eq(partnerEvents.partnerId, partnerId), gte(partnerEvents.occurredAt, sinceMs)))
+      .groupBy(partnerEvents.eventType);
+    return Object.fromEntries(rows.map((r) => [r.eventType, r.count]));
+  }
+
+  // -- invoices (read-only stub) --
+
+  async getPartnerInvoicesByPartner(partnerId: number): Promise<PartnerInvoice[]> {
+    return db.select().from(partnerInvoices)
+      .where(eq(partnerInvoices.partnerId, partnerId))
+      .orderBy(desc(partnerInvoices.generatedAt));
   }
 }
 
