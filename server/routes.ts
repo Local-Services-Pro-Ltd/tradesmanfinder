@@ -45,6 +45,10 @@ function slugify(s: string) {
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   migrate();
 
+  // Admin auth: header x-admin-key OR ?key=ADMIN_KEY query param
+  const isAdminReq = (req: any): boolean =>
+    req.headers["x-admin-key"] === ADMIN_KEY || req.query?.key === ADMIN_KEY;
+
   // ── Categories ──
   app.get("/api/categories", async (_req, res) => {
     res.json(await storage.getCategories());
@@ -73,7 +77,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     let list = await storage.getTradesmen();
     const category = req.query.category ? Number(req.query.category) : undefined;
     const area = req.query.area ? Number(req.query.area) : undefined;
-    const includeBanned = req.query.includeBanned === "1" && (req.headers["x-admin-key"] === ADMIN_KEY);
+    const includeBanned = req.query.includeBanned === "1" && isAdminReq(req);
     if (category !== undefined) {
       list = list.filter((t) => (JSON.parse(t.categories as string) as number[]).includes(category));
     }
@@ -97,7 +101,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const t = await storage.getTradesmanById(id);
     if (!t) return res.status(404).json({ message: "Tradesman not found" });
     const enriched = await attachCardSummary(t);
-    const isAdmin = req.headers["x-admin-key"] === ADMIN_KEY;
+    const isAdmin = isAdminReq(req);
     if (enriched.cardSummary.isPubliclyHidden && !isAdmin) return res.status(404).json({ message: "Tradesman not found" });
     res.json(enriched);
   });
@@ -439,9 +443,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     });
   });
 
-  // ── Admin (guarded by ?key=ADMIN_KEY) ──
+  // ── Admin (guarded by x-admin-key header OR ?key=ADMIN_KEY query param) ──
   const requireAdmin = (req: any, res: any): boolean => {
-    if (req.headers["x-admin-key"] !== ADMIN_KEY) {
+    if (!isAdminReq(req)) {
       res.status(401).json({ message: "Unauthorized — admin key required" });
       return false;
     }
@@ -495,7 +499,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid id" });
     const cards = await storage.getCardsByTradesman(id);
-    const isAdmin = req.headers["x-admin-key"] === ADMIN_KEY;
+    const isAdmin = isAdminReq(req);
     const isOwner = req.query.email && (await storage.getTradesmanByEmail(String(req.query.email)))?.id === id;
     const showReasons = isAdmin || isOwner;
     const safe = cards.map((c) => ({
