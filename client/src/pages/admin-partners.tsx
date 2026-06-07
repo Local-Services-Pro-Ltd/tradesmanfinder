@@ -25,6 +25,7 @@ import { useToast } from '@/hooks/use-toast';
 import { apiRequest, queryClient } from '@/lib/queryClient';
 import { ShieldAlert, Building2, ArrowLeft, ChevronDown, ChevronUp } from 'lucide-react';
 import { Link } from 'wouter';
+import { StatsTab } from './admin-partners-stats';
 
 // ── Types ──
 
@@ -72,6 +73,45 @@ interface PartnerPlacement {
   creativeHtml: string | null;
   creativeUrl: string | null;
   createdAt: number;
+}
+
+// PR-P7
+interface StatsLine {
+  placementId: number;
+  surface: string;
+  commercialModel: string;
+  ratePence: number;
+  counts: { impression: number; click: number; lead_passed: number; lead_booked: number };
+  estimatedSubtotalPence: number;
+}
+interface PartnerStats {
+  partnerId: number;
+  from: number;
+  to: number;
+  byPlacement: StatsLine[];
+  totals: { impressions: number; clicks: number; leadsPassed: number; leadsBooked: number; estimatedTotalPence: number };
+}
+interface InvoiceLineItem {
+  placementId: number;
+  surface: string;
+  commercialModel: string;
+  ratePence: number;
+  count: number;
+  subtotalPence: number;
+  note?: string;
+}
+interface PartnerInvoice {
+  id: number;
+  partnerId: number;
+  periodStart: number;
+  periodEnd: number;
+  lineItems: InvoiceLineItem[] | string;
+  totalPence: number;
+  status: 'draft' | 'sent' | 'paid' | 'void';
+  stripeInvoiceId: string | null;
+  generatedAt: number;
+  sentAt: number | null;
+  paidAt: number | null;
 }
 
 // ── Constants ──
@@ -987,9 +1027,10 @@ export default function AdminPartners() {
   const [activeTab, setActiveTab] = useState('enquiries');
   const [selectedPartnerId, setSelectedPartnerId] = useState<number | null>(null);
   const [placementsFilterId, setPlacementsFilterId] = useState<number | null>(null);
+  const [statsPartnerId, setStatsPartnerId] = useState<number | null>(null);
 
-  // Probe the admin endpoint to validate the key
-  const { isError } = useQuery({
+  // Probe the admin endpoint to validate the key (also used as the partners list for StatsTab)
+  const { data: partnersList = [], isError } = useQuery<Partner[]>({
     queryKey: ['/api/admin/partners', authKey, '_probe'],
     queryFn: async () => (await apiRequest('GET', `/api/admin/partners?key=${encodeURIComponent(authKey)}`)).json(),
     enabled: !!authKey,
@@ -1040,6 +1081,7 @@ export default function AdminPartners() {
             <TabsTrigger value="enquiries" data-testid="tab-enquiries">Enquiries</TabsTrigger>
             <TabsTrigger value="partners" data-testid="tab-partners">Partners</TabsTrigger>
             <TabsTrigger value="placements" data-testid="tab-placements">Placements</TabsTrigger>
+            <TabsTrigger value="stats" data-testid="tab-stats">Stats & Invoices</TabsTrigger>
           </TabsList>
 
           <TabsContent value="enquiries">
@@ -1061,6 +1103,15 @@ export default function AdminPartners() {
             <PlacementsTab
               authKey={authKey}
               filterPartnerId={placementsFilterId}
+            />
+          </TabsContent>
+
+          <TabsContent value="stats">
+            <StatsTab
+              authKey={authKey}
+              partners={partnersList}
+              selectedPartnerId={statsPartnerId}
+              onSelectPartnerId={setStatsPartnerId}
             />
           </TabsContent>
         </Tabs>

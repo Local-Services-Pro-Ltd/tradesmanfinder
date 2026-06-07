@@ -8,6 +8,7 @@ import {
   PARTNER_ENQUIRY_STATUSES, PARTNER_STATUSES, PARTNER_SURFACES, PARTNER_COMMERCIAL_MODELS, PARTNER_VERTICALS,
 } from "@shared/schema";
 import { selectPlacements, debugPlacements } from "./placement-engine";
+import { computeInvoice, computeStats } from "./invoice-generator";
 import { registerClickRoute } from "./click-tracking";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
 import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail } from "./mailer";
@@ -1159,7 +1160,34 @@ res.json(updated);
     res.json(events);
   });
 
-  // ── Invoices (read-only stub) ──
+  // ── Stats (PR-P7) ──
+
+  // GET /api/admin/partners/:partnerId/stats?from=<ms>&to=<ms>
+  //   Default window: last 30 days ending now.
+  app.get('/api/admin/partners/:partnerId/stats', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const partnerId = Number(req.params.partnerId);
+    if (!Number.isFinite(partnerId)) return res.status(400).json({ message: 'Invalid partnerId' });
+    const partner = await storage.getPartnerById(partnerId);
+    if (!partner) return res.status(404).json({ message: 'Partner not found' });
+
+    const nowMs = Date.now();
+    const to = req.query.to ? Number(req.query.to) : nowMs;
+    const from = req.query.from ? Number(req.query.from) : (to - 30 * 24 * 60 * 60 * 1000);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) {
+      return res.status(400).json({ message: 'Invalid from/to range' });
+    }
+
+    const [placements, events] = await Promise.all([
+      storage.getPartnerPlacementsByPartner(partnerId),
+      storage.getPartnerEventsInRange(partnerId, from, to),
+    ]);
+
+    const stats = computeStats({ placements, events, from, to });
+    res.json({ partnerId, from, to, ...stats });
+  });
+
+  // ── Invoices (PR-P7) ──
 
   // GET /api/admin/partners/:partnerId/invoices
   app.get('/api/admin/partners/:partnerId/invoices', async (req, res) => {
@@ -1168,6 +1196,106 @@ res.json(updated);
     if (!Number.isFinite(partnerId)) return res.status(400).json({ message: 'Invalid partnerId' });
     const invoices = await storage.getPartnerInvoicesByPartner(partnerId);
     res.json(invoices);
+  });
+
+  // GET /api/admin/partners/:partnerId/invoices/:invoiceId
+  // Returns a single invoice with `lineItems` parsed from JSON.
+  app.get('/api/admin/partners/:partnerId/invoices/:invoiceId', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const partnerId = Number(req.params.partnerId);
+    const invoiceId = Number(req.params.invoiceId);
+    if (!Number.isFinite(partnerId) || !Number.isFinite(invoiceId)) {
+      return res.status(400).json({ message: 'Invalid id' });
+    }
+    const inv = await storage.getPartnerInvoiceById(invoiceId);
+    if (!inv || inv.partnerId !== partnerId) return res.status(404).json({ message: 'Invoice not found' });
+    let parsedLineItems: unknown = [];
+    try { parsedLineItems = JSON.parse(inv.lineItems); } catch { /* ignore */ }
+    res.json({ ...inv, lineItems: parsedLineItems });
+  });
+
+  // POST /api/admin/partners/:partnerId/invoices/generate  { periodStart, periodEnd }
+  // Computes a fresh draft invoice from events + placements and inserts it.
+  // Idempotent: returns the existing invoice if one already exists for the
+  // exact same (partnerId, periodStart, periodEnd) triple.
+  app.post('/api/admin/partners/:partnerId/invoices/generate', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const partnerId = Number(req.params.partnerId);
+    if (!Number.isFinite(partnerId)) return res.status(400).json({ message: 'Invalid partnerId' });
+    const partner = await storage.getPartnerById(partnerId);
+    if (!partner) return res.status(404).json({ message: 'Partner not found' });
+
+    const periodStart = Number(req.body?.periodStart);
+    const periodEnd = Number(req.body?.periodEnd);
+    if (!Number.isFinite(periodStart) || !Number.isFinite(periodEnd)) {
+      return res.status(400).json({ message: 'periodStart and periodEnd are required (unix ms)' });
+    }
+    if (periodEnd <= periodStart) {
+      return res.status(400).json({ message: 'periodEnd must be greater than periodStart' });
+    }
+
+    const existing = await storage.findPartnerInvoiceForPeriod(partnerId, periodStart, periodEnd);
+    if (existing) {
+      let parsedLineItems: unknown = [];
+      try { parsedLineItems = JSON.parse(existing.lineItems); } catch { /* ignore */ }
+      return res.status(200).json({ ...existing, lineItems: parsedLineItems, _existing: true });
+    }
+
+    const [placements, events] = await Promise.all([
+      storage.getPartnerPlacementsByPartner(partnerId),
+      storage.getPartnerEventsInRange(partnerId, periodStart, periodEnd),
+    ]);
+
+    const computed = computeInvoice({ partner, placements, events, periodStart, periodEnd });
+
+    const inserted = await storage.createPartnerInvoice({
+      partnerId,
+      periodStart,
+      periodEnd,
+      lineItems: JSON.stringify(computed.lineItems),
+      totalPence: computed.totalPence,
+      status: 'draft',
+      stripeInvoiceId: null,
+      sentAt: null,
+      paidAt: null,
+    });
+
+    res.status(201).json({ ...inserted, lineItems: computed.lineItems });
+  });
+
+  // PATCH /api/admin/partners/:partnerId/invoices/:invoiceId  { status?, stripeInvoiceId? }
+  // Used to mark draft → sent/paid/void after raising the invoice in Stripe.
+  // Amount and line items are NEVER editable — to change them, void and regenerate.
+  app.patch('/api/admin/partners/:partnerId/invoices/:invoiceId', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const partnerId = Number(req.params.partnerId);
+    const invoiceId = Number(req.params.invoiceId);
+    if (!Number.isFinite(partnerId) || !Number.isFinite(invoiceId)) {
+      return res.status(400).json({ message: 'Invalid id' });
+    }
+    const inv = await storage.getPartnerInvoiceById(invoiceId);
+    if (!inv || inv.partnerId !== partnerId) return res.status(404).json({ message: 'Invoice not found' });
+
+    const VALID_STATUSES = ['draft', 'sent', 'paid', 'void'] as const;
+    const patch: Record<string, unknown> = {};
+
+    if (req.body?.status !== undefined) {
+      if (!(VALID_STATUSES as readonly string[]).includes(String(req.body.status))) {
+        return res.status(400).json({ message: `status must be one of: ${VALID_STATUSES.join(', ')}` });
+      }
+      patch.status = String(req.body.status);
+      if (patch.status === 'sent' && inv.sentAt === null) patch.sentAt = Date.now();
+      if (patch.status === 'paid' && inv.paidAt === null) patch.paidAt = Date.now();
+    }
+    if (req.body?.stripeInvoiceId !== undefined) {
+      patch.stripeInvoiceId = req.body.stripeInvoiceId ? String(req.body.stripeInvoiceId) : null;
+    }
+
+    const updated = await storage.updatePartnerInvoice(invoiceId, patch as any);
+    if (!updated) return res.status(404).json({ message: 'Invoice not found after update' });
+    let parsedLineItems: unknown = [];
+    try { parsedLineItems = JSON.parse(updated.lineItems); } catch { /* ignore */ }
+    res.json({ ...updated, lineItems: parsedLineItems });
   });
 
   // ════ PR-P4: PLACEMENT ENGINE ════
