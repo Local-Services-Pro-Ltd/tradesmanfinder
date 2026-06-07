@@ -63,6 +63,7 @@ vi.mock('./storage', () => ({
   db: {},
 }));
 
+import { MICROSITE_COUNT } from '@shared/microsites';
 import express from 'express';
 import { createServer } from 'node:http';
 import { registerRoutes } from './routes';
@@ -239,9 +240,10 @@ describe('GET /api/admin/microsites/stats', () => {
       expect(body.summary.totalMicrositeLeads).toBe(15);
       expect(body.summary.totalWebLeads).toBe(100);
       expect(body.summary.activeMicrositeHosts).toBe(2);
-      // Hardcoded in the registry; if this changes the test should be updated
-      // intentionally rather than silently.
-      expect(body.summary.registeredMicrositeCount).toBe(81);
+      // Source of truth for portfolio size is the registry itself —
+      // importing MICROSITE_COUNT avoids the need to bump a literal here
+      // every time a new mini-site is registered (PR-M6 added two).
+      expect(body.summary.registeredMicrositeCount).toBe(MICROSITE_COUNT);
     });
   });
 
