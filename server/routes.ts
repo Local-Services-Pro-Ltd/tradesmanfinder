@@ -13,7 +13,7 @@ import { registerClickRoute } from "./click-tracking";
 import { registerOutcomeCaptureRoute } from "./outcome-capture";
 import { signOutcomeToken, buildOutcomeLink } from "./outcome-tokens";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
-import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail } from "./mailer";
+import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail, sendOutcomeAskEmail } from "./mailer";
 import type { Tradesman, TradesmanCard } from "@shared/schema";
 import { z } from "zod";
 import { publicFormGuard, rateLimit } from "./spam-guard";
@@ -1450,6 +1450,60 @@ res.json(updated);
       },
       expiresInDays: ttlDays,
     });
+  });
+
+  // POST /api/admin/partners/:partnerId/outcomes/email  (PR-P9)
+  //   { placementId, jobId, jobTitle?, area?, ttlDays?, to? }
+  // Generates a signed outcome token and emails it to the partner's billing
+  // email address (or `to` override). This is what finance will use day-to-day
+  // to ask partners "did this lead convert?".
+  app.post('/api/admin/partners/:partnerId/outcomes/email', async (req, res) => {
+    if (!isAdminReq(req)) return res.status(401).json({ message: 'Unauthorized' });
+    const partnerId = Number(req.params.partnerId);
+    if (!Number.isFinite(partnerId)) return res.status(400).json({ message: 'Invalid partnerId' });
+
+    const placementId = Number(req.body?.placementId);
+    const jobId = Number(req.body?.jobId);
+    const jobTitle = req.body?.jobTitle ? String(req.body.jobTitle) : undefined;
+    const area = req.body?.area ? String(req.body.area) : undefined;
+    const ttlDays = req.body?.ttlDays ? Number(req.body.ttlDays) : 90;
+    const toOverride = req.body?.to ? String(req.body.to) : undefined;
+
+    if (!Number.isFinite(placementId) || !Number.isFinite(jobId)) {
+      return res.status(400).json({ message: 'placementId and jobId are required integers' });
+    }
+    if (!Number.isFinite(ttlDays) || ttlDays <= 0 || ttlDays > 365) {
+      return res.status(400).json({ message: 'ttlDays must be 1–365' });
+    }
+
+    const partner = await storage.getPartnerById(partnerId);
+    if (!partner) return res.status(404).json({ message: 'Partner not found' });
+
+    const placement = await storage.getPartnerPlacementById(placementId);
+    if (!placement || placement.partnerId !== partnerId) {
+      return res.status(404).json({ message: 'Placement not found for partner' });
+    }
+
+    const to = toOverride || partner.billingEmail;
+    if (!to) {
+      return res.status(400).json({ message: 'Partner has no billingEmail; pass `to` override or set it on the partner' });
+    }
+
+    const result = await sendOutcomeAskEmail({
+      to,
+      partnerId,
+      partnerName: partner.billingContact || partner.name,
+      placementId,
+      jobId,
+      jobTitle,
+      area,
+      ttlDays,
+    });
+
+    if (!result.ok) {
+      return res.status(502).json({ message: 'Email send failed', error: result.error });
+    }
+    return res.status(200).json({ ok: true, to, resendId: result.id ?? null });
   });
 
   // ════ PR-P4: PLACEMENT ENGINE ════
