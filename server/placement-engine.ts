@@ -87,8 +87,12 @@ function isPlacementTimeActive(p: PartnerPlacement, nowMs: number): boolean {
 }
 
 function isPartnerActive(partner: Partner): boolean {
-  // Paused or terminated partners are excluded
-  return partner.status !== "paused" && partner.status !== "terminated";
+  // Whitelist: only fully onboarded partners serve. PR-P11 hardening —
+  // the previous blacklist (≠ paused, ≠ terminated) leaked `inactive`
+  // partners (onboarded-but-not-launched) into responses, which then
+  // surfaced empty creatives publicly. The valid "on" statuses are
+  // `active` (live, billing) and `pilot` (live, free trial).
+  return partner.status === "active" || partner.status === "pilot";
 }
 
 function placementWeight(p: PartnerPlacement): number {

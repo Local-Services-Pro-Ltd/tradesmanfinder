@@ -208,6 +208,56 @@ describe('selectPlacements — placement engine unit tests', () => {
     expect(result.placements).toHaveLength(0);
   });
 
+  // PR-P11 hardening: whitelist filter (only `active` and `pilot` serve).
+  it('filters out placements whose partner is inactive (PR-P11 whitelist)', async () => {
+    const p = makePlacement({ partnerId: 13 });
+    const partner = makePartner({ id: 13, status: 'inactive' });
+    const mockStorage = makeStorage({
+      getActivePlacementsBySurface: vi.fn().mockResolvedValue([p]),
+      getPartnerById: vi.fn().mockResolvedValue(partner),
+    });
+    const result = await selectPlacements({
+      surface: 'category_footer',
+      storage: mockStorage as any,
+      env: enabledEnv,
+      nowMs: NOW,
+    });
+    expect(result.placements).toHaveLength(0);
+  });
+
+  it('serves placements for partners with status=pilot (PR-P11 whitelist)', async () => {
+    const p = makePlacement({ partnerId: 14, creativeUrl: 'https://example.com', creativeHtml: '<b>pilot</b>' });
+    const partner = makePartner({ id: 14, status: 'pilot' });
+    const mockStorage = makeStorage({
+      getActivePlacementsBySurface: vi.fn().mockResolvedValue([p]),
+      getPartnerById: vi.fn().mockResolvedValue(partner),
+    });
+    const result = await selectPlacements({
+      surface: 'category_footer',
+      storage: mockStorage as any,
+      env: { PARTNER_PLACEMENTS_ENABLED: 'true', PARTNER_IMPRESSION_SAMPLE_RATE: '0.0' },
+      nowMs: NOW,
+    });
+    expect(result.placements).toHaveLength(1);
+    expect(result.placements[0].partner_id).toBe(14);
+  });
+
+  it('rejects unknown partner status values (PR-P11 whitelist is strict)', async () => {
+    const p = makePlacement({ partnerId: 15 });
+    const partner = makePartner({ id: 15, status: 'some_future_status' as any });
+    const mockStorage = makeStorage({
+      getActivePlacementsBySurface: vi.fn().mockResolvedValue([p]),
+      getPartnerById: vi.fn().mockResolvedValue(partner),
+    });
+    const result = await selectPlacements({
+      surface: 'category_footer',
+      storage: mockStorage as any,
+      env: enabledEnv,
+      nowMs: NOW,
+    });
+    expect(result.placements).toHaveLength(0);
+  });
+
   // 4. Filters out placements with mismatched category
   it('filters out placements with non-matching categoryFilter', async () => {
     const p = makePlacement({ categoryFilter: '[3, 4, 5]' }); // category 2 not in list
