@@ -231,8 +231,8 @@ describe("computeInvoice — lead_booked model", () => {
   });
 });
 
-describe("computeInvoice — rev_share + unknown models", () => {
-  it("rev_share emits £0 line item with manual-review note", () => {
+describe("computeInvoice — rev_share auto-billing (PR-P10)", () => {
+  it("with no won outcomes, subtotal is £0 and note explains why", () => {
     const placement = makePlacement({ commercialModel: "rev_share", ratePence: 1000 });
     const invoice = computeInvoice({
       partner: makePartner(),
@@ -242,9 +242,12 @@ describe("computeInvoice — rev_share + unknown models", () => {
       periodEnd: JUL_START,
     });
     expect(invoice.lineItems[0].subtotalPence).toBe(0);
-    expect(invoice.lineItems[0].note).toMatch(/finance team/i);
+    expect(invoice.lineItems[0].count).toBe(0);
+    expect(invoice.lineItems[0].note).toMatch(/No won outcomes/i);
   });
+});
 
+describe("computeInvoice — unknown models", () => {
   it("unknown commercial model fails closed with explanatory note", () => {
     const placement = makePlacement({ commercialModel: "moon_lottery", ratePence: 99999 });
     const invoice = computeInvoice({
@@ -329,5 +332,155 @@ describe("computeStats", () => {
     expect(stats.totals).toEqual({
       impressions: 0, clicks: 0, leadsPassed: 0, leadsBooked: 0, estimatedTotalPence: 0,
     });
+  });
+});
+
+describe("computeInvoice — rev_share auto-billing (PR-P10) — math", () => {
+  it("computes subtotal as bps × sum(deal_value_pence) across won outcomes", () => {
+    const placement = makePlacement({ commercialModel: "rev_share", ratePence: 1000 });
+    const events = [
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 250000 }), occurredAt: JUN_START + 1 }),
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 100000 }), occurredAt: JUN_START + 2 }),
+    ];
+    const invoice = computeInvoice({
+      partner: makePartner(), placements: [placement], events,
+      periodStart: JUN_START, periodEnd: JUL_START,
+    });
+    // (250000 + 100000) × 1000 / 10000 = 35000
+    expect(invoice.lineItems[0].subtotalPence).toBe(35000);
+    expect(invoice.lineItems[0].count).toBe(2);
+    expect(invoice.lineItems[0].note).toMatch(/10\.00% of £3500\.00 won across 2 outcomes/);
+  });
+
+  it("ignores lost and quoted outcomes", () => {
+    const placement = makePlacement({ commercialModel: "rev_share", ratePence: 2000 });
+    const events = [
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won",    deal_value_pence: 100000 }), occurredAt: JUN_START + 1 }),
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "lost",   deal_value_pence: 999999 }), occurredAt: JUN_START + 2 }),
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "quoted", deal_value_pence: 999999 }), occurredAt: JUN_START + 3 }),
+    ];
+    const invoice = computeInvoice({
+      partner: makePartner(), placements: [placement], events,
+      periodStart: JUN_START, periodEnd: JUL_START,
+    });
+    // 100000 × 2000 / 10000 = 20000
+    expect(invoice.lineItems[0].subtotalPence).toBe(20000);
+    expect(invoice.lineItems[0].count).toBe(1);
+  });
+
+  it("counts won outcomes missing deal_value_pence in a footnote", () => {
+    const placement = makePlacement({ commercialModel: "rev_share", ratePence: 1000 });
+    const events = [
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 100000 }), occurredAt: JUN_START + 1 }),
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won" }),                          occurredAt: JUN_START + 2 }),
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: "500" }), occurredAt: JUN_START + 3 }),
+    ];
+    const invoice = computeInvoice({
+      partner: makePartner(), placements: [placement], events,
+      periodStart: JUN_START, periodEnd: JUL_START,
+    });
+    expect(invoice.lineItems[0].subtotalPence).toBe(10000);
+    expect(invoice.lineItems[0].count).toBe(3);
+    expect(invoice.lineItems[0].note).toMatch(/2 won outcomes missing deal_value_pence/);
+  });
+
+  it("caps subtotal at rateCapPence when uncapped value would exceed it", () => {
+    const placement = makePlacement({ commercialModel: "rev_share", ratePence: 1000, rateCapPence: 30000 });
+    const events = [
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 1000000 }), occurredAt: JUN_START + 1 }),
+    ];
+    const invoice = computeInvoice({
+      partner: makePartner(), placements: [placement], events,
+      periodStart: JUN_START, periodEnd: JUL_START,
+    });
+    expect(invoice.lineItems[0].subtotalPence).toBe(30000);
+    expect(invoice.lineItems[0].note).toMatch(/capped at £300\.00/);
+  });
+
+  it("does not cap when computed subtotal is below cap", () => {
+    const placement = makePlacement({ commercialModel: "rev_share", ratePence: 1000, rateCapPence: 100000 });
+    const events = [
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 100000 }), occurredAt: JUN_START + 1 }),
+    ];
+    const invoice = computeInvoice({
+      partner: makePartner(), placements: [placement], events,
+      periodStart: JUN_START, periodEnd: JUL_START,
+    });
+    expect(invoice.lineItems[0].subtotalPence).toBe(10000);
+    expect(invoice.lineItems[0].note).not.toMatch(/capped/);
+  });
+
+  it("floors fractional pence (no over-billing)", () => {
+    const placement = makePlacement({ commercialModel: "rev_share", ratePence: 1234 });
+    const events = [
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 99 }), occurredAt: JUN_START + 1 }),
+    ];
+    const invoice = computeInvoice({
+      partner: makePartner(), placements: [placement], events,
+      periodStart: JUN_START, periodEnd: JUL_START,
+    });
+    // 99 × 1234 / 10000 = 12.2166 → floor 12
+    expect(invoice.lineItems[0].subtotalPence).toBe(12);
+  });
+
+  it("only counts won outcomes for THIS placement", () => {
+    const placement = makePlacement({ id: 100, commercialModel: "rev_share", ratePence: 1000 });
+    const events = [
+      makeEvent({ placementId: 100, eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 100000 }), occurredAt: JUN_START + 1 }),
+      makeEvent({ placementId: 999, eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 100000 }), occurredAt: JUN_START + 2 }),
+    ];
+    const invoice = computeInvoice({
+      partner: makePartner(), placements: [placement], events,
+      periodStart: JUN_START, periodEnd: JUL_START,
+    });
+    expect(invoice.lineItems[0].subtotalPence).toBe(10000);
+    expect(invoice.lineItems[0].count).toBe(1);
+  });
+
+  it("only counts won outcomes within the billing period", () => {
+    const placement = makePlacement({ commercialModel: "rev_share", ratePence: 1000 });
+    const events = [
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 100000 }), occurredAt: JUN_START + 1 }),
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 500000 }), occurredAt: JUN_START - MS_PER_DAY }),
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 500000 }), occurredAt: JUL_START + MS_PER_DAY }),
+    ];
+    const invoice = computeInvoice({
+      partner: makePartner(), placements: [placement], events,
+      periodStart: JUN_START, periodEnd: JUL_START,
+    });
+    expect(invoice.lineItems[0].subtotalPence).toBe(10000);
+  });
+
+  it("is idempotent — same inputs yield identical output", () => {
+    const placement = makePlacement({ commercialModel: "rev_share", ratePence: 1000, rateCapPence: 50000 });
+    const events = [
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 250000 }), occurredAt: JUN_START + 1 }),
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 100000 }), occurredAt: JUN_START + 2 }),
+    ];
+    const a = computeInvoice({ partner: makePartner(), placements: [placement], events, periodStart: JUN_START, periodEnd: JUL_START });
+    const b = computeInvoice({ partner: makePartner(), placements: [placement], events, periodStart: JUN_START, periodEnd: JUL_START });
+    expect(a).toEqual(b);
+  });
+});
+
+describe("computeStats — rev_share estimate (PR-P10)", () => {
+  it("estimates rev_share subtotal using same bps math", () => {
+    const placement = makePlacement({ commercialModel: "rev_share", ratePence: 1500 });
+    const events = [
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 200000 }), occurredAt: JUN_START + 1 }),
+    ];
+    const stats = computeStats({ placements: [placement], events, from: JUN_START, to: JUL_START });
+    // 200000 × 1500 / 10000 = 30000
+    expect(stats.byPlacement[0].estimatedSubtotalPence).toBe(30000);
+    expect(stats.totals.estimatedTotalPence).toBe(30000);
+  });
+
+  it("caps stats estimate at rateCapPence too", () => {
+    const placement = makePlacement({ commercialModel: "rev_share", ratePence: 1000, rateCapPence: 5000 });
+    const events = [
+      makeEvent({ eventType: "lead_outcome", metadata: JSON.stringify({ outcome: "won", deal_value_pence: 1000000 }), occurredAt: JUN_START + 1 }),
+    ];
+    const stats = computeStats({ placements: [placement], events, from: JUN_START, to: JUL_START });
+    expect(stats.byPlacement[0].estimatedSubtotalPence).toBe(5000);
   });
 });
