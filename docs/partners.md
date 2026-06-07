@@ -19,7 +19,10 @@ Controls whether the placement engine is active.
 | _(unset)_ | Off — `GET /api/placements` returns `{"placements": []}` |
 | `"true"` or `"1"` | On — engine runs, placements are served and sampled impressions are logged |
 
-**Do NOT enable in production until PR-P5 (render surfaces) has shipped.**
+**Status: ENABLED in production as of PR-P11 (Jun 2026).** The flag is set to
+`true` in the Vercel project environment for the `production` target. Preview
+and development deploys remain unset (off) so PR previews don't surface
+third-party content.
 
 ```bash
 # Enable (e.g. in Vercel project settings or .env.local):
@@ -105,7 +108,8 @@ placements were considered, which were filtered out and why, and which were sele
 2. Filter client-side: drop placements outside their `activeFrom`/`activeTo` window.
 3. Drop placements whose `categoryFilter` excludes the requested category (empty filter = all).
 4. Drop placements whose `areaFilter` excludes the requested area (empty filter = all).
-5. Drop placements whose partner has `status = 'paused'` or `'terminated'`.
+5. Drop placements unless the partner has `status = 'active'` or `'pilot'`
+   (whitelist as of PR-P11; previously a blacklist that leaked `inactive`).
 6. Apply weighted random selection using the Efraimidis–Spirakis reservoir algorithm,
    with weight derived from `placement.priority` (lower priority number = higher weight).
 7. De-duplicate by partner — a single response never includes two placements from the same partner.
