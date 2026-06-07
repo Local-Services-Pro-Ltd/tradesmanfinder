@@ -522,3 +522,69 @@ export async function sendPartnerEnquiryNotification(opts: {
     },
   });
 }
+
+export async function sendMagicLinkEmail(opts: {
+  to: string;
+  token: string;          // raw token (this is the ONLY place the raw token escapes the server)
+  purpose: "sign_in" | "sign_up";
+  tradesmanId?: number | null;
+  ttlMinutes?: number;    // for copy only; default 15
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const ttlMinutes = opts.ttlMinutes ?? 15;
+  const verifyUrl = `${PUBLIC_URL}/api/auth/verify?token=${encodeURIComponent(opts.token)}`;
+  const isSignUp = opts.purpose === "sign_up";
+
+  const subject = isSignUp
+    ? "Confirm your TradesmanFinder account"
+    : "Your TradesmanFinder sign-in link";
+
+  const ctaLabel = isSignUp ? "Confirm and sign in" : "Sign in to TradesmanFinder";
+  const headline = isSignUp
+    ? "Welcome to TradesmanFinder"
+    : "Sign in to TradesmanFinder";
+  const intro = isSignUp
+    ? "Click the button below to confirm your email address and finish setting up your account."
+    : "Click the button below to sign in to your dashboard. You won't need a password.";
+
+  const html = `
+    <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:560px;margin:0 auto;color:#111">
+      <h2 style="font-size:20px;margin:0 0 12px">${headline}</h2>
+      <p style="font-size:15px;line-height:1.5;margin:0 0 20px">${intro}</p>
+      <p style="margin:0 0 24px">
+        <a href="${verifyUrl}"
+           style="display:inline-block;background:#0f172a;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">
+          ${ctaLabel}
+        </a>
+      </p>
+      <p style="font-size:13px;color:#475569;margin:0 0 6px">
+        This link expires in ${ttlMinutes} minutes and can only be used once.
+      </p>
+      <p style="font-size:13px;color:#475569;margin:0 0 20px">
+        If you didn't request this, you can safely ignore the email — no account changes will be made.
+      </p>
+      <p style="font-size:12px;color:#64748b;margin:0 0 4px">Trouble with the button? Copy and paste this link into your browser:</p>
+      <p style="font-size:12px;color:#64748b;word-break:break-all;margin:0">${verifyUrl}</p>
+      <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0" />
+      <p style="font-size:12px;color:#64748b;margin:0">Questions? Reply to this email or contact ${SUPPORT_EMAIL}.</p>
+    </div>
+  `;
+  const text =
+    `${headline}\n\n` +
+    `${intro}\n\n` +
+    `${ctaLabel}: ${verifyUrl}\n\n` +
+    `This link expires in ${ttlMinutes} minutes and can only be used once. ` +
+    `If you didn't request it, you can safely ignore this email.\n\n` +
+    `Questions? Reply to this email or contact ${SUPPORT_EMAIL}.\n`;
+
+  return send({
+    to: opts.to,
+    subject,
+    html,
+    text,
+    tag: isSignUp ? "magic_link_sign_up" : "magic_link_sign_in",
+    log: {
+      template: isSignUp ? "magic_link_sign_up" : "magic_link_sign_in",
+      tradesmanId: opts.tradesmanId ?? null,
+    },
+  });
+}
