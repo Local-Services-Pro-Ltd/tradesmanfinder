@@ -10,13 +10,20 @@ import {
 import { selectPlacements, debugPlacements } from "./placement-engine";
 import { registerClickRoute } from "./click-tracking";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
-import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification } from "./mailer";
+import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail } from "./mailer";
 import type { Tradesman, TradesmanCard } from "@shared/schema";
 import { z } from "zod";
-import { publicFormGuard } from "./spam-guard";
+import { publicFormGuard, rateLimit } from "./spam-guard";
 import { createLeadPackCheckoutSession } from "./stripe-checkout";
 import { handleStripeWebhook } from "./stripe-webhook";
 import { stripeIsConfigured } from "./stripe";
+import {
+  generateToken, hashToken, generateSessionId,
+  normaliseEmail, isValidEmail, requestFingerprint,
+  setSessionCookie, clearSessionCookie, readSessionCookie,
+  requireAuth, requireSelf,
+  MAGIC_LINK_TTL_MS, SESSION_TTL_MS, REQUEST_LINK_EMAIL_THROTTLE_MS,
+} from "./auth";
 
 // Attach a `cardSummary` field to each tradesman so the UI can render badges
 // and the API consumers can know who's suspended/banned.
@@ -111,16 +118,219 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (enriched.cardSummary.isPubliclyHidden && !isAdmin) return res.status(404).json({ message: "Tradesman not found" });
     res.json(enriched);
   });
-  // Pseudo-login by email — MVP shortcut, no real auth
-  // Blocks login for red-carded tradesmen.
-  app.get("/api/tradesmen/login/:email", async (req, res) => {
-    const t = await storage.getTradesmanByEmail(req.params.email);
-    if (!t) return res.status(404).json({ message: "No tradesman found with that email" });
+  // NOTE: The legacy `GET /api/tradesmen/login/:email` (email-only pseudo-login)
+  // was removed in PR-A1c. It was the root cause of #28 — anyone could sign in
+  // as anyone by knowing their email. The replacement is the magic-link flow
+  // below (POST /api/auth/request-link → GET /api/auth/verify → cookie session).
+
+  /* ══════════════════════════════════════════════════════
+     MAGIC-LINK AUTH (PR-A1b) — closes #28.
+
+     Flow:
+       1. POST /api/auth/request-link  { email }
+          → issues a one-time 256-bit token, hashes & stores it,
+            emails the raw token to the user as a clickable link.
+            Always returns 200 (don't leak which emails exist).
+       2. GET  /api/auth/verify?token=…
+          → the link in the email. Consumes the token (one-shot),
+            creates a `tradesmen` row for sign-ups (or grandfathers
+            existing rows for sign-ins), sets the session cookie,
+            then 302s to /#/dashboard.
+       3. POST /api/auth/logout
+          → deletes the server session row and clears the cookie.
+       4. GET  /api/auth/me
+          → returns the currently signed-in tradesman, or 401.
+     ══════════════════════════════════════════════════════ */
+
+  const requestLinkSchema = z.object({ email: z.string().min(3).max(254) });
+
+  // IP rate limit: 5 requests per 10 min. Layered on top of the per-email
+  // 60-second throttle so an attacker can't fan out across emails either.
+  app.post(
+    "/api/auth/request-link",
+    rateLimit({ windowMs: 10 * 60 * 1000, max: 5 }),
+    async (req, res) => {
+      try {
+        const { email: rawEmail } = requestLinkSchema.parse(req.body);
+        const email = normaliseEmail(rawEmail);
+        if (!isValidEmail(email)) {
+          return res.status(400).json({ message: "Please enter a valid email address" });
+        }
+
+        // Per-email throttle. Returns 200 to keep enumeration cost equal
+        // between throttled and unthrottled cases.
+        const sinceMs = Date.now() - REQUEST_LINK_EMAIL_THROTTLE_MS;
+        const recent = await storage.getRecentTokenForEmail(email, sinceMs);
+        if (recent) {
+          return res.json({ ok: true });
+        }
+
+        // Determine purpose: 'sign_in' if a tradesman row already exists for
+        // this email (grandfathered or signed up earlier), 'sign_up' otherwise.
+        const existing = await storage.getTradesmanByEmail(email);
+
+        // Refuse if the existing account is permanently login-blocked.
+        if (existing) {
+          const enriched = await attachCardSummary(existing);
+          if (enriched.cardSummary.isLoginBlocked) {
+            // Still return 200 — don't reveal account state to bystanders.
+            console.warn(`[auth] request-link refused for banned tradesman ${existing.id}`);
+            return res.json({ ok: true });
+          }
+        }
+
+        const purpose = existing ? "sign_in" : "sign_up";
+        const rawToken = generateToken();
+        const tokenHash = hashToken(rawToken);
+        const { ip, ua } = requestFingerprint(req);
+
+        await storage.createMagicLinkToken({
+          tokenHash,
+          email,
+          tradesmanId: existing?.id ?? null,
+          purpose,
+          expiresAt: Date.now() + MAGIC_LINK_TTL_MS,
+          consumedAt: null,
+          requestIp: ip,
+          requestUserAgent: ua,
+        });
+
+        // Fire-and-forget the email. Storage row is the system of record;
+        // a Resend outage shouldn't cause the request to 500.
+        sendMagicLinkEmail({
+          to: email,
+          token: rawToken,
+          purpose,
+          tradesmanId: existing?.id ?? null,
+        }).catch((err) => {
+          console.error(`[auth] sendMagicLinkEmail failed for ${email}:`, err?.message);
+        });
+
+        res.json({ ok: true });
+      } catch (e) {
+        if (e instanceof z.ZodError) {
+          return res.status(400).json({ message: "Validation failed", errors: e.errors });
+        }
+        throw e;
+      }
+    },
+  );
+
+  // GET because the user clicks a link in an email — must be idempotent
+  // for the cookie set, but rejects re-presented (consumed) tokens.
+  // Redirects to the hash-routed dashboard on success, /#/sign-in on failure.
+  app.get("/api/auth/verify", async (req, res) => {
+    const raw = String(req.query.token ?? "").trim();
+    // Token format is 64 hex chars (32 bytes). Reject anything else fast.
+    if (!/^[0-9a-f]{64}$/i.test(raw)) {
+      return res.redirect(302, "/#/sign-in?auth=invalid");
+    }
+    const tokenHash = hashToken(raw);
+    const tokenRow = await storage.getMagicLinkTokenByHash(tokenHash);
+    if (!tokenRow) {
+      return res.redirect(302, "/#/sign-in?auth=invalid");
+    }
+    if (tokenRow.consumedAt !== null) {
+      return res.redirect(302, "/#/sign-in?auth=used");
+    }
+    if (tokenRow.expiresAt <= Date.now()) {
+      return res.redirect(302, "/#/sign-in?auth=expired");
+    }
+
+    // Atomic consume — if zero rows come back, somebody else won the race.
+    const consumed = await storage.consumeMagicLinkToken(tokenRow.id, Date.now());
+    if (!consumed) {
+      return res.redirect(302, "/#/sign-in?auth=used");
+    }
+
+    // Resolve / create the tradesman.
+    let tradesmanId = tokenRow.tradesmanId;
+    if (tradesmanId === null) {
+      // Sign-up flow: there was no tradesman when the link was issued.
+      // Re-check by email in case the user signed up via the /join form
+      // between request-link and verify.
+      const byEmail = await storage.getTradesmanByEmail(tokenRow.email);
+      if (byEmail) {
+        tradesmanId = byEmail.id;
+      } else {
+        // Minimal placeholder row. The /join form completes the profile.
+        const allAreas = await storage.getAreas();
+        const fallbackAreaId = allAreas[0]?.id ?? 1;
+        const placeholderSlug = `pending-${Date.now().toString(36)}`;
+        const created = await storage.createTradesman({
+          slug: placeholderSlug,
+          businessName: tokenRow.email.split("@")[0],
+          ownerName: "",
+          email: tokenRow.email,
+          phone: "",
+          bio: "",
+          postcode: "",
+          areaId: fallbackAreaId,
+          categories: JSON.stringify([]),
+          gallery: JSON.stringify([]),
+          heroImageUrl: "/assets/hero-builder.png",
+          verified: false,
+          licensed: false,
+          insured: false,
+          featured: false,
+          yearsExperience: 0,
+          responseTimeMinutes: 60,
+          stripeCustomerId: null,
+          stripeSubscriptionId: null,
+          subscriptionStatus: null,
+          featuredUntil: null,
+        });
+        tradesmanId = created.id;
+      }
+    }
+
+    // Refuse to sign in banned accounts.
+    const enriched = await attachCardSummary((await storage.getTradesmanById(tradesmanId))!);
+    if (enriched.cardSummary.isLoginBlocked) {
+      return res.redirect(302, "/#/sign-in?auth=banned");
+    }
+
+    // Mint a session.
+    const sid = generateSessionId();
+    const { ip, ua } = requestFingerprint(req);
+    const now = Date.now();
+    await storage.createSession({
+      id: sid,
+      tradesmanId,
+      expiresAt: now + SESSION_TTL_MS,
+      createdIp: ip,
+      createdUserAgent: ua,
+    });
+    setSessionCookie(res, sid);
+    res.redirect(302, "/#/dashboard");
+  });
+
+  app.post("/api/auth/logout", async (req, res) => {
+    const sid = readSessionCookie(req);
+    if (sid) {
+      await storage.deleteSession(sid).catch((err) => {
+        console.error(`[auth] deleteSession failed for sid=${sid.slice(0, 8)}…:`, err?.message);
+      });
+    }
+    clearSessionCookie(res);
+    res.json({ ok: true });
+  });
+
+  app.get("/api/auth/me", requireAuth, async (req, res) => {
+    const t = await storage.getTradesmanById(req.auth!.tradesmanId);
+    if (!t) {
+      // Session points to a deleted tradesman — nuke the session.
+      await storage.deleteSession(req.auth!.sessionId).catch(() => undefined);
+      clearSessionCookie(res);
+      return res.status(401).json({ message: "Account no longer exists" });
+    }
     const enriched = await attachCardSummary(t);
     if (enriched.cardSummary.isLoginBlocked) {
-      return res.status(403).json({ message: "This account has been permanently banned and can no longer access the dashboard.", banned: true });
+      await storage.deleteSession(req.auth!.sessionId).catch(() => undefined);
+      clearSessionCookie(res);
+      return res.status(403).json({ message: "This account has been permanently banned.", banned: true });
     }
-    res.json(enriched);
+    res.json({ tradesman: enriched });
   });
 
   app.post("/api/tradesmen", publicFormGuard(), async (req, res) => {
@@ -146,8 +356,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.patch("/api/tradesmen/:id", async (req, res) => {
-    const updated = await storage.updateTradesman(Number(req.params.id), req.body);
+  // Auth-gated. Only the signed-in tradesman can edit their own profile.
+  // Admin endpoints (verify/feature) use a separate ADMIN_KEY path.
+  app.patch("/api/tradesmen/:id", requireAuth, requireSelf("id"), async (req, res) => {
+    // Defensive: never allow privilege fields to be mass-assigned via PATCH.
+    // Admin-only flags must go through the dedicated /api/admin/* endpoints.
+    const { verified, featured, licensed, insured, ...safe } = req.body ?? {};
+    void verified; void featured; void licensed; void insured;
+    const updated = await storage.updateTradesman(Number(req.params.id), safe);
     if (!updated) return res.status(404).json({ message: "Tradesman not found" });
     res.json(updated);
   });

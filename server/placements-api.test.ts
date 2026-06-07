@@ -76,7 +76,7 @@ vi.mock('./stripe', () => ({
 
 vi.mock('./stripe-checkout', () => ({ createLeadPackCheckoutSession: vi.fn() }));
 vi.mock('./stripe-webhook', () => ({ handleStripeWebhook: vi.fn() }));
-vi.mock('./spam-guard', () => ({ publicFormGuard: () => (_req: any, _res: any, next: any) => next() }));
+vi.mock('./spam-guard', () => ({ publicFormGuard: () => (_req: any, _res: any, next: any) => next(), rateLimit: () => (_req: any, _res: any, next: any) => next() }));
 
 import { storage } from './storage';
 

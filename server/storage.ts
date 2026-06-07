@@ -10,6 +10,8 @@ import {
   tradesmanCards,
   moderationLog,
   paymentsLog,
+  magicLinkTokens,
+  sessions,
   partnerEnquiries,
   partners,
   partnerPlacements,
@@ -28,6 +30,8 @@ import type {
   TradesmanCard, InsertTradesmanCard,
   ModerationLogEntry,
   InsertPaymentsLog, PaymentsLogEntry,
+  MagicLinkToken, InsertMagicLinkToken,
+  Session, InsertSession,
   InsertPartnerEnquiry, PartnerEnquiry,
   Partner, InsertPartner,
   PartnerPlacement, InsertPartnerPlacement,
@@ -36,7 +40,7 @@ import type {
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import { eq, desc, sql, and, isNull, gte, lte } from "drizzle-orm";
+import { eq, desc, sql, and, isNull, gt, lt, gte, lte } from "drizzle-orm";
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -92,6 +96,18 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
   // payments_log (Stripe audit trail)
   createPaymentsLog(entry: InsertPaymentsLog): Promise<PaymentsLogEntry>;
   getPaymentsLogByTradesman(tradesmanId: number, limit?: number): Promise<PaymentsLogEntry[]>;
+  // auth — magic-link tokens
+  createMagicLinkToken(t: InsertMagicLinkToken): Promise<MagicLinkToken>;
+  getMagicLinkTokenByHash(tokenHash: string): Promise<MagicLinkToken | undefined>;
+  consumeMagicLinkToken(id: number, consumedAt: number): Promise<MagicLinkToken | undefined>;
+  getRecentTokenForEmail(email: string, sinceMs: number): Promise<MagicLinkToken | undefined>;
+  deleteExpiredMagicLinkTokens(nowMs: number): Promise<number>;
+  // auth — sessions
+  createSession(s: InsertSession): Promise<Session>;
+  getSessionById(id: string): Promise<Session | undefined>;
+  touchSession(id: string, patch: { lastSeenAt: number; expiresAt: number }): Promise<Session | undefined>;
+  deleteSession(id: string): Promise<void>;
+  deleteExpiredSessions(nowMs: number): Promise<number>;
   // partner_enquiries (inbound B2B from /partners)
   createPartnerEnquiry(entry: InsertPartnerEnquiry & { requestIp?: string | null; requestUserAgent?: string | null }): Promise<PartnerEnquiry>;
   getPartnerEnquiries(limit?: number): Promise<PartnerEnquiry[]>;
@@ -276,6 +292,61 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
       .where(eq(tradesmanCards.id, id))
       .returning();
     return row;
+  }
+
+  // ── auth: magic-link tokens ──
+  // Tokens never store the raw secret — only its sha256 hash. `consumed_at`
+  // is set on first successful /verify; subsequent presentations are rejected
+  // at the route layer by checking it's still null.
+  async createMagicLinkToken(t: InsertMagicLinkToken): Promise<MagicLinkToken> {
+    const [row] = await db.insert(magicLinkTokens).values({ ...t, createdAt: now() }).returning();
+    return row;
+  }
+  async getMagicLinkTokenByHash(tokenHash: string): Promise<MagicLinkToken | undefined> {
+    return one(db.select().from(magicLinkTokens).where(eq(magicLinkTokens.tokenHash, tokenHash)));
+  }
+  async consumeMagicLinkToken(id: number, consumedAt: number): Promise<MagicLinkToken | undefined> {
+    // Conditional update — only consume if not already consumed. Returning
+    // zero rows tells the caller someone else got there first (double-click
+    // on the magic link, replay attack, etc).
+    const [row] = await db.update(magicLinkTokens)
+      .set({ consumedAt })
+      .where(and(eq(magicLinkTokens.id, id), isNull(magicLinkTokens.consumedAt)))
+      .returning();
+    return row;
+  }
+  async getRecentTokenForEmail(email: string, sinceMs: number): Promise<MagicLinkToken | undefined> {
+    return one(
+      db.select().from(magicLinkTokens)
+        .where(and(eq(magicLinkTokens.email, email), gt(magicLinkTokens.createdAt, sinceMs)))
+        .orderBy(desc(magicLinkTokens.createdAt))
+        .limit(1),
+    );
+  }
+  async deleteExpiredMagicLinkTokens(nowMs: number): Promise<number> {
+    const rows = await db.delete(magicLinkTokens).where(lt(magicLinkTokens.expiresAt, nowMs)).returning({ id: magicLinkTokens.id });
+    return rows.length;
+  }
+
+  // ── auth: sessions ──
+  async createSession(s: InsertSession): Promise<Session> {
+    const ts = now();
+    const [row] = await db.insert(sessions).values({ ...s, createdAt: ts, lastSeenAt: ts }).returning();
+    return row;
+  }
+  async getSessionById(id: string): Promise<Session | undefined> {
+    return one(db.select().from(sessions).where(eq(sessions.id, id)));
+  }
+  async touchSession(id: string, patch: { lastSeenAt: number; expiresAt: number }): Promise<Session | undefined> {
+    const [row] = await db.update(sessions).set(patch).where(eq(sessions.id, id)).returning();
+    return row;
+  }
+  async deleteSession(id: string): Promise<void> {
+    await db.delete(sessions).where(eq(sessions.id, id));
+  }
+  async deleteExpiredSessions(nowMs: number): Promise<number> {
+    const rows = await db.delete(sessions).where(lt(sessions.expiresAt, nowMs)).returning({ id: sessions.id });
+    return rows.length;
   }
 
   // ── moderation log ──
