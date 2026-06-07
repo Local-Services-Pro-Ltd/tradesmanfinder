@@ -93,6 +93,9 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
   getCreditTransactions(tradesmanId: number): Promise<CreditTransaction[]>;
   createCreditTransaction(t: InsertCreditTransaction): Promise<CreditTransaction>;
   countRows(table: "tradesmen" | "jobs" | "reviews"): Promise<number>;
+  // microsite lead attribution — groups jobs by their `source` column.
+  // `sinceMs` is an inclusive lower bound on createdAt; pass 0 for all-time.
+  getMicrositeLeadStats(sinceMs: number): Promise<Array<{ source: string; count: number; lastLeadAt: number }>>;
   // payments_log (Stripe audit trail)
   createPaymentsLog(entry: InsertPaymentsLog): Promise<PaymentsLogEntry>;
   getPaymentsLogByTradesman(tradesmanId: number, limit?: number): Promise<PaymentsLogEntry[]>;
@@ -276,6 +279,36 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
     const map = { tradesmen, jobs, reviews } as const;
     const result = await db.select({ count: sql<number>`count(*)::int` }).from(map[table]);
     return result[0]?.count ?? 0;
+  }
+
+  /**
+   * Per-source lead counts since `sinceMs` (inclusive). One row per distinct
+   * `jobs.source` value with an aggregate count and the most recent
+   * `createdAt` for that source. Indexed by idx_jobs_source so this stays
+   * fast even at 6-figure job counts.
+   *
+   * The route handler enriches each row with the matching microsite
+   * registry entry so the admin UI can show trade/area/kind alongside the
+   * raw count without a second query.
+   */
+  async getMicrositeLeadStats(sinceMs: number): Promise<Array<{ source: string; count: number; lastLeadAt: number }>> {
+    const rows = await db
+      .select({
+        source: jobs.source,
+        count: sql<number>`count(*)::int`,
+        lastLeadAt: sql<number>`max(${jobs.createdAt})::bigint`,
+      })
+      .from(jobs)
+      .where(gte(jobs.createdAt, sinceMs))
+      .groupBy(jobs.source)
+      .orderBy(desc(sql`count(*)`));
+    // drizzle returns bigint as string for ::bigint casts — coerce to number
+    // here so the JSON response is uniformly numeric.
+    return rows.map((r) => ({
+      source: r.source,
+      count: r.count,
+      lastLeadAt: Number(r.lastLeadAt ?? 0),
+    }));
   }
 
   // ── cards ──

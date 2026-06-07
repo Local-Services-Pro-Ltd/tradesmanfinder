@@ -8,6 +8,7 @@ import {
   PARTNER_ENQUIRY_STATUSES, PARTNER_STATUSES, PARTNER_SURFACES, PARTNER_COMMERCIAL_MODELS, PARTNER_VERTICALS,
 } from "@shared/schema";
 import { selectPlacements, debugPlacements } from "./placement-engine";
+import { resolveMicrositeByHost, MICROSITES } from "@shared/microsites";
 import { computeInvoice, computeStats } from "./invoice-generator";
 import { registerClickRoute } from "./click-tracking";
 import { registerOutcomeCaptureRoute } from "./outcome-capture";
@@ -714,6 +715,69 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         carded,
         banned,
       },
+    });
+  });
+
+  // ── Mini-site lead volume stats (PR-M4) ──
+  // GET /api/admin/microsites/stats?days=30
+  //   days=0 → all-time, default 30, capped at 3650 to keep the SQL window sane.
+  // Aggregates jobs.source (populated server-side in POST /api/jobs from
+  // req.microsite) and enriches each `microsite:<host>` row with the
+  // registry entry so the response is directly renderable in the admin UI.
+  app.get("/api/admin/microsites/stats", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const rawDays = req.query.days;
+    let days = 30;
+    if (rawDays !== undefined) {
+      const parsed = Number(rawDays);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        return res.status(400).json({ message: "days must be a non-negative number" });
+      }
+      days = Math.min(parsed, 3650);
+    }
+    const sinceMs = days === 0 ? 0 : Date.now() - days * 24 * 60 * 60 * 1000;
+    const rows = await storage.getMicrositeLeadStats(sinceMs);
+
+    // Enrich each row. `source` values look like `web` or `microsite:<host>`.
+    // Unknown hosts (i.e. not in the registry) still get returned — useful
+    // for spotting drift between registry and live attribution.
+    const enriched = rows.map((r) => {
+      const isMicrosite = r.source.startsWith("microsite:");
+      const host = isMicrosite ? r.source.slice("microsite:".length) : null;
+      const entry = host ? resolveMicrositeByHost(host) : null;
+      return {
+        source: r.source,
+        count: r.count,
+        lastLeadAt: r.lastLeadAt,
+        host,
+        registered: isMicrosite ? entry !== null : null,
+        kind: entry?.kind ?? null,
+        trade: entry?.trade ?? null,
+        area: entry?.area ?? null,
+        vertical: entry?.vertical ?? null,
+        canonical: entry?.canonical ?? null,
+      };
+    });
+
+    const micrositeRows = enriched.filter((r) => r.source.startsWith("microsite:"));
+    const totalMicrositeLeads = micrositeRows.reduce((sum, r) => sum + r.count, 0);
+    const totalWebLeads = enriched
+      .filter((r) => r.source === "web")
+      .reduce((sum, r) => sum + r.count, 0);
+    const activeMicrositeHosts = micrositeRows.length;
+    const registeredMicrositeCount = MICROSITES.length;
+
+    res.json({
+      windowDays: days,
+      sinceMs,
+      generatedAt: Date.now(),
+      summary: {
+        totalMicrositeLeads,
+        totalWebLeads,
+        activeMicrositeHosts,
+        registeredMicrositeCount,
+      },
+      rows: enriched,
     });
   });
 
