@@ -369,3 +369,42 @@ export async function debugPlacements(input: Omit<SelectPlacementsInput, "limit"
     selected_placement_ids: selectedIds,
   };
 }
+
+// ── Lead attribution helper (PR-P6) ───────────────────────────────────────
+
+/**
+ * Log a `lead_passed` event when a tradesman accepts a job that originated
+ * via a partner placement.
+ *
+ * @param args.event_id - Re-use the impression event_id if known; otherwise
+ *   pass a freshly generated UUID (crypto.randomUUID()).
+ *
+ * NOTE (PR-P6): This helper is in place but not yet called from any job-
+ * acceptance flow. The lead-from-partner attribution wiring is deferred to a
+ * future PR once the lead flow design is finalised. See docs/partners.md for
+ * the rationale.
+ */
+export async function logLeadPassed(
+  args: {
+    placement_id: number;
+    partner_id: number;
+    job_id: number;
+    event_id: string; // impression event_id if known, or a fresh UUID
+  },
+  storage: IStorage,
+): Promise<void> {
+  try {
+    await storage.createPartnerEvent({
+      placement_id: args.placement_id,
+      partner_id: args.partner_id,
+      event_type: "lead_passed",
+      event_id: args.event_id,
+      surface: "lead_attribution",
+      amount_pence: 0,
+      metadata: { job_id: args.job_id },
+    });
+  } catch (err: unknown) {
+    // Duplicate idempotency_key (same event_id already logged) is a safe no-op.
+    console.warn("[placement-engine] logLeadPassed: duplicate or failed event — skipping:", (err as Error)?.message);
+  }
+}

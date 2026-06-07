@@ -93,6 +93,17 @@ function PlacementCard({ placement }: { placement: Placement }) {
   const { creative, target_url, event_id } = placement;
   const ctaText = creative.cta || "Learn more";
 
+  // PR-P6: Route clicks through the server-side click-tracking endpoint when
+  // the impression was sampled (event_id is present). The endpoint logs a click
+  // event and 302-redirects to the partner's target URL.
+  //
+  // Trade-off: if the impression was NOT sampled (event_id is null, ~90% of
+  // impressions), we link direct to the partner URL and cannot track that click.
+  // This is intentional — we only attempt click tracking when we have a UUID.
+  const trackedHref = event_id
+    ? `/p/c/${event_id}?p=${placement.id}`
+    : target_url; // unsampled impression — link direct, no tracking
+
   return (
     <Card className="relative overflow-hidden p-4">
       {/* Sponsored label — top-right, small + muted */}
@@ -125,7 +136,7 @@ function PlacementCard({ placement }: { placement: Placement }) {
             </p>
           )}
           <a
-            href={target_url}
+            href={trackedHref}
             target="_blank"
             rel="sponsored noopener"
             data-event-id={event_id ?? undefined}
