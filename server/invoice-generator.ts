@@ -11,8 +11,12 @@
  *   - lead_qualified  → ratePence × count(lead_passed events in period)
  *   - lead_booked     → ratePence × count(lead_outcome events with
  *                       metadata.outcome === 'booked' in period)
- *   - rev_share       → out of scope for v1; emits a zero-pence line item
- *                       with a note so the finance team handles it manually
+ *   - rev_share       → sum(deal_value_pence) across won lead_outcome events
+ *                       in period, multiplied by ratePence/10000 (basis
+ *                       points). Capped at rateCapPence if set. Won events
+ *                       missing deal_value_pence are not billable and counted
+ *                       only in a footnote on the line item (so finance can
+ *                       chase the partner for the value if needed). PR-P10.
  *
  * The v1 generator is intentionally manually-triggered (not cron) — partners
  * are still few enough that a human reviews each invoice before it's raised
@@ -204,18 +208,54 @@ export function computeInvoice({
     }
 
     if (placement.commercialModel === "rev_share") {
-      // Rev-share isn't computed automatically in v1 — partners on this
-      // model are billed via a custom calculation the finance team owns.
-      // We still emit a £0 line item so it's visible on the draft invoice
-      // and someone can replace it manually before sending.
+      // Rev-share auto-billing (PR-P10):
+      //   subtotal = floor( sum(deal_value_pence over won outcomes) × ratePence / 10000 )
+      // where ratePence carries basis points for rev_share placements
+      // (e.g. 1000 = 10%). Capped at rateCapPence if set.
+      const wonOutcomes = periodEvents.filter(
+        (e) => e.placementId === placement.id && e.eventType === "lead_outcome" && parseMetadata(e.metadata).outcome === "won",
+      );
+      let totalDealValue = 0;
+      let missingDealValueCount = 0;
+      for (const evt of wonOutcomes) {
+        const dv = parseMetadata(evt.metadata).deal_value_pence;
+        if (typeof dv === "number" && Number.isFinite(dv) && Number.isInteger(dv) && dv > 0) {
+          totalDealValue += dv;
+        } else {
+          missingDealValueCount += 1;
+        }
+      }
+      let subtotal = Math.floor((totalDealValue * placement.ratePence) / 10000);
+      let capped = false;
+      if (placement.rateCapPence != null && subtotal > placement.rateCapPence) {
+        subtotal = placement.rateCapPence;
+        capped = true;
+      }
+      const noteParts: string[] = [];
+      const bpsLabel = `${(placement.ratePence / 100).toFixed(2)}%`;
+      if (wonOutcomes.length === 0) {
+        noteParts.push("No won outcomes in period");
+      } else {
+        noteParts.push(
+          `${bpsLabel} of £${(totalDealValue / 100).toFixed(2)} won across ${wonOutcomes.length} outcome${wonOutcomes.length === 1 ? "" : "s"}`,
+        );
+      }
+      if (missingDealValueCount > 0) {
+        noteParts.push(
+          `${missingDealValueCount} won outcome${missingDealValueCount === 1 ? "" : "s"} missing deal_value_pence — chase partner for value`,
+        );
+      }
+      if (capped) {
+        noteParts.push(`capped at £${(placement.rateCapPence! / 100).toFixed(2)}`);
+      }
       lineItems.push({
         placementId: placement.id,
         surface: placement.surface,
         commercialModel: placement.commercialModel,
         ratePence: placement.ratePence, // basis points, semantically
-        count: 0,
-        subtotalPence: 0,
-        note: "Rev-share — finance team to compute manually (not auto-billed in v1)",
+        count: wonOutcomes.length,
+        subtotalPence: subtotal,
+        note: noteParts.length > 0 ? noteParts.join("; ") : undefined,
       });
       continue;
     }
@@ -294,8 +334,24 @@ export function computeStats({
       estimatedSubtotalPence = lead_passed * p.ratePence;
     } else if (p.commercialModel === "lead_booked") {
       estimatedSubtotalPence = lead_booked * p.ratePence;
+    } else if (p.commercialModel === "rev_share") {
+      // PR-P10: mirror invoice rev_share math (no pro-rating for stats).
+      const wonOutcomes = pEvents.filter(
+        (e) => e.eventType === "lead_outcome" && parseMetadata(e.metadata).outcome === "won",
+      );
+      let totalDealValue = 0;
+      for (const evt of wonOutcomes) {
+        const dv = parseMetadata(evt.metadata).deal_value_pence;
+        if (typeof dv === "number" && Number.isFinite(dv) && Number.isInteger(dv) && dv > 0) {
+          totalDealValue += dv;
+        }
+      }
+      let est = Math.floor((totalDealValue * p.ratePence) / 10000);
+      if (p.rateCapPence != null && est > p.rateCapPence) {
+        est = p.rateCapPence;
+      }
+      estimatedSubtotalPence = est;
     }
-    // rev_share intentionally 0 in stats — same reasoning as computeInvoice.
 
     return {
       placementId: p.id,
