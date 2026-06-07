@@ -349,8 +349,16 @@ async function appendEmailPlacement(bodyHtml: string, categoryId?: number | null
     const placement = result.placements[0];
     if (!placement) return bodyHtml;
 
+    // PR-P6: Route email CTA clicks through the server-side click-tracking
+    // endpoint when the impression was sampled (event_id present). We need
+    // the full origin so email clients get an absolute URL.
+    // PUBLIC_APP_URL takes precedence over PUBLIC_URL; both fall back to the
+    // production hostname.
+    const appUrl = (process.env.PUBLIC_APP_URL ?? process.env.PUBLIC_URL ?? "https://tradesmanfinder.com").replace(/\/$/, "");
+    // Trade-off: unsampled impressions (event_id is null) link direct to the
+    // partner URL — we cannot track those clicks without a UUID.
     const targetUrl = placement.event_id
-      ? `${placement.target_url}${placement.target_url.includes("?") ? "&" : "?"}eid=${placement.event_id}`
+      ? `${appUrl}/p/c/${placement.event_id}?p=${placement.id}`
       : placement.target_url;
     const headline = escapeHtml(placement.creative.headline);
     const bodyText = placement.creative.body ? `<p style="margin:6px 0 0;font-size:12px;color:#6b7280">${escapeHtml(placement.creative.body)}</p>` : "";

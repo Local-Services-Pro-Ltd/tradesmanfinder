@@ -8,6 +8,7 @@ import {
   PARTNER_ENQUIRY_STATUSES, PARTNER_STATUSES, PARTNER_SURFACES, PARTNER_COMMERCIAL_MODELS, PARTNER_VERTICALS,
 } from "@shared/schema";
 import { selectPlacements, debugPlacements } from "./placement-engine";
+import { registerClickRoute } from "./click-tracking";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
 import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification } from "./mailer";
 import type { Tradesman, TradesmanCard } from "@shared/schema";
@@ -45,6 +46,10 @@ function slugify(s: string) {
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   migrate();
+
+  // ── Partner click tracking ── (PR-P6)
+  // Must be registered BEFORE admin routes to avoid route conflicts.
+  registerClickRoute(app);
 
   // Admin auth: header x-admin-key OR ?key=ADMIN_KEY query param
   const isAdminReq = (req: any): boolean =>
