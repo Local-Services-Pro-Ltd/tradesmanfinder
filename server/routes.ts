@@ -7,6 +7,7 @@ import {
   insertPartnerSchema, insertPartnerPlacementSchema,
   PARTNER_ENQUIRY_STATUSES, PARTNER_STATUSES, PARTNER_SURFACES, PARTNER_COMMERCIAL_MODELS, PARTNER_VERTICALS,
 } from "@shared/schema";
+import { selectPlacements, debugPlacements } from "./placement-engine";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
 import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification } from "./mailer";
 import type { Tradesman, TradesmanCard } from "@shared/schema";
@@ -945,6 +946,74 @@ res.json(updated);
     if (!Number.isFinite(partnerId)) return res.status(400).json({ message: 'Invalid partnerId' });
     const invoices = await storage.getPartnerInvoicesByPartner(partnerId);
     res.json(invoices);
+  });
+
+  // ════ PR-P4: PLACEMENT ENGINE ════
+
+  // GET /api/placements?surface=<surface>&category=<id>&area=<id>&limit=<1-3>
+  // Public (no auth). Returns up to N placements for the given surface.
+  // When PARTNER_PLACEMENTS_ENABLED is not 'true'/'1', returns {placements: []}.
+  app.get('/api/placements', async (req, res) => {
+    const surface = req.query.surface ? String(req.query.surface) : '';
+    if (!surface) return res.status(400).json({ message: 'surface query param is required' });
+
+    const category = req.query.category ? Number(req.query.category) : null;
+    const area = req.query.area ? Number(req.query.area) : null;
+    const limit = req.query.limit ? Math.min(Math.max(Number(req.query.limit) || 1, 1), 3) : 1;
+
+    const result = await selectPlacements({
+      surface,
+      category: Number.isFinite(category) ? category : null,
+      area: Number.isFinite(area) ? area : null,
+      limit,
+      storage,
+    });
+
+    // Fire-and-forget impression event logging for sampled placements.
+    // The _uuid and _sampled fields are set inside selectPlacements but are not
+    // part of the public SelectedPlacement type — cast to access them.
+    const enriched = result.placements.map((p) => {
+      const internal = p as typeof p & { _uuid?: string; _sampled?: boolean };
+      if (internal._sampled && internal._uuid) {
+        void storage.createPartnerEvent({
+          placement_id: p.id,
+          partner_id: p.partner_id,
+          event_type: 'impression',
+          event_id: internal._uuid,
+          surface: p.surface,
+          amount_pence: 0,
+          metadata: { category, area },
+        }).catch((err: unknown) => console.error('[placements] impression event logging failed:', err));
+      }
+      // Strip internal fields before sending to client
+      const { _uuid: _u, _sampled: _s, ...pub } = internal as any;
+      return pub;
+    });
+
+    res.json({ placements: enriched });
+  });
+
+  // GET /api/admin/placements/debug?surface=...&category=...&area=...
+  // Admin-only debug endpoint — returns full ranking trace.
+  app.get('/api/admin/placements/debug', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+
+    const surface = req.query.surface ? String(req.query.surface) : '';
+    if (!surface) return res.status(400).json({ message: 'surface query param is required' });
+
+    const category = req.query.category ? Number(req.query.category) : null;
+    const area = req.query.area ? Number(req.query.area) : null;
+    const limit = req.query.limit ? Math.min(Math.max(Number(req.query.limit) || 1, 1), 3) : 1;
+
+    const result = await debugPlacements({
+      surface,
+      category: Number.isFinite(category) ? category : null,
+      area: Number.isFinite(area) ? area : null,
+      limit,
+      storage,
+    });
+
+    res.json(result);
   });
 
   return httpServer;

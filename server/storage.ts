@@ -118,6 +118,21 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
   getPartnerEventCountsByPartner(partnerId: number, sinceMs: number): Promise<Record<string, number>>;
   // invoices (read-only stub)
   getPartnerInvoicesByPartner(partnerId: number): Promise<PartnerInvoice[]>;
+  // ── placement engine (PR-P4) ──
+  /** Returns all placements for a surface (time-active filtering done client-side). */
+  getActivePlacementsBySurface(surface: string): Promise<PartnerPlacement[]>;
+  /** Returns impression/click events for a placement since a given timestamp. */
+  getEventsByPlacementSince(placementId: number, sinceMs: number): Promise<PartnerEvent[]>;
+  /** Log a partner event (impressions, clicks, etc.). */
+  createPartnerEvent(input: {
+    placement_id: number;
+    partner_id: number;
+    event_type: string;
+    event_id: string;
+    surface: string;
+    amount_pence: number;
+    metadata?: Record<string, unknown>;
+  }): Promise<void>;
 }
 
 const now = () => Date.now();
@@ -446,6 +461,57 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
     return db.select().from(partnerInvoices)
       .where(eq(partnerInvoices.partnerId, partnerId))
       .orderBy(desc(partnerInvoices.generatedAt));
+  }
+
+  // ── placement engine (PR-P4) ──
+
+  /**
+   * Returns all placements for a given surface.
+   * Time-active filtering (activeFrom/activeTo vs now) is done client-side
+   * in the placement engine so we can inject `nowMs` for deterministic tests.
+   */
+  async getActivePlacementsBySurface(surface: string): Promise<PartnerPlacement[]> {
+    return db.select().from(partnerPlacements)
+      .where(eq(partnerPlacements.surface, surface))
+      .orderBy(partnerPlacements.priority);
+  }
+
+  /**
+   * Returns all partner events for a specific placement since sinceMs.
+   * Used by the budget-check step of the placement engine.
+   */
+  async getEventsByPlacementSince(placementId: number, sinceMs: number): Promise<PartnerEvent[]> {
+    return db.select().from(partnerEvents)
+      .where(and(
+        eq(partnerEvents.placementId, placementId),
+        gte(partnerEvents.occurredAt, sinceMs),
+      ))
+      .orderBy(desc(partnerEvents.occurredAt));
+  }
+
+  /**
+   * Log a partner event (impression / click / etc.).
+   * The idempotencyKey is `<event_type>:<placement_id>:<event_id>` to satisfy
+   * the NOT NULL UNIQUE constraint on partner_events.idempotency_key.
+   */
+  async createPartnerEvent(input: {
+    placement_id: number;
+    partner_id: number;
+    event_type: string;
+    event_id: string;
+    surface: string;
+    amount_pence: number;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    const idempotencyKey = `${input.event_type}:${input.placement_id}:${input.event_id}`;
+    await db.insert(partnerEvents).values({
+      placementId: input.placement_id,
+      partnerId: input.partner_id,
+      eventType: input.event_type,
+      idempotencyKey,
+      occurredAt: now(),
+      metadata: input.metadata ? JSON.stringify(input.metadata) : null,
+    });
   }
 }
 
