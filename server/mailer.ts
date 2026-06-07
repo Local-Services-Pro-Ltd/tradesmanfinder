@@ -12,6 +12,14 @@ import { db } from "./storage";
 import { redactPII } from "./redact-pii";
 import { selectPlacements } from "./placement-engine";
 import { storage } from "./storage";
+import { signOutcomeToken, buildOutcomeLink } from "./outcome-tokens";
+import { buildOutcomeAskEmail, type OutcomeAskEmailLinks, type BuildOutcomeAskEmailInput } from "./outcome-ask-email";
+
+// Re-export the pure builder + its types so callers that already import
+// from "./mailer" keep working. The builder itself lives in
+// ./outcome-ask-email so it can be unit-tested without loading ./storage.
+export { buildOutcomeAskEmail };
+export type { BuildOutcomeAskEmailInput, OutcomeAskEmailLinks };
 
 const RESEND_API = "https://api.resend.com/emails";
 const PUBLIC_URL = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
@@ -585,6 +593,80 @@ export async function sendMagicLinkEmail(opts: {
     log: {
       template: isSignUp ? "magic_link_sign_up" : "magic_link_sign_in",
       tradesmanId: opts.tradesmanId ?? null,
+    },
+  });
+}
+
+// ── PR-P9: Partner outcome-ask email ────────────────────────────────────────
+// Asks a partner "Did lead #N convert?" with 3 signed buttons (won / lost /
+// quoted). The links are HMAC-signed by outcome-tokens.ts so a partner
+// clicking them resolves to /p/o/:token without admin auth.
+//
+// Why this lives in mailer.ts (vs outcome-capture.ts):
+//   - Reuses the same `wrap()` chrome and `send()` plumbing as every other
+//     transactional email.
+//   - Keeps outcome-capture.ts focused on the receive-side endpoint.
+//
+// Why pure builder + thin sender:
+//   - `buildOutcomeAskEmail` is exported and unit-tested without env / DB /
+//     network. The sender just composes it with `send`.
+
+// `buildOutcomeAskEmail` is imported and re-exported at the top of this
+// file (see imports). It lives in ./outcome-ask-email so unit tests can
+// load it without transitively loading ./storage.
+
+/**
+ * Sign outcome tokens, build the email, and send it. Returns the standard
+ * mailer result so callers can react to send failures.
+ *
+ * Idempotency note: each call generates a fresh nonce, so calling this twice
+ * for the same (partnerId, placementId, jobId) produces two emails with two
+ * different tokens. Both tokens resolve to the same logical idempotency key
+ * in `partner_events` (lead_outcome:<placementId>:<jobId>-<nonce>) so only
+ * the FIRST click counted; the SECOND is a silent no-op.
+ */
+export async function sendOutcomeAskEmail(opts: {
+  to: string;
+  partnerId: number;
+  partnerName: string;
+  placementId: number;
+  jobId: number;
+  jobTitle?: string;
+  area?: string;
+  ttlDays?: number;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const ttlDays = opts.ttlDays ?? 90;
+  const token = signOutcomeToken({
+    partnerId: opts.partnerId,
+    placementId: opts.placementId,
+    jobId: opts.jobId,
+    ttlMs: ttlDays * 24 * 60 * 60 * 1000,
+  });
+  const links: OutcomeAskEmailLinks = {
+    won: buildOutcomeLink(token, "won"),
+    lost: buildOutcomeLink(token, "lost"),
+    quoted: buildOutcomeLink(token, "quoted"),
+  };
+
+  const { subject, html, text } = buildOutcomeAskEmail({
+    partnerName: opts.partnerName,
+    jobId: opts.jobId,
+    jobTitle: opts.jobTitle,
+    area: opts.area,
+    links,
+    expiresInDays: ttlDays,
+  });
+
+  return send({
+    to: opts.to,
+    subject,
+    html,
+    text,
+    tag: "partner_outcome_ask",
+    log: {
+      template: "partner_outcome_ask",
+      partnerId: opts.partnerId,
+      jobId: opts.jobId,
     },
   });
 }
