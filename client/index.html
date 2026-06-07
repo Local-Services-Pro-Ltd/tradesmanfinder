@@ -32,7 +32,7 @@
       // using replaceState so the bad URL never appears in browser history.
       (function () {
         var p = window.location.pathname;
-        if (p && p !== "/" && p.indexOf("/api/") !== 0 && p.indexOf("/checkout/") !== 0) {
+        if (p && p !== "/" && p.indexOf("/api/") !== 0 && p.indexOf("/checkout/") !== 0 && p.indexOf("/p/c/") !== 0) {
           var hash = "#" + p + window.location.search;
           window.history.replaceState(null, "", "/" + hash);
         }
