@@ -314,6 +314,20 @@ export function StatsTab({ authKey, partners, selectedPartnerId, onSelectPartner
     enabled: !!selectedPartnerId,
   });
 
+  // PR-P8: outcomes for the selected range (defaults to last 90 days server-side,
+  // but we pin to the same range as stats for consistency)
+  const { data: outcomesResp, isLoading: outcomesLoading } = useQuery<{
+    summary: { total: number; won: number; lost: number; quoted: number; totalDealValuePence: number };
+    outcomes: Array<{ id: number; placementId: number; jobId: number | null; outcome: string | null; dealValuePence: number | null; recordedVia: string; occurredAt: number }>;
+  }>({
+    queryKey: ['/api/admin/partners', selectedPartnerId, 'outcomes', from, to, authKey],
+    queryFn: async () => (await apiRequest(
+      'GET',
+      `/api/admin/partners/${selectedPartnerId}/outcomes?from=${from}&to=${to}&key=${encodeURIComponent(authKey)}`,
+    )).json(),
+    enabled: !!selectedPartnerId,
+  });
+
   return (
     <div className="space-y-4">
       <Card className="p-4">
@@ -407,6 +421,58 @@ export function StatsTab({ authKey, partners, selectedPartnerId, onSelectPartner
                     </TableBody>
                   </Table>
                   </div>
+                )}
+              </>
+            )}
+          </Card>
+
+          {/* PR-P8: Outcomes summary */}
+          <Card className="p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="font-display text-sm font-semibold">Lead outcomes — {label}</h3>
+              <p className="text-xs text-muted-foreground">Captured via signed email links</p>
+            </div>
+            {outcomesLoading ? (
+              <p className="text-sm text-muted-foreground">Loading…</p>
+            ) : !outcomesResp || outcomesResp.summary.total === 0 ? (
+              <p className="text-sm text-muted-foreground">No outcomes recorded in this period.</p>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                  <div className="rounded border p-2"><p className="text-xs text-muted-foreground">Total</p><p className="text-lg font-semibold" data-testid="outcomes-total">{outcomesResp.summary.total}</p></div>
+                  <div className="rounded border p-2"><p className="text-xs text-muted-foreground">Won</p><p className="text-lg font-semibold text-green-700" data-testid="outcomes-won">{outcomesResp.summary.won}</p></div>
+                  <div className="rounded border p-2"><p className="text-xs text-muted-foreground">Lost</p><p className="text-lg font-semibold text-red-600" data-testid="outcomes-lost">{outcomesResp.summary.lost}</p></div>
+                  <div className="rounded border p-2"><p className="text-xs text-muted-foreground">Quoted</p><p className="text-lg font-semibold text-amber-600" data-testid="outcomes-quoted">{outcomesResp.summary.quoted}</p></div>
+                  <div className="rounded border p-2 bg-primary/5"><p className="text-xs text-muted-foreground">Deal value (won)</p><p className="text-lg font-semibold text-primary" data-testid="outcomes-deal-value">{fmtPence(outcomesResp.summary.totalDealValuePence)}</p></div>
+                </div>
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Outcome</TableHead>
+                        <TableHead>Job</TableHead>
+                        <TableHead>Placement</TableHead>
+                        <TableHead className="text-right">Deal £</TableHead>
+                        <TableHead>Via</TableHead>
+                        <TableHead>Recorded</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {outcomesResp.outcomes.slice(0, 25).map((o) => (
+                        <TableRow key={o.id} data-testid={`outcome-row-${o.id}`}>
+                          <TableCell className="text-xs"><Badge variant={o.outcome === 'won' ? 'default' : o.outcome === 'lost' ? 'destructive' : 'secondary'}>{o.outcome ?? '—'}</Badge></TableCell>
+                          <TableCell className="text-xs">{o.jobId ?? '—'}</TableCell>
+                          <TableCell className="text-xs">#{o.placementId}</TableCell>
+                          <TableCell className="text-xs text-right">{o.dealValuePence != null ? fmtPence(o.dealValuePence) : '—'}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground">{o.recordedVia}</TableCell>
+                          <TableCell className="text-xs">{fmtDate(o.occurredAt)}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+                {outcomesResp.outcomes.length > 25 && (
+                  <p className="text-xs text-muted-foreground">Showing first 25 of {outcomesResp.outcomes.length} outcomes.</p>
                 )}
               </>
             )}
