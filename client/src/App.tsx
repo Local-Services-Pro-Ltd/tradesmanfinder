@@ -19,6 +19,7 @@ import Join from "@/pages/join";
 import Dashboard from "@/pages/dashboard";
 import Admin from "@/pages/admin";
 import AdminModeration from "@/pages/admin-moderation";
+import AdminPartners from "@/pages/admin-partners";
 import { About, Contact, Terms, Privacy, Faq } from "@/pages/static-pages";
 
 // wouter's useHashLocation returns the raw hash as the path (e.g. for
@@ -55,6 +56,7 @@ function AppRouter() {
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/admin" component={Admin} />
       <Route path="/admin/moderation" component={AdminModeration} />
+      <Route path="/admin/partners" component={AdminPartners} />
       <Route path="/about" component={About} />
       <Route path="/contact" component={Contact} />
       <Route path="/terms" component={Terms} />
