@@ -24,6 +24,7 @@ import AdminModeration from "@/pages/admin-moderation";
 import AdminPartners from "@/pages/admin-partners";
 import AdminMicrosites from "@/pages/admin-microsites";
 import { About, Contact, Terms, Privacy, Faq } from "@/pages/static-pages";
+import { ScrollToTop } from "@/components/scroll-to-top";
 
 // wouter's useHashLocation returns the raw hash as the path (e.g. for
 // `#/dashboard?id=42` it returns `/dashboard?id=42`). The <Route path="/dashboard">
@@ -85,6 +86,7 @@ function App() {
         <TooltipProvider>
           <Toaster />
           <Router hook={useHashLocationStripQuery}>
+            <ScrollToTop />
             <AppRouter />
           </Router>
         </TooltipProvider>
