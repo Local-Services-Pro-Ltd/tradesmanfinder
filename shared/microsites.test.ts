@@ -39,7 +39,7 @@ const DB_AREAS = new Set([
 describe('microsite registry', () => {
   it('contains MICROSITE_COUNT entries matching the array length', () => {
     expect(MICROSITES).toHaveLength(MICROSITE_COUNT);
-    expect(MICROSITE_COUNT).toBe(82);
+    expect(MICROSITE_COUNT).toBe(83);
   });
 
   it('has unique hostnames (no duplicate registrations)', () => {
@@ -106,7 +106,7 @@ describe('microsite registry', () => {
   it('expected kind counts (sanity check on portfolio shape)', () => {
     const counts: Record<string, number> = {};
     for (const m of MICROSITES) counts[m.kind] = (counts[m.kind] ?? 0) + 1;
-    expect(counts['geo-trade']).toBe(56);
+    expect(counts['geo-trade']).toBe(57);
     expect(counts['generic-directory']).toBe(20);
     expect(counts['vertical']).toBe(3);
     expect(counts['redirect']).toBe(3);

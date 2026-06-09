@@ -28,12 +28,12 @@ Counts (enforced by `shared/microsites.test.ts`):
 
 | Kind | Count | Behaviour |
 |---|---|---|
-| `geo-trade` | 56 | Renders mini-site page with trade + area copy |
+| `geo-trade` | 57 | Renders mini-site page with trade + area copy |
 | `generic-directory` | 20 | Renders mini-site page with national trade copy |
 | `vertical` | 3 | Renders mini-site page with custom title |
 | `redirect` | 3 | 301s to `redirectTo` (no content served) |
 
-`MICROSITE_COUNT = 82`.
+`MICROSITE_COUNT = 83`.
 
 ## Request flow
 
