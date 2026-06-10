@@ -41,6 +41,7 @@ vi.mock("./storage", () => ({
     getCredits: vi.fn(),
     setCredits: vi.fn().mockResolvedValue({ balance: 0 }),
     createCreditTransaction: vi.fn(),
+    findCreditsGrantByPaymentIntent: vi.fn(),
   },
 }));
 
@@ -60,6 +61,7 @@ const storageMock = storage as unknown as {
   getCredits: ReturnType<typeof vi.fn>;
   setCredits: ReturnType<typeof vi.fn>;
   createCreditTransaction: ReturnType<typeof vi.fn>;
+  findCreditsGrantByPaymentIntent: ReturnType<typeof vi.fn>;
 };
 
 function mockRes() {
@@ -581,6 +583,175 @@ describe("handleStripeWebhook — customer.subscription.deleted", () => {
     expect(patch).not.toHaveProperty("featuredUntil");
     expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
       expect.objectContaining({ action: "featured_degraded", tradesmanId: 42 }),
+    );
+  });
+});
+
+describe("handleStripeWebhook — charge.refunded (PR-E3d)", () => {
+  function refundEvent(opts: {
+    chargeId?: string;
+    paymentIntent?: string | null;
+    amount?: number;
+    amountRefunded?: number;
+    customer?: string | null;
+  } = {}) {
+    return {
+      id: `evt_refund_${Math.random().toString(36).slice(2, 8)}`,
+      type: "charge.refunded",
+      data: {
+        object: {
+          id: opts.chargeId ?? "ch_abc",
+          // explicit `null` should pass through — use `in` check to distinguish
+          // "not set" (default to pi_abc) from "explicitly null".
+          payment_intent:
+            "paymentIntent" in opts ? opts.paymentIntent : "pi_abc",
+          customer: opts.customer ?? "cus_x",
+          amount: opts.amount ?? 2500,
+          amount_refunded: opts.amountRefunded ?? 2500,
+          currency: "gbp",
+        },
+      },
+    };
+  }
+
+  it("full refund reverses the full credit grant", async () => {
+    constructEvent.mockReturnValue(refundEvent({ amount: 2500, amountRefunded: 2500 }));
+    storageMock.findCreditsGrantByPaymentIntent.mockResolvedValue({
+      tradesmanId: 42,
+      creditsDelta: 5,
+      productKind: "lead_pack_5",
+    });
+    storageMock.getCredits.mockResolvedValue({ balance: 5 });
+
+    const res = mockRes();
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      res,
+    );
+
+    expect(res._status).toBe(200);
+    expect(storageMock.setCredits).toHaveBeenCalledWith(42, 0);
+    expect(storageMock.createCreditTransaction).toHaveBeenCalledWith(
+      expect.objectContaining({ tradesmanId: 42, amount: -5 }),
+    );
+    expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "credits_revoked",
+        tradesmanId: 42,
+        creditsDelta: -5,
+        productKind: "lead_pack_5",
+      }),
+    );
+  });
+
+  it("partial refund rounds UP credits revoked (no salami slicing)", async () => {
+    // 40% refund of a 10-credit pack → ceil(10*0.4) = 4 credits revoked
+    constructEvent.mockReturnValue(refundEvent({ amount: 4500, amountRefunded: 1800 }));
+    storageMock.findCreditsGrantByPaymentIntent.mockResolvedValue({
+      tradesmanId: 42,
+      creditsDelta: 10,
+      productKind: "lead_pack_10",
+    });
+    storageMock.getCredits.mockResolvedValue({ balance: 10 });
+
+    const res = mockRes();
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      res,
+    );
+
+    expect(storageMock.setCredits).toHaveBeenCalledWith(42, 6);
+    expect(storageMock.createCreditTransaction).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: -4 }),
+    );
+    expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "credits_revoked", creditsDelta: -4 }),
+    );
+  });
+
+  it("clamps revocation at current balance — already-spent credits are not clawed back", async () => {
+    // Tradesman bought 10, spent 7, now full refund. Can only revoke remaining 3.
+    constructEvent.mockReturnValue(refundEvent({ amount: 4500, amountRefunded: 4500 }));
+    storageMock.findCreditsGrantByPaymentIntent.mockResolvedValue({
+      tradesmanId: 42,
+      creditsDelta: 10,
+      productKind: "lead_pack_10",
+    });
+    storageMock.getCredits.mockResolvedValue({ balance: 3 });
+
+    const res = mockRes();
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      res,
+    );
+
+    expect(storageMock.setCredits).toHaveBeenCalledWith(42, 0);
+    expect(storageMock.createCreditTransaction).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: -3 }),
+    );
+    expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "credits_revoked",
+        creditsDelta: -3,
+        notes: expect.stringContaining("clamped at 0"),
+      }),
+    );
+  });
+
+  it("refund of featured/non-credit charge is a noop (no grant to reverse)", async () => {
+    constructEvent.mockReturnValue(refundEvent({ paymentIntent: "pi_featured" }));
+    storageMock.findCreditsGrantByPaymentIntent.mockResolvedValue(undefined);
+
+    const res = mockRes();
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      res,
+    );
+
+    expect(res._status).toBe(200);
+    expect(storageMock.setCredits).not.toHaveBeenCalled();
+    expect(storageMock.createCreditTransaction).not.toHaveBeenCalled();
+    expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "noop",
+        tradesmanId: null,
+        notes: expect.stringContaining("no matching credits_granted"),
+      }),
+    );
+  });
+
+  it("refund without payment_intent flags for review", async () => {
+    constructEvent.mockReturnValue(refundEvent({ paymentIntent: null }));
+
+    const res = mockRes();
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      res,
+    );
+
+    expect(storageMock.findCreditsGrantByPaymentIntent).not.toHaveBeenCalled();
+    expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "flagged_for_review" }),
+    );
+  });
+
+  it("zero-amount refund logs noop without touching credits", async () => {
+    constructEvent.mockReturnValue(refundEvent({ amount: 2500, amountRefunded: 0 }));
+    storageMock.findCreditsGrantByPaymentIntent.mockResolvedValue({
+      tradesmanId: 42,
+      creditsDelta: 5,
+      productKind: "lead_pack_5",
+    });
+
+    const res = mockRes();
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      res,
+    );
+
+    expect(storageMock.setCredits).not.toHaveBeenCalled();
+    expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "noop", tradesmanId: 42 }),
     );
   });
 });

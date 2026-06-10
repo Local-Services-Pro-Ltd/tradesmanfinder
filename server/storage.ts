@@ -101,6 +101,11 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
   // payments_log (Stripe audit trail)
   createPaymentsLog(entry: InsertPaymentsLog): Promise<PaymentsLogEntry>;
   getPaymentsLogByTradesman(tradesmanId: number, limit?: number): Promise<PaymentsLogEntry[]>;
+  /** Find the original credits_granted row for a Stripe PaymentIntent. Used
+   *  by the refund handler to compute the revocation delta from the grant
+   *  size (Stripe doesn't tell us how many credits were granted; we have to
+   *  look it up in our own ledger). */
+  findCreditsGrantByPaymentIntent(paymentIntentId: string): Promise<PaymentsLogEntry | undefined>;
   // auth — magic-link tokens
   createMagicLinkToken(t: InsertMagicLinkToken): Promise<MagicLinkToken>;
   getMagicLinkTokenByHash(tokenHash: string): Promise<MagicLinkToken | undefined>;
@@ -281,6 +286,24 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
   }
   async getPaymentsLogByTradesman(tradesmanId: number, limit = 50): Promise<PaymentsLogEntry[]> {
     return db.select().from(paymentsLog).where(eq(paymentsLog.tradesmanId, tradesmanId)).orderBy(desc(paymentsLog.createdAt)).limit(limit);
+  }
+  async findCreditsGrantByPaymentIntent(paymentIntentId: string): Promise<PaymentsLogEntry | undefined> {
+    // Most recent matching row wins. In practice there's exactly one
+    // credits_granted row per payment_intent (event_id is unique), but if
+    // an admin ever manually replayed a grant we want the latest.
+    return one(
+      db
+        .select()
+        .from(paymentsLog)
+        .where(
+          and(
+            eq(paymentsLog.stripePaymentIntentId, paymentIntentId),
+            eq(paymentsLog.action, "credits_granted"),
+          ),
+        )
+        .orderBy(desc(paymentsLog.createdAt))
+        .limit(1),
+    );
   }
 
   async countRows(table: "tradesmen" | "jobs" | "reviews") {
