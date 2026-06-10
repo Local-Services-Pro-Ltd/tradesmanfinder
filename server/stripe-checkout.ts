@@ -163,9 +163,14 @@ export async function createFeaturedCheckoutSession(
         product_kind: productKind,
       },
     },
+    // Subscription-mode Checkout always creates a Customer record
+    // automatically — we don't (and can't) pass `customer_creation: "always"`
+    // here; Stripe rejects it with `customer_creation can only be used in
+    // payment mode`. Just pre-fill the email when we don't have a customer
+    // id yet so Stripe can de-duplicate on next purchase.
     ...(input.stripeCustomerId
       ? { customer: input.stripeCustomerId }
-      : { customer_email: input.tradesmanEmail, customer_creation: "always" }),
+      : { customer_email: input.tradesmanEmail }),
     payment_method_types: ["card"],
     allow_promotion_codes: true,
   };

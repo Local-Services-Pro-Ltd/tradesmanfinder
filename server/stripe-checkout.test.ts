@@ -150,7 +150,10 @@ describe("createFeaturedCheckoutSession", () => {
     expect(params.success_url).toContain("session_id={CHECKOUT_SESSION_ID}");
     expect(params.cancel_url).toContain("/checkout/return?id=99&result=cancel&kind=featured");
     expect(params.customer_email).toBe("trade@example.com");
-    expect(params.customer_creation).toBe("always");
+    // Subscription-mode Checkout always creates a Customer automatically;
+    // passing customer_creation in subscription mode is a Stripe API error.
+    // Locked in here so we never reintroduce the regression.
+    expect(params.customer_creation).toBeUndefined();
     expect(params.customer).toBeUndefined();
     expect(params.allow_promotion_codes).toBe(true);
   });
@@ -165,6 +168,7 @@ describe("createFeaturedCheckoutSession", () => {
     const params = create.mock.calls[0][0];
     expect(params.customer).toBe("cus_existing");
     expect(params.customer_email).toBeUndefined();
+    // Same reason — always undefined in subscription mode.
     expect(params.customer_creation).toBeUndefined();
   });
 
