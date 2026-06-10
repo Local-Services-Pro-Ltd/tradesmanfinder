@@ -30,7 +30,10 @@
 //   → storage.getTradesmanByStripeCustomerId
 //   → flagged_for_review.
 //
-// charge.refunded → PR-E3d. past_due degradation timer → PR-E3e.
+// charge.refunded (PR-E3d): revoke lead-pack credits proportional to the
+//   refund amount. Featured subscriptions are out of scope here — cancellation
+//   flows through customer.subscription.deleted (PR-E3b).
+// past_due degradation timer → PR-E3e.
 // ─────────────────────────────────────────────────────────────────────────────
 import type { Request, Response } from "express";
 import type Stripe from "stripe";
@@ -124,6 +127,9 @@ async function processStripeEvent(event: Stripe.Event): Promise<void> {
       return;
     case "customer.subscription.deleted":
       await handleSubscriptionDeleted(event);
+      return;
+    case "charge.refunded":
+      await handleChargeRefunded(event);
       return;
     default:
       // Log unknown types so we know what to support next without hunting
@@ -540,5 +546,149 @@ async function handleSubscriptionDeleted(event: Stripe.Event): Promise<void> {
     action: "featured_degraded",
     creditsDelta: 0,
     notes: "subscription.deleted — marked canceled, featuredUntil left intact through paid period",
+  });
+}
+
+// ── Refund handler (PR-E3d) ─────────────────────────────────────────────────
+//
+// Stripe fires `charge.refunded` for both full and partial refunds. We:
+//   1) Resolve the charge → its payment_intent → our original credits_granted
+//      row in payments_log (the grant log is the only place we know how many
+//      credits a given purchase added).
+//   2) Compute revocation delta proportional to amount_refunded/amount.
+//      For a full refund this exactly reverses the grant.
+//      For a partial refund we round UP (revoke at least 1 credit if the user
+//      got money back at all) — refusing to revoke a fractional credit would
+//      let serial partial-refunders extract free leads.
+//   3) Clamp post-revoke balance at 0. Credits the tradesman already SPENT
+//      cannot be clawed back from leads they already received. This is the
+//      core "we eat the cost of consumed leads" decision — encoded once here
+//      so admin tooling doesn't need to reason about negative balances.
+//   4) Log credits_revoked with the signed creditsDelta (negative).
+//
+// Featured subscription refunds are out of scope: cancellation runs through
+// customer.subscription.deleted (PR-E3b). If a Stripe admin issues a refund
+// on a featured charge we still log it (action=noop) for the audit trail
+// but don't try to back-date featuredUntil — that policy call belongs to
+// the admin who issued the refund.
+
+async function handleChargeRefunded(event: Stripe.Event): Promise<void> {
+  const charge = event.data.object as Stripe.Charge;
+  const paymentIntentId =
+    typeof charge.payment_intent === "string"
+      ? charge.payment_intent
+      : charge.payment_intent?.id ?? null;
+  const customerId = typeof charge.customer === "string" ? charge.customer : null;
+
+  const baseLog = {
+    eventId: event.id,
+    eventType: event.type,
+    amountPence: charge.amount_refunded ?? null,
+    currency: charge.currency ?? null,
+    stripeCustomerId: customerId,
+    stripeSubscriptionId: null,
+    stripeCheckoutSessionId: null,
+    stripePaymentIntentId: paymentIntentId,
+    stripeInvoiceId: typeof charge.invoice === "string" ? charge.invoice : null,
+    stripeChargeId: charge.id,
+    productKind: null as string | null,
+    rawPayload: JSON.stringify(event).slice(0, 50_000),
+  };
+
+  if (!paymentIntentId) {
+    // Charge without a payment_intent shouldn't happen for our flows (Checkout
+    // always creates one), but log so we notice.
+    await storage.createPaymentsLog({
+      ...baseLog,
+      tradesmanId: null,
+      action: "flagged_for_review",
+      creditsDelta: 0,
+      notes: "charge.refunded without payment_intent",
+    });
+    return;
+  }
+
+  const grant = await storage.findCreditsGrantByPaymentIntent(paymentIntentId);
+  if (!grant) {
+    // Either this charge was a Featured subscription invoice (no credits to
+    // revoke — handled by subscription.deleted), or an out-of-band charge we
+    // never issued credits for. Log and stop.
+    await storage.createPaymentsLog({
+      ...baseLog,
+      tradesmanId: null,
+      action: "noop",
+      creditsDelta: 0,
+      notes: "no matching credits_granted row — likely featured/non-credit charge",
+    });
+    return;
+  }
+
+  baseLog.productKind = grant.productKind;
+  const tradesmanId = grant.tradesmanId;
+  if (!tradesmanId) {
+    await storage.createPaymentsLog({
+      ...baseLog,
+      tradesmanId: null,
+      action: "flagged_for_review",
+      creditsDelta: 0,
+      notes: "matched grant row had null tradesmanId — cannot revoke",
+    });
+    return;
+  }
+
+  const granted = grant.creditsDelta; // positive
+  const amount = charge.amount ?? 0;
+  const refunded = charge.amount_refunded ?? 0;
+  if (amount <= 0 || refunded <= 0) {
+    await storage.createPaymentsLog({
+      ...baseLog,
+      tradesmanId,
+      action: "noop",
+      creditsDelta: 0,
+      notes: `zero-amount refund (amount=${amount}, refunded=${refunded})`,
+    });
+    return;
+  }
+
+  // Round UP on partial refunds so any money-back triggers at least 1 credit
+  // revoked — prevents salami-slicing refunds for free leads.
+  const proportion = refunded / amount;
+  const creditsToRevoke = Math.min(granted, Math.ceil(granted * proportion));
+
+  const existing = await storage.getCredits(tradesmanId);
+  const currentBalance = existing?.balance ?? 0;
+  // Clamp at 0 — credits already spent on leads can't be clawed back.
+  const actualRevoke = Math.min(creditsToRevoke, currentBalance);
+  const newBalance = currentBalance - actualRevoke;
+
+  if (actualRevoke > 0) {
+    await storage.setCredits(tradesmanId, newBalance);
+    await storage.createCreditTransaction({
+      tradesmanId,
+      amount: -actualRevoke,
+      reason: `Stripe refund: charge ${charge.id} (refunded ${refunded}/${amount} of ${grant.productKind})`,
+      relatedJobId: null,
+    });
+  }
+
+  const noteParts: string[] = [
+    `refunded ${refunded}/${amount} (${(proportion * 100).toFixed(0)}%)`,
+    `granted=${granted}`,
+    `wantedRevoke=${creditsToRevoke}`,
+    `actualRevoke=${actualRevoke}`,
+    `balance ${currentBalance}→${newBalance}`,
+  ];
+  if (actualRevoke < creditsToRevoke) {
+    noteParts.push(
+      `clamped at 0 — ${creditsToRevoke - actualRevoke} credits already spent`,
+    );
+  }
+
+  await storage.createPaymentsLog({
+    ...baseLog,
+    tradesmanId,
+    action: "credits_revoked",
+    creditsDelta: -actualRevoke, // signed negative
+    notes: noteParts.join("; "),
   });
 }
