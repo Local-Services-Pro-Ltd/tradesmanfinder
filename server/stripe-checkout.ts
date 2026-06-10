@@ -97,3 +97,84 @@ export async function createLeadPackCheckoutSession(
 
   return { sessionId: session.id, url: session.url, productKind };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Featured Listing subscription Checkout (PR-E3a).
+//
+// Mirrors createLeadPackCheckoutSession but in subscription mode. Webhook
+// handling for invoice.paid / customer.subscription.* lands in PR-E3b — this
+// PR only opens the Checkout session so the user can subscribe end-to-end.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface CreateFeaturedCheckoutInput {
+  tradesmanId: number;
+  tradesmanEmail: string;
+  /** Existing Stripe customer id if we've ever charged this tradesman, else null. */
+  stripeCustomerId: string | null;
+  /** Stripe price id — must be the configured STRIPE_PRICE_FEATURED_MONTHLY value. */
+  priceId: string;
+}
+
+export interface CreateFeaturedCheckoutResult {
+  sessionId: string;
+  url: string;
+  productKind: ProductKind;
+}
+
+/**
+ * Create a subscription Checkout Session for the Featured Listing product.
+ *
+ * Throws if the priceId doesn't resolve to `featured_monthly` — caller should
+ * return 400. This prevents drive-by callers from passing a lead-pack price
+ * through this subscription endpoint (which would silently create a one-off-
+ * looking subscription record).
+ */
+export async function createFeaturedCheckoutSession(
+  input: CreateFeaturedCheckoutInput,
+): Promise<CreateFeaturedCheckoutResult> {
+  const productKind = productKindFromPriceId(input.priceId);
+  if (productKind !== "featured_monthly") {
+    throw new Error(`Price ${input.priceId} is not the Featured Listing subscription`);
+  }
+
+  // Subscription mode parity with the lead-pack flow: same metadata shape so
+  // the webhook handler can treat session.metadata.tradesman_id as a single
+  // source of truth across both modes.
+  //
+  // We intentionally do NOT pass `payment_method_collection: "if_required"` —
+  // for a recurring product we always want a card on file so renewals
+  // succeed without a customer interaction.
+  const params: Stripe.Checkout.SessionCreateParams = {
+    mode: "subscription",
+    line_items: [{ price: input.priceId, quantity: 1 }],
+    success_url: `${APP_BASE_URL}/checkout/return?id=${input.tradesmanId}&result=success&kind=featured&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${APP_BASE_URL}/checkout/return?id=${input.tradesmanId}&result=cancel&kind=featured`,
+    client_reference_id: String(input.tradesmanId),
+    metadata: {
+      tradesman_id: String(input.tradesmanId),
+      product_kind: productKind,
+    },
+    // Subscription metadata is separate from session metadata — propagate the
+    // same tradesman_id so future subscription.* events (renewal, cancellation)
+    // can be reconciled without joining via the customer id alone.
+    subscription_data: {
+      metadata: {
+        tradesman_id: String(input.tradesmanId),
+        product_kind: productKind,
+      },
+    },
+    ...(input.stripeCustomerId
+      ? { customer: input.stripeCustomerId }
+      : { customer_email: input.tradesmanEmail, customer_creation: "always" }),
+    payment_method_types: ["card"],
+    allow_promotion_codes: true,
+  };
+
+  const session = await stripe.checkout.sessions.create(params);
+
+  if (!session.url) {
+    throw new Error("Stripe returned a checkout session without a URL");
+  }
+
+  return { sessionId: session.id, url: session.url, productKind };
+}

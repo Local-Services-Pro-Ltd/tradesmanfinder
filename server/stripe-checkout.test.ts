@@ -17,7 +17,7 @@ vi.mock("./stripe", async () => {
   };
 });
 
-import { createLeadPackCheckoutSession } from "./stripe-checkout";
+import { createFeaturedCheckoutSession, createLeadPackCheckoutSession } from "./stripe-checkout";
 import { stripe } from "./stripe";
 
 const create = stripe.checkout.sessions.create as unknown as ReturnType<typeof vi.fn>;
@@ -106,6 +106,99 @@ describe("createLeadPackCheckoutSession", () => {
         tradesmanEmail: "x@y.com",
         stripeCustomerId: null,
         priceId: "price_pack5",
+      }),
+    ).rejects.toThrow(/without a URL/);
+  });
+});
+
+describe("createFeaturedCheckoutSession", () => {
+  beforeEach(() => {
+    create.mockReset();
+    create.mockResolvedValue({ id: "cs_sub_123", url: "https://stripe.test/cs_sub_123" });
+  });
+  afterEach(() => {
+    delete process.env.APP_BASE_URL;
+  });
+
+  it("creates a subscription-mode Checkout Session with the expected params", async () => {
+    process.env.APP_BASE_URL = "https://tradesmanfinder.com";
+    const result = await createFeaturedCheckoutSession({
+      tradesmanId: 99,
+      tradesmanEmail: "trade@example.com",
+      stripeCustomerId: null,
+      priceId: "price_featured",
+    });
+
+    expect(result).toEqual({
+      sessionId: "cs_sub_123",
+      url: "https://stripe.test/cs_sub_123",
+      productKind: "featured_monthly",
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const params = create.mock.calls[0][0];
+    expect(params.mode).toBe("subscription");
+    expect(params.line_items).toEqual([{ price: "price_featured", quantity: 1 }]);
+    expect(params.client_reference_id).toBe("99");
+    expect(params.metadata).toEqual({ tradesman_id: "99", product_kind: "featured_monthly" });
+    // Subscription metadata MUST propagate the same fields so renewal /
+    // cancellation webhooks can be reconciled without joining via customer id.
+    expect(params.subscription_data).toEqual({
+      metadata: { tradesman_id: "99", product_kind: "featured_monthly" },
+    });
+    expect(params.success_url).toContain("/checkout/return?id=99&result=success&kind=featured");
+    expect(params.success_url).toContain("session_id={CHECKOUT_SESSION_ID}");
+    expect(params.cancel_url).toContain("/checkout/return?id=99&result=cancel&kind=featured");
+    expect(params.customer_email).toBe("trade@example.com");
+    expect(params.customer_creation).toBe("always");
+    expect(params.customer).toBeUndefined();
+    expect(params.allow_promotion_codes).toBe(true);
+  });
+
+  it("reuses an existing Stripe customer id when provided", async () => {
+    await createFeaturedCheckoutSession({
+      tradesmanId: 7,
+      tradesmanEmail: "trade@example.com",
+      stripeCustomerId: "cus_existing",
+      priceId: "price_featured",
+    });
+    const params = create.mock.calls[0][0];
+    expect(params.customer).toBe("cus_existing");
+    expect(params.customer_email).toBeUndefined();
+    expect(params.customer_creation).toBeUndefined();
+  });
+
+  it("rejects a price id that is a lead pack (not Featured)", async () => {
+    await expect(
+      createFeaturedCheckoutSession({
+        tradesmanId: 1,
+        tradesmanEmail: "x@y.com",
+        stripeCustomerId: null,
+        priceId: "price_pack5",
+      }),
+    ).rejects.toThrow(/not the Featured Listing/);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown price id", async () => {
+    await expect(
+      createFeaturedCheckoutSession({
+        tradesmanId: 1,
+        tradesmanEmail: "x@y.com",
+        stripeCustomerId: null,
+        priceId: "price_unknown",
+      }),
+    ).rejects.toThrow(/not the Featured Listing/);
+  });
+
+  it("throws if Stripe returns a session without a url", async () => {
+    create.mockResolvedValueOnce({ id: "cs_sub_no_url", url: null });
+    await expect(
+      createFeaturedCheckoutSession({
+        tradesmanId: 1,
+        tradesmanEmail: "x@y.com",
+        stripeCustomerId: null,
+        priceId: "price_featured",
       }),
     ).rejects.toThrow(/without a URL/);
   });
