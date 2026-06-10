@@ -19,6 +19,7 @@ import type { Tradesman, TradesmanCard } from "@shared/schema";
 import { z } from "zod";
 import { publicFormGuard, rateLimit } from "./spam-guard";
 import { createFeaturedCheckoutSession, createLeadPackCheckoutSession } from "./stripe-checkout";
+import { createBillingPortalSession } from "./stripe-portal";
 import { handleStripeWebhook } from "./stripe-webhook";
 import { stripeIsConfigured } from "./stripe";
 import {
@@ -614,6 +615,58 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // ── Stripe Billing Portal (PR-E3c) ──
+  // Tradespeople with an existing stripeCustomerId (i.e. they've completed at
+  // least one Checkout) can self-serve: cancel the Featured subscription,
+  // update payment method, download invoices. Behaviour is configured in the
+  // Stripe Dashboard under Settings → Billing → Customer portal.
+  //
+  // Auth shape matches /api/checkout/* (tradesmanId in body, no session
+  // required) for consistency. The 409 guard on stripeCustomerId is the
+  // real safety net: without it the call is harmless because Stripe rejects
+  // portal sessions for unknown customers.
+  app.post("/api/billing/portal", async (req, res) => {
+    if (!stripeIsConfigured()) {
+      res.status(503).json({ message: "Billing is temporarily unavailable. Please try again shortly." });
+      return;
+    }
+    const schema = z.object({
+      tradesmanId: z.number().int().positive(),
+      returnPath: z.string().startsWith("/").max(200).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ message: "Invalid request", errors: parsed.error.errors });
+      return;
+    }
+    const { tradesmanId, returnPath } = parsed.data;
+
+    const tradesman = await storage.getTradesmanById(tradesmanId);
+    if (!tradesman) {
+      res.status(404).json({ message: "Tradesman not found" });
+      return;
+    }
+    if (!tradesman.stripeCustomerId) {
+      // 409 — they need to complete a purchase first so Stripe has a customer
+      // record to portal against. Frontend should hide the button when this
+      // is the case; this is the belt-and-braces guard.
+      res.status(409).json({
+        message: "No billing history yet. Complete a purchase before managing billing.",
+      });
+      return;
+    }
+    try {
+      const result = await createBillingPortalSession({
+        stripeCustomerId: tradesman.stripeCustomerId,
+        returnPath,
+      });
+      res.json({ url: result.url });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Portal session failed";
+      res.status(502).json({ message });
+    }
+  });
+
   // ── Stripe Checkout return bounce ──
   // Stripe's 303 redirect to a hash-routed URL (/#/dashboard?...) intermittently
   // drops the fragment in some browsers, landing the user on a 404. To work
@@ -626,7 +679,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     // added" vs "Featured listing active"). Whitelist values to avoid
     // reflecting arbitrary strings back into the SPA URL.
     const kindRaw = String(req.query.kind ?? "");
-    const kind = kindRaw === "featured" ? "featured" : "";
+    const kind = kindRaw === "featured" || kindRaw === "portal" ? kindRaw : "";
     if (!id) {
       res.redirect(302, "/#/");
       return;
