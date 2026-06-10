@@ -20,6 +20,7 @@ import { z } from "zod";
 import { publicFormGuard, rateLimit } from "./spam-guard";
 import { createFeaturedCheckoutSession, createLeadPackCheckoutSession } from "./stripe-checkout";
 import { createBillingPortalSession } from "./stripe-portal";
+import { sweepPastDueFeatured } from "./featured-sweep";
 import { handleStripeWebhook } from "./stripe-webhook";
 import { stripeIsConfigured } from "./stripe";
 import {
@@ -664,6 +665,46 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (err) {
       const message = err instanceof Error ? err.message : "Portal session failed";
       res.status(502).json({ message });
+    }
+  });
+
+  // ── Past-due Featured sweep cron (PR-E3e) ──
+  // Hit by Vercel Cron daily (see vercel.json). Walks tradesmen who have
+  // been past_due longer than the grace period and clears their featuredUntil
+  // so the listing stops being featured. See server/featured-sweep.ts for
+  // the policy rationale (why we don't just kill on first webhook).
+  //
+  // Authenticated by CRON_SECRET. Vercel Cron sends it as a bearer token;
+  // we also accept the header `x-cron-secret` to make manual admin invocation
+  // from a script easier without needing to set Authorization (which curl
+  // ergonomics around can be awkward).
+  // Vercel Cron hits this with GET (and auto-injects Authorization: Bearer
+  // ${CRON_SECRET} when CRON_SECRET is set in project env). We accept GET to
+  // match that. The endpoint is idempotent in the sense that the query filter
+  // `featuredUntil > now` excludes any record we just swept, so a duplicate
+  // run within the same day is a no-op (modulo race with a webhook updating
+  // status mid-sweep, which is fine — we tolerate it).
+  app.get("/api/admin/sweep-past-due", async (req, res) => {
+    const expected = process.env.CRON_SECRET;
+    if (!expected) {
+      // Refuse to run if no secret is configured — better than running
+      // unauthenticated and corrupting prod data.
+      res.status(503).json({ message: "CRON_SECRET not configured" });
+      return;
+    }
+    const bearer = req.header("authorization") ?? "";
+    const xSecret = req.header("x-cron-secret") ?? "";
+    const presented = bearer.startsWith("Bearer ") ? bearer.slice("Bearer ".length) : xSecret;
+    if (presented !== expected) {
+      res.status(401).json({ message: "unauthorized" });
+      return;
+    }
+    try {
+      const result = await sweepPastDueFeatured({ storage });
+      res.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "sweep failed";
+      res.status(500).json({ message });
     }
   });
 

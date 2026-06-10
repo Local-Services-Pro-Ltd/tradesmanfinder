@@ -304,7 +304,7 @@ export const paymentsLog = pgTable("payments_log", {
   tradesmanId: integer("tradesman_id"), // resolved via stripeCustomerId; nullable for events we couldn't attribute
   productKind: text("product_kind"), // 'lead_pack_5' | 'lead_pack_10' | 'lead_pack_20' | 'featured_monthly' | null
   // Outcome of our handler
-  action: text("action").notNull(), // 'credits_granted' | 'credits_revoked' | 'featured_extended' | 'featured_degraded' | 'flagged_for_review' | 'noop' | 'failed'
+  action: text("action").notNull(), // 'credits_granted' | 'credits_revoked' | 'featured_extended' | 'featured_degraded' | 'featured_swept' | 'flagged_for_review' | 'noop' | 'failed'
   creditsDelta: integer("credits_delta").notNull().default(0), // signed: +10 grant, -5 partial revoke, 0 if non-credit event
   notes: text("notes"), // freeform: error_message, admin_reason, etc.
   // Raw payload for debugging — stored as JSON text to avoid jsonb operator

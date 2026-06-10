@@ -106,6 +106,18 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
    *  size (Stripe doesn't tell us how many credits were granted; we have to
    *  look it up in our own ledger). */
   findCreditsGrantByPaymentIntent(paymentIntentId: string): Promise<PaymentsLogEntry | undefined>;
+  /** Tradesmen matching a given subscriptionStatus AND still currently
+   *  featured (featuredUntil > now). Used by the past-due sweep cron to
+   *  find featured listings that have been dunning long enough to revoke. */
+  getTradesmenWithSubscriptionStatus(status: string, nowMs: number): Promise<Tradesman[]>;
+  /** Most-recent payments_log row for a tradesman with the given action.
+   *  Used by the past-due sweep to read the timestamp of when this tradesman
+   *  first transitioned into past_due (the most recent featured_degraded
+   *  row, since the webhook writes one per transition). */
+  getMostRecentPaymentsLogAction(
+    tradesmanId: number,
+    action: string,
+  ): Promise<PaymentsLogEntry | undefined>;
   // auth — magic-link tokens
   createMagicLinkToken(t: InsertMagicLinkToken): Promise<MagicLinkToken>;
   getMagicLinkTokenByHash(tokenHash: string): Promise<MagicLinkToken | undefined>;
@@ -286,6 +298,35 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
   }
   async getPaymentsLogByTradesman(tradesmanId: number, limit = 50): Promise<PaymentsLogEntry[]> {
     return db.select().from(paymentsLog).where(eq(paymentsLog.tradesmanId, tradesmanId)).orderBy(desc(paymentsLog.createdAt)).limit(limit);
+  }
+  async getTradesmenWithSubscriptionStatus(status: string, nowMs: number): Promise<Tradesman[]> {
+    return db
+      .select()
+      .from(tradesmen)
+      .where(
+        and(
+          eq(tradesmen.subscriptionStatus, status),
+          gt(tradesmen.featuredUntil, nowMs),
+        ),
+      );
+  }
+  async getMostRecentPaymentsLogAction(
+    tradesmanId: number,
+    action: string,
+  ): Promise<PaymentsLogEntry | undefined> {
+    return one(
+      db
+        .select()
+        .from(paymentsLog)
+        .where(
+          and(
+            eq(paymentsLog.tradesmanId, tradesmanId),
+            eq(paymentsLog.action, action),
+          ),
+        )
+        .orderBy(desc(paymentsLog.createdAt))
+        .limit(1),
+    );
   }
   async findCreditsGrantByPaymentIntent(paymentIntentId: string): Promise<PaymentsLogEntry | undefined> {
     // Most recent matching row wins. In practice there's exactly one

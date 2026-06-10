@@ -16,5 +16,11 @@
     { "source": "/p/c/(.*)", "destination": "/api/index.js" },
     { "source": "/p/o/(.*)", "destination": "/api/index.js" },
     { "source": "/((?!api/|p/c/|p/o/|assets/|.*\\.[a-zA-Z0-9]+$).*)", "destination": "/index.html" }
+  ],
+  "crons": [
+    {
+      "path": "/api/admin/sweep-past-due",
+      "schedule": "15 3 * * *"
+    }
   ]
 }
