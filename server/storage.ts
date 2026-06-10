@@ -69,6 +69,8 @@ export interface IStorage {
   getTradesmanBySlug(slug: string): Promise<Tradesman | undefined>;
   getTradesmanById(id: number): Promise<Tradesman | undefined>;
   getTradesmanByEmail(email: string): Promise<Tradesman | undefined>;
+  getTradesmanByStripeCustomerId(customerId: string): Promise<Tradesman | undefined>;
+  getTradesmanByStripeSubscriptionId(subscriptionId: string): Promise<Tradesman | undefined>;
   createTradesman(t: InsertTradesman): Promise<Tradesman>;
   updateTradesman(id: number, patch: Partial<Tradesman>): Promise<Tradesman | undefined>;
   // jobs
@@ -196,6 +198,12 @@ export class DatabaseStorage implements IStorage {
   }
   async getTradesmanByEmail(email: string) {
     return one(db.select().from(tradesmen).where(eq(tradesmen.email, email)));
+  }
+  async getTradesmanByStripeCustomerId(customerId: string) {
+    return one(db.select().from(tradesmen).where(eq(tradesmen.stripeCustomerId, customerId)));
+  }
+  async getTradesmanByStripeSubscriptionId(subscriptionId: string) {
+    return one(db.select().from(tradesmen).where(eq(tradesmen.stripeSubscriptionId, subscriptionId)));
   }
   async createTradesman(t: InsertTradesman) {
     const [row] = await db.insert(tradesmen).values({ ...t, createdAt: now() }).returning();

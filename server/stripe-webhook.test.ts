@@ -15,6 +15,7 @@ vi.mock("./stripe", () => ({
   stripe: {
     webhooks: { constructEvent: vi.fn() },
     checkout: { sessions: { listLineItems: vi.fn() } },
+    subscriptions: { retrieve: vi.fn() },
   },
   STRIPE_WEBHOOK_SECRET: "whsec_test",
   productKindFromPriceId: (id: string | null) => {
@@ -34,6 +35,8 @@ vi.mock("./storage", () => ({
   storage: {
     createPaymentsLog: vi.fn().mockResolvedValue({ id: 1 }),
     getTradesmanById: vi.fn(),
+    getTradesmanByStripeCustomerId: vi.fn(),
+    getTradesmanByStripeSubscriptionId: vi.fn(),
     updateTradesman: vi.fn(),
     getCredits: vi.fn(),
     setCredits: vi.fn().mockResolvedValue({ balance: 0 }),
@@ -47,9 +50,12 @@ import { storage } from "./storage";
 
 const constructEvent = stripe.webhooks.constructEvent as unknown as ReturnType<typeof vi.fn>;
 const listLineItems = stripe.checkout.sessions.listLineItems as unknown as ReturnType<typeof vi.fn>;
+const retrieveSubscription = (stripe as unknown as { subscriptions: { retrieve: ReturnType<typeof vi.fn> } }).subscriptions.retrieve;
 const storageMock = storage as unknown as {
   createPaymentsLog: ReturnType<typeof vi.fn>;
   getTradesmanById: ReturnType<typeof vi.fn>;
+  getTradesmanByStripeCustomerId: ReturnType<typeof vi.fn>;
+  getTradesmanByStripeSubscriptionId: ReturnType<typeof vi.fn>;
   updateTradesman: ReturnType<typeof vi.fn>;
   getCredits: ReturnType<typeof vi.fn>;
   setCredits: ReturnType<typeof vi.fn>;
@@ -86,6 +92,7 @@ beforeEach(() => {
   storageMock.setCredits.mockResolvedValue({ balance: 0 });
   constructEvent.mockReset();
   listLineItems.mockReset();
+  retrieveSubscription.mockReset();
 });
 
 describe("handleStripeWebhook — request validation", () => {
@@ -258,7 +265,7 @@ describe("handleStripeWebhook — checkout.session.completed", () => {
     );
   });
 
-  it("does NOT process featured subscription via checkout.completed (PR-E3 territory)", async () => {
+  it("provisions featured subscription on checkout.completed (PR-E3b)", async () => {
     constructEvent.mockReturnValue({
       id: "evt_featured",
       type: "checkout.session.completed",
@@ -267,6 +274,7 @@ describe("handleStripeWebhook — checkout.session.completed", () => {
           id: "cs_featured",
           payment_status: "paid",
           customer: "cus_x",
+          subscription: "sub_new",
           metadata: { tradesman_id: "42" },
           amount_total: 2900,
           currency: "gbp",
@@ -276,6 +284,12 @@ describe("handleStripeWebhook — checkout.session.completed", () => {
       },
     });
     listLineItems.mockResolvedValue({ data: [{ price: { id: "price_featured" } }] });
+    retrieveSubscription.mockResolvedValue({
+      id: "sub_new",
+      status: "active",
+      current_period_end: 1_800_000_000,
+      metadata: { tradesman_id: "42" },
+    });
 
     const res = mockRes();
     await handleStripeWebhook(
@@ -283,9 +297,23 @@ describe("handleStripeWebhook — checkout.session.completed", () => {
       res,
     );
 
+    expect(res._status).toBe(200);
     expect(storageMock.setCredits).not.toHaveBeenCalled();
+    expect(storageMock.updateTradesman).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        subscriptionStatus: "active",
+        stripeCustomerId: "cus_x",
+        stripeSubscriptionId: "sub_new",
+        featuredUntil: 1_800_000_000_000,
+      }),
+    );
     expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
-      expect.objectContaining({ action: "flagged_for_review" }),
+      expect.objectContaining({
+        action: "featured_extended",
+        productKind: "featured_monthly",
+        tradesmanId: 42,
+      }),
     );
   });
 });
@@ -326,5 +354,233 @@ describe("handleStripeWebhook — dedupe", () => {
     );
     expect(res._status).toBe(200);
     expect(res._json).toEqual({ received: true, deduped: true });
+  });
+});
+
+describe("handleStripeWebhook — invoice.paid (PR-E3b renewals)", () => {
+  it("extends featuredUntil on a subscription renewal", async () => {
+    constructEvent.mockReturnValue({
+      id: "evt_inv_paid",
+      type: "invoice.paid",
+      data: {
+        object: {
+          id: "in_renew",
+          customer: "cus_x",
+          subscription: "sub_x",
+          amount_paid: 2900,
+          currency: "gbp",
+          charge: "ch_1",
+          lines: { data: [] },
+        },
+      },
+    });
+    retrieveSubscription.mockResolvedValue({
+      id: "sub_x",
+      status: "active",
+      current_period_end: 1_900_000_000,
+      metadata: { tradesman_id: "42" },
+    });
+
+    const res = mockRes();
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      res,
+    );
+
+    expect(res._status).toBe(200);
+    expect(storageMock.updateTradesman).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        subscriptionStatus: "active",
+        featuredUntil: 1_900_000_000_000,
+      }),
+    );
+    expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "featured_extended",
+        eventType: "invoice.paid",
+        tradesmanId: 42,
+      }),
+    );
+  });
+
+  it("falls back to customerId lookup when subscription metadata is missing", async () => {
+    constructEvent.mockReturnValue({
+      id: "evt_inv_fallback",
+      type: "invoice.paid",
+      data: {
+        object: {
+          id: "in_fb",
+          customer: "cus_orphan",
+          subscription: "sub_orphan",
+          amount_paid: 2900,
+          currency: "gbp",
+          lines: { data: [] },
+        },
+      },
+    });
+    retrieveSubscription.mockResolvedValue({
+      id: "sub_orphan",
+      status: "active",
+      current_period_end: 1_900_000_000,
+      metadata: {},
+    });
+    storageMock.getTradesmanByStripeSubscriptionId.mockResolvedValue(undefined);
+    storageMock.getTradesmanByStripeCustomerId.mockResolvedValue({ id: 77 });
+
+    const res = mockRes();
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      res,
+    );
+
+    expect(res._status).toBe(200);
+    expect(storageMock.updateTradesman).toHaveBeenCalledWith(
+      77,
+      expect.objectContaining({ subscriptionStatus: "active" }),
+    );
+  });
+
+  it("flags for review when no tradesman can be reconciled", async () => {
+    constructEvent.mockReturnValue({
+      id: "evt_inv_orphan",
+      type: "invoice.paid",
+      data: {
+        object: {
+          id: "in_o",
+          customer: "cus_zzz",
+          subscription: "sub_zzz",
+          amount_paid: 2900,
+          currency: "gbp",
+          lines: { data: [] },
+        },
+      },
+    });
+    retrieveSubscription.mockResolvedValue({
+      id: "sub_zzz",
+      status: "active",
+      current_period_end: 1_900_000_000,
+      metadata: {},
+    });
+    storageMock.getTradesmanByStripeSubscriptionId.mockResolvedValue(undefined);
+    storageMock.getTradesmanByStripeCustomerId.mockResolvedValue(undefined);
+
+    const res = mockRes();
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      res,
+    );
+
+    expect(res._status).toBe(200);
+    expect(storageMock.updateTradesman).not.toHaveBeenCalled();
+    expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "flagged_for_review", tradesmanId: null }),
+    );
+  });
+});
+
+describe("handleStripeWebhook — customer.subscription.updated", () => {
+  it("syncs status + featuredUntil on a normal update", async () => {
+    constructEvent.mockReturnValue({
+      id: "evt_sub_upd",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub_u",
+          customer: "cus_x",
+          status: "active",
+          currency: "gbp",
+          current_period_end: 2_000_000_000,
+          metadata: { tradesman_id: "42" },
+          items: { data: [] },
+        },
+      },
+    });
+
+    const res = mockRes();
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      res,
+    );
+
+    expect(res._status).toBe(200);
+    expect(storageMock.updateTradesman).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        subscriptionStatus: "active",
+        featuredUntil: 2_000_000_000_000,
+      }),
+    );
+    expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "featured_extended", tradesmanId: 42 }),
+    );
+  });
+
+  it("marks past_due as featured_degraded for dunning visibility", async () => {
+    constructEvent.mockReturnValue({
+      id: "evt_sub_pd",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub_pd",
+          customer: "cus_x",
+          status: "past_due",
+          currency: "gbp",
+          current_period_end: 2_000_000_000,
+          metadata: { tradesman_id: "42" },
+          items: { data: [] },
+        },
+      },
+    });
+
+    const res = mockRes();
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      res,
+    );
+
+    expect(storageMock.updateTradesman).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({ subscriptionStatus: "past_due" }),
+    );
+    expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "featured_degraded", tradesmanId: 42 }),
+    );
+  });
+});
+
+describe("handleStripeWebhook — customer.subscription.deleted", () => {
+  it("marks canceled and clears subscription id but preserves featuredUntil", async () => {
+    constructEvent.mockReturnValue({
+      id: "evt_sub_del",
+      type: "customer.subscription.deleted",
+      data: {
+        object: {
+          id: "sub_del",
+          customer: "cus_x",
+          status: "canceled",
+          currency: "gbp",
+          current_period_end: 2_000_000_000,
+          metadata: { tradesman_id: "42" },
+          items: { data: [] },
+        },
+      },
+    });
+
+    const res = mockRes();
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      res,
+    );
+
+    expect(res._status).toBe(200);
+    const [, patch] = storageMock.updateTradesman.mock.calls[0];
+    expect(patch).toEqual({ subscriptionStatus: "canceled", stripeSubscriptionId: null });
+    // featuredUntil must NOT be touched — Stripe sends `deleted` at period
+    // end for cancel-at-period-end, so we keep what the user paid for.
+    expect(patch).not.toHaveProperty("featuredUntil");
+    expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "featured_degraded", tradesmanId: 42 }),
+    );
   });
 });
