@@ -18,7 +18,7 @@ import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPart
 import type { Tradesman, TradesmanCard } from "@shared/schema";
 import { z } from "zod";
 import { publicFormGuard, rateLimit } from "./spam-guard";
-import { createLeadPackCheckoutSession } from "./stripe-checkout";
+import { createFeaturedCheckoutSession, createLeadPackCheckoutSession } from "./stripe-checkout";
 import { handleStripeWebhook } from "./stripe-webhook";
 import { stripeIsConfigured } from "./stripe";
 import {
@@ -574,6 +574,46 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // ── Featured Listing subscription Checkout (PR-E3a) ──
+  // Mirrors /api/checkout/lead-pack but opens a subscription-mode session for
+  // the Featured Listing product. Webhook handling for renewal / cancellation
+  // lands in PR-E3b — this endpoint just opens the Checkout URL.
+  app.post("/api/checkout/featured", async (req, res) => {
+    if (!stripeIsConfigured()) {
+      res.status(503).json({ message: "Payments are temporarily unavailable. Please try again shortly." });
+      return;
+    }
+    const schema = z.object({
+      tradesmanId: z.number().int().positive(),
+      priceId: z.string().min(1),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ message: "Invalid request", errors: parsed.error.errors });
+      return;
+    }
+    const { tradesmanId, priceId } = parsed.data;
+
+    const tradesman = await storage.getTradesmanById(tradesmanId);
+    if (!tradesman) {
+      res.status(404).json({ message: "Tradesman not found" });
+      return;
+    }
+    try {
+      const result = await createFeaturedCheckoutSession({
+        tradesmanId,
+        tradesmanEmail: tradesman.email,
+        stripeCustomerId: tradesman.stripeCustomerId ?? null,
+        priceId,
+      });
+      res.json({ url: result.url, sessionId: result.sessionId, productKind: result.productKind });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Checkout failed";
+      const isBadPrice = /not the Featured Listing/i.test(message);
+      res.status(isBadPrice ? 400 : 502).json({ message });
+    }
+  });
+
   // ── Stripe Checkout return bounce ──
   // Stripe's 303 redirect to a hash-routed URL (/#/dashboard?...) intermittently
   // drops the fragment in some browsers, landing the user on a 404. To work
@@ -582,11 +622,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/checkout/return", (req, res) => {
     const id = String(req.query.id ?? "").replace(/[^0-9]/g, "");
     const result = req.query.result === "cancel" ? "cancel" : "success";
+    // `kind` lets the dashboard show the right confirmation copy ("5 leads
+    // added" vs "Featured listing active"). Whitelist values to avoid
+    // reflecting arbitrary strings back into the SPA URL.
+    const kindRaw = String(req.query.kind ?? "");
+    const kind = kindRaw === "featured" ? "featured" : "";
     if (!id) {
       res.redirect(302, "/#/");
       return;
     }
-    res.redirect(302, `/#/dashboard?id=${id}&purchase=${result}`);
+    const kindParam = kind ? `&kind=${kind}` : "";
+    res.redirect(302, `/#/dashboard?id=${id}&purchase=${result}${kindParam}`);
   });
 
   // ── Stripe webhook (PR-E2) ──
