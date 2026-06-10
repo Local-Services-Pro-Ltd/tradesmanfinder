@@ -12,6 +12,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient, getQueryFn } from "@/lib/queryClient";
 import type { DashboardData, Tradesman } from "@/lib/api-types";
 import { timeAgo } from "@/lib/api-types";
+import { getFeaturedState, formatFeaturedDate, type FeaturedState } from "@shared/featured-state";
 import { Wallet, Inbox, Star, TrendingUp, CheckCircle2, Phone, Mail, Plus, LogIn, Zap, Gavel, AlertTriangle, Ban, Square, Info, LogOut, CreditCard } from "lucide-react";
 import { CardBadge } from "@/components/card-badge";
 
@@ -25,6 +26,12 @@ const PACKS = [
   { credits: 20, price: "£80", priceId: import.meta.env.VITE_STRIPE_PRICE_LEAD_PACK_20 as string | undefined },
 ];
 
+// Featured Listing monthly subscription price. Server validates that this
+// Stripe price ID resolves to the Featured product before opening Checkout
+// (PR-E3a), so a misconfigured env can't silently sell something else.
+const FEATURED_PRICE_ID = import.meta.env.VITE_STRIPE_PRICE_FEATURED_MONTHLY as string | undefined;
+const FEATURED_PRICE_LABEL = "£49/mo";
+
 // Identity is now session-driven: GET /api/auth/me returns the signed-in
 // tradesman (or 401 if not signed in). The `?id=` URL parameter is no longer
 // the source of truth — the session cookie is.
@@ -35,6 +42,7 @@ export default function Dashboard() {
   const [buying, setBuying] = useState<number | null>(null);
   const [signingOut, setSigningOut] = useState(false);
   const [openingPortal, setOpeningPortal] = useState(false);
+  const [subscribing, setSubscribing] = useState(false);
 
   // Identity probe. `on401: returnNull` so we can render the signed-out CTA
   // without throwing. retry:false so a real outage doesn't spin.
@@ -64,6 +72,37 @@ export default function Dashboard() {
       queryClient.clear();
       setSigningOut(false);
       navigate("/sign-in");
+    }
+  };
+
+  // Start the Featured Listing subscription. Reuses the PR-E3a endpoint;
+  // server validates the price ID maps to the Featured product before
+  // opening Checkout. Returns the user to /checkout/return?kind=featured.
+  const subscribeFeatured = async () => {
+    if (!tradesmanId) return;
+    if (!FEATURED_PRICE_ID) {
+      toast({
+        title: "Featured listing unavailable",
+        description: "Stripe is not configured for Featured subscriptions. Please contact support.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setSubscribing(true);
+    try {
+      const res = await apiRequest("POST", "/api/checkout/featured", { tradesmanId, priceId: FEATURED_PRICE_ID });
+      const body = await res.json();
+      if (!body?.url) throw new Error("No checkout URL returned");
+      window.location.href = body.url;
+      return; // page unloading
+    } catch {
+      toast({
+        title: "Couldn’t start Featured subscription",
+        description: "Please try again, or contact support if the issue persists.",
+        variant: "destructive",
+      });
+    } finally {
+      setSubscribing(false);
     }
   };
 
@@ -233,6 +272,24 @@ export default function Dashboard() {
             <p className="mt-2 font-display text-2xl font-bold text-foreground">{t.ratingCount}</p>
           </Card>
         </div>
+
+        {/* Featured listing card (PR-D2) — surface for the Featured monthly
+            subscription. State machine in getFeaturedState():
+              none      → upsell CTA
+              active    → "Featured until DATE" + portal link
+              past_due  → amber warning + portal link to update card
+              lapsing   → "Ends DATE, resubscribe" + checkout CTA */}
+        <FeaturedCard
+          state={getFeaturedState(t.featuredUntil, t.subscriptionStatus)}
+          featuredUntil={t.featuredUntil}
+          priceLabel={FEATURED_PRICE_LABEL}
+          subscribing={subscribing}
+          openingPortal={openingPortal}
+          stripeReady={Boolean(FEATURED_PRICE_ID)}
+          hasCustomer={Boolean(t.stripeCustomerId)}
+          onSubscribe={subscribeFeatured}
+          onManage={openBillingPortal}
+        />
 
         {/* Conduct banner */}
         {data.cardSummary?.publicBadge && (
@@ -451,6 +508,104 @@ export default function Dashboard() {
         <PartnerPlacement surface="dashboard_sidebar" className="mt-6" />
       </div>
     </Layout>
+  );
+}
+
+// Featured listing surface. Pure-display component — every state derives from
+// the `state` prop (computed by getFeaturedState). Kept here rather than a
+// dedicated file because the parent owns subscribe / portal handlers and we
+// want a single place to grep when iterating on copy.
+function FeaturedCard({
+  state,
+  featuredUntil,
+  priceLabel,
+  subscribing,
+  openingPortal,
+  stripeReady,
+  hasCustomer,
+  onSubscribe,
+  onManage,
+}: {
+  state: FeaturedState;
+  featuredUntil: number | null;
+  priceLabel: string;
+  subscribing: boolean;
+  openingPortal: boolean;
+  stripeReady: boolean;
+  hasCustomer: boolean;
+  onSubscribe: () => void;
+  onManage: () => void;
+}) {
+  const dateLabel = featuredUntil ? formatFeaturedDate(featuredUntil) : null;
+  // Tone styling per state. We don't use the destructive variant for past_due
+  // because it's a recoverable, customer-action-required state — amber
+  // matches the conduct banner's "warning" tone for consistency.
+  const toneClass =
+    state === "active"
+      ? "border-emerald-300 bg-emerald-50"
+      : state === "past_due"
+      ? "border-amber-300 bg-amber-50"
+      : state === "lapsing"
+      ? "border-border bg-card"
+      : "border-primary/30 bg-primary/5";
+
+  const heading =
+    state === "active"
+      ? "Featured listing active"
+      : state === "past_due"
+      ? "Featured listing — payment failed"
+      : state === "lapsing"
+      ? "Featured listing ending soon"
+      : "Boost your visibility with Featured";
+
+  const body =
+    state === "active"
+      ? `Featured until ${dateLabel}. Renews automatically.`
+      : state === "past_due"
+      ? `Your card was declined. Update your payment method to keep Featured status${dateLabel ? ` past ${dateLabel}` : ""}.`
+      : state === "lapsing"
+      ? `Featured ends ${dateLabel}. Resubscribe to keep your profile at the top of search.`
+      : "Pin your profile to the top of search results for your trade and area. Cancel anytime.";
+
+  return (
+    <Card className={"mt-6 flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between " + toneClass} data-testid={`card-featured-${state}`}>
+      <div className="flex items-start gap-3">
+        <Zap className={"mt-0.5 h-5 w-5 " + (state === "active" ? "text-emerald-600" : state === "past_due" ? "text-amber-600" : "text-primary")} />
+        <div className="min-w-0">
+          <p className="font-display text-base font-semibold text-foreground" data-testid="text-featured-heading">{heading}</p>
+          <p className="mt-1 text-sm text-foreground/80" data-testid="text-featured-body">{body}</p>
+        </div>
+      </div>
+      <div className="flex shrink-0 flex-wrap gap-2">
+        {/* CTA matrix:
+              none     → Subscribe (£49/mo)
+              active   → Manage billing (cancel/upgrade card)
+              past_due → Update payment (→ portal)
+              lapsing  → Renew Featured (new checkout) */}
+        {state === "none" && (
+          <Button onClick={onSubscribe} disabled={subscribing || !stripeReady} data-testid="button-featured-subscribe">
+            <Zap className="mr-1.5 h-4 w-4" />
+            {subscribing ? "Opening checkout…" : `Make my profile Featured · ${priceLabel}`}
+          </Button>
+        )}
+        {state === "active" && (
+          <Button variant="outline" onClick={onManage} disabled={openingPortal || !hasCustomer} data-testid="button-featured-manage">
+            {openingPortal ? "Opening…" : "Manage billing"}
+          </Button>
+        )}
+        {state === "past_due" && (
+          <Button onClick={onManage} disabled={openingPortal || !hasCustomer} data-testid="button-featured-update-payment">
+            {openingPortal ? "Opening…" : "Update payment method"}
+          </Button>
+        )}
+        {state === "lapsing" && (
+          <Button onClick={onSubscribe} disabled={subscribing || !stripeReady} data-testid="button-featured-renew">
+            <Zap className="mr-1.5 h-4 w-4" />
+            {subscribing ? "Opening checkout…" : "Renew Featured"}
+          </Button>
+        )}
+      </div>
+    </Card>
   );
 }
 

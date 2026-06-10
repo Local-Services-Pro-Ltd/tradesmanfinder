@@ -30,6 +30,7 @@ The canonical list of every env var the app reads, where it's stored, who can ro
 | `STRIPE_PRICE_LEAD_PACK_STARTER` / `_STANDARD` / `_PRO` | required for #18 | Checkout session line items | Buy-credit flow fails with "price not found" | Steve |
 | `STRIPE_PRICE_FEATURED_MONTHLY` | required for #18 | featured-listing subscription | Featured upsell fails to start subscription | Steve |
 | `VITE_STRIPE_PRICE_LEAD_PACK_*` | required for #18 (client) | Vite inlines into client bundle | Buy-credit UI can't open the right Checkout session | Steve |
+| `VITE_STRIPE_PRICE_FEATURED_MONTHLY` | required for #18 (client) | Vite inlines into client bundle for dashboard Featured CTA | Featured upsell button is disabled | Steve |
 | `PARTNER_IMPRESSION_SAMPLE_RATE` | optional | `placement-engine.ts` | Defaults to 10 (sample 1-in-10) | Steve |
 | `PARTNER_OUTCOME_SECRET` | required when partner emails go out | `outcome-tokens.ts` HMAC | Outcome links 401; cannot capture outcomes | Steve |
 | `PARTNER_PLACEMENTS_ENABLED` | optional kill-switch | `placements-api.ts` | Set to `false` to disable all partner surfaces in seconds | Steve |
