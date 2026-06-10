@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Stripe webhook handler (PR-E2: lead packs).
+// Stripe webhook handler (PR-E2: lead packs; PR-E3b: featured subscriptions).
 //
 // Stripe POSTs events here. We:
 //   1) Verify the signature using STRIPE_WEBHOOK_SECRET (rejecting forged
@@ -14,8 +14,23 @@
 //   4) For unknown event types: write a payments_log row with action='noop'
 //      so we have a trail for future debugging.
 //
-// Featured Listing subscription events (invoice.paid, customer.subscription.*,
-// invoice.payment_failed) and refund events land in PR-E3 / PR-E4.
+// PR-E3b adds:
+//   - checkout.session.completed for `featured_monthly`: persist
+//     stripeCustomerId/stripeSubscriptionId/subscriptionStatus/featuredUntil.
+//   - invoice.paid (renewals): bump featuredUntil to current_period_end.
+//   - customer.subscription.updated: sync subscriptionStatus + featuredUntil;
+//     past_due → action='featured_degraded' for dunning visibility.
+//   - customer.subscription.deleted: mark canceled, clear stripeSubscriptionId,
+//     but leave featuredUntil intact so the tradesperson keeps featured for
+//     the remainder of the period they already paid for.
+//
+// Reconciliation order for subscription events:
+//   subscription.metadata.tradesman_id → session.metadata.tradesman_id
+//   → storage.getTradesmanByStripeSubscriptionId
+//   → storage.getTradesmanByStripeCustomerId
+//   → flagged_for_review.
+//
+// charge.refunded → PR-E3d. past_due degradation timer → PR-E3e.
 // ─────────────────────────────────────────────────────────────────────────────
 import type { Request, Response } from "express";
 import type Stripe from "stripe";
@@ -101,6 +116,15 @@ async function processStripeEvent(event: Stripe.Event): Promise<void> {
     case "checkout.session.completed":
       await handleCheckoutCompleted(event);
       return;
+    case "invoice.paid":
+      await handleInvoicePaid(event);
+      return;
+    case "customer.subscription.updated":
+      await handleSubscriptionUpdated(event);
+      return;
+    case "customer.subscription.deleted":
+      await handleSubscriptionDeleted(event);
+      return;
     default:
       // Log unknown types so we know what to support next without hunting
       // through Stripe's dashboard event feed.
@@ -166,15 +190,20 @@ async function handleCheckoutCompleted(event: Stripe.Event): Promise<void> {
     return;
   }
 
+  if (productKind === "featured_monthly") {
+    // Featured Listing subscription bought via Checkout — provision the row.
+    await handleFeaturedCheckoutCompleted(event, session, tradesmanId, baseLog);
+    return;
+  }
+
   if (!productKind || !productKind.startsWith("lead_pack_")) {
-    // Not a lead pack — could be featured subscription (handled later) or an
-    // unmapped price id. Either way, log and skip credit grant.
+    // Unmapped price id — probably a dashboard price not wired into env vars.
     await storage.createPaymentsLog({
       ...baseLog,
       tradesmanId,
       action: "flagged_for_review",
       creditsDelta: 0,
-      notes: `Price ${priceId ?? "(none)"} did not resolve to a lead pack`,
+      notes: `Price ${priceId ?? "(none)"} did not resolve to a known product`,
     });
     return;
   }
@@ -220,5 +249,296 @@ async function handleCheckoutCompleted(event: Stripe.Event): Promise<void> {
     action: "credits_granted",
     creditsDelta: creditsToGrant,
     notes: null,
+  });
+}
+
+// ── Featured Listing subscription handlers (PR-E3b) ─────────────────────────
+
+/**
+ * Subscription.current_period_end is unix-seconds in older API versions and
+ * has moved to items[].current_period_end on newer ones. We check both for
+ * forward-compat and return unix-ms (matching the rest of the schema, which
+ * uses Date.now()-style timestamps).
+ */
+function periodEndMs(sub: Stripe.Subscription): number | null {
+  const sec =
+    (sub as unknown as { current_period_end?: number }).current_period_end ??
+    (sub.items?.data?.[0] as unknown as { current_period_end?: number } | undefined)?.current_period_end ??
+    null;
+  return typeof sec === "number" ? sec * 1000 : null;
+}
+
+/**
+ * Try every reasonable hook to attribute a subscription event back to a
+ * tradesman. Order: subscription.metadata.tradesman_id, then DB lookup by
+ * subscription id, then by customer id. Returns the resolved subscription
+ * object too so callers don't double-fetch.
+ */
+async function resolveTradesmanForSubscription(
+  subscription: Stripe.Subscription | string | null | undefined,
+  customerId: string | null,
+): Promise<{
+  tradesmanId: number | null;
+  subscription: Stripe.Subscription | null;
+  notes: string | null;
+}> {
+  let sub: Stripe.Subscription | null = null;
+  if (typeof subscription === "string") {
+    try {
+      sub = await stripe.subscriptions.retrieve(subscription);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { tradesmanId: null, subscription: null, notes: `subscription retrieve failed: ${msg}` };
+    }
+  } else if (subscription && typeof subscription === "object") {
+    sub = subscription;
+  }
+
+  const metaId = sub?.metadata?.tradesman_id;
+  const parsed = metaId ? Number(metaId) : NaN;
+  if (Number.isFinite(parsed)) {
+    return { tradesmanId: parsed, subscription: sub, notes: null };
+  }
+
+  if (sub?.id) {
+    const byId = await storage.getTradesmanByStripeSubscriptionId(sub.id);
+    if (byId) return { tradesmanId: byId.id, subscription: sub, notes: null };
+  }
+
+  if (customerId) {
+    const byCust = await storage.getTradesmanByStripeCustomerId(customerId);
+    if (byCust) return { tradesmanId: byCust.id, subscription: sub, notes: null };
+  }
+
+  return {
+    tradesmanId: null,
+    subscription: sub,
+    notes: "could not reconcile subscription to tradesman",
+  };
+}
+
+async function handleFeaturedCheckoutCompleted(
+  event: Stripe.Event,
+  session: Stripe.Checkout.Session,
+  tradesmanId: number,
+  baseLog: Record<string, unknown>,
+): Promise<void> {
+  if (session.payment_status !== "paid") {
+    await storage.createPaymentsLog({
+      ...(baseLog as object),
+      tradesmanId,
+      action: "noop",
+      creditsDelta: 0,
+      notes: `featured checkout payment_status=${session.payment_status} — waiting for invoice.paid`,
+    } as Parameters<typeof storage.createPaymentsLog>[0]);
+    return;
+  }
+
+  const customerId = typeof session.customer === "string" ? session.customer : null;
+  const { subscription: sub } = await resolveTradesmanForSubscription(
+    session.subscription,
+    customerId,
+  );
+
+  const subId =
+    sub?.id ?? (typeof session.subscription === "string" ? session.subscription : null);
+  const featuredUntil = sub ? periodEndMs(sub) : null;
+  const status = sub?.status ?? "active";
+
+  const patch: Record<string, unknown> = { subscriptionStatus: status };
+  if (customerId) patch.stripeCustomerId = customerId;
+  if (subId) patch.stripeSubscriptionId = subId;
+  if (featuredUntil) patch.featuredUntil = featuredUntil;
+  await storage.updateTradesman(
+    tradesmanId,
+    patch as Parameters<typeof storage.updateTradesman>[1],
+  );
+
+  await storage.createPaymentsLog({
+    ...(baseLog as object),
+    tradesmanId,
+    stripeSubscriptionId: subId,
+    action: "featured_extended",
+    creditsDelta: 0,
+    notes: `Featured subscription started; status=${status}; featuredUntil=${featuredUntil ?? "unset"}`,
+  } as Parameters<typeof storage.createPaymentsLog>[0]);
+}
+
+async function handleInvoicePaid(event: Stripe.Event): Promise<void> {
+  const invoice = event.data.object as Stripe.Invoice;
+  const customerId = typeof invoice.customer === "string" ? invoice.customer : null;
+  // `invoice.subscription` exists on older api versions; on newer ones it
+  // moved to invoice.lines[].subscription. Check both.
+  const invoiceSubscription =
+    (invoice as unknown as { subscription?: string | Stripe.Subscription | null }).subscription ??
+    invoice.lines?.data?.[0]?.subscription ??
+    null;
+
+  const baseLog = {
+    eventId: event.id,
+    eventType: event.type,
+    amountPence: invoice.amount_paid ?? null,
+    currency: invoice.currency ?? null,
+    stripeCustomerId: customerId,
+    stripeSubscriptionId:
+      typeof invoiceSubscription === "string"
+        ? invoiceSubscription
+        : invoiceSubscription?.id ?? null,
+    stripeCheckoutSessionId: null,
+    stripePaymentIntentId: null,
+    stripeInvoiceId: invoice.id ?? null,
+    stripeChargeId:
+      typeof (invoice as unknown as { charge?: string }).charge === "string"
+        ? ((invoice as unknown as { charge?: string }).charge as string)
+        : null,
+    productKind: "featured_monthly" as const,
+    rawPayload: JSON.stringify(event).slice(0, 50_000),
+  };
+
+  if (!invoiceSubscription) {
+    // Non-subscription invoice (e.g. one-off from dashboard). Out of scope.
+    await storage.createPaymentsLog({
+      ...baseLog,
+      tradesmanId: null,
+      productKind: null,
+      action: "noop",
+      creditsDelta: 0,
+      notes: "invoice.paid without subscription — out of scope",
+    });
+    return;
+  }
+
+  const { tradesmanId, subscription: sub, notes } = await resolveTradesmanForSubscription(
+    invoiceSubscription,
+    customerId,
+  );
+
+  if (!tradesmanId) {
+    await storage.createPaymentsLog({
+      ...baseLog,
+      tradesmanId: null,
+      action: "flagged_for_review",
+      creditsDelta: 0,
+      notes: notes ?? "could not reconcile invoice.paid",
+    });
+    return;
+  }
+
+  const featuredUntil = sub ? periodEndMs(sub) : null;
+  const status = sub?.status ?? "active";
+  const patch: Record<string, unknown> = { subscriptionStatus: status };
+  if (featuredUntil) patch.featuredUntil = featuredUntil;
+  if (sub?.id) patch.stripeSubscriptionId = sub.id;
+  if (customerId) patch.stripeCustomerId = customerId;
+  await storage.updateTradesman(
+    tradesmanId,
+    patch as Parameters<typeof storage.updateTradesman>[1],
+  );
+
+  await storage.createPaymentsLog({
+    ...baseLog,
+    tradesmanId,
+    action: "featured_extended",
+    creditsDelta: 0,
+    notes: `Renewal; status=${status}; featuredUntil=${featuredUntil ?? "unchanged"}`,
+  });
+}
+
+async function handleSubscriptionUpdated(event: Stripe.Event): Promise<void> {
+  const sub = event.data.object as Stripe.Subscription;
+  const customerId = typeof sub.customer === "string" ? sub.customer : null;
+  const { tradesmanId, notes } = await resolveTradesmanForSubscription(sub, customerId);
+
+  const baseLog = {
+    eventId: event.id,
+    eventType: event.type,
+    amountPence: null,
+    currency: sub.currency ?? null,
+    stripeCustomerId: customerId,
+    stripeSubscriptionId: sub.id,
+    stripeCheckoutSessionId: null,
+    stripePaymentIntentId: null,
+    stripeInvoiceId: null,
+    stripeChargeId: null,
+    productKind: "featured_monthly" as const,
+    rawPayload: JSON.stringify(event).slice(0, 50_000),
+  };
+
+  if (!tradesmanId) {
+    await storage.createPaymentsLog({
+      ...baseLog,
+      tradesmanId: null,
+      action: "flagged_for_review",
+      creditsDelta: 0,
+      notes: notes ?? "could not reconcile subscription.updated",
+    });
+    return;
+  }
+
+  const featuredUntil = periodEndMs(sub);
+  const patch: Record<string, unknown> = { subscriptionStatus: sub.status };
+  if (featuredUntil) patch.featuredUntil = featuredUntil;
+  await storage.updateTradesman(
+    tradesmanId,
+    patch as Parameters<typeof storage.updateTradesman>[1],
+  );
+
+  // past_due is the dunning trigger — surface in action name so admin filters
+  // on payments_log.action catch the transition immediately.
+  const action = sub.status === "past_due" ? "featured_degraded" : "featured_extended";
+  await storage.createPaymentsLog({
+    ...baseLog,
+    tradesmanId,
+    action,
+    creditsDelta: 0,
+    notes: `subscription.updated → status=${sub.status}; featuredUntil=${featuredUntil ?? "unchanged"}`,
+  });
+}
+
+async function handleSubscriptionDeleted(event: Stripe.Event): Promise<void> {
+  const sub = event.data.object as Stripe.Subscription;
+  const customerId = typeof sub.customer === "string" ? sub.customer : null;
+  const { tradesmanId, notes } = await resolveTradesmanForSubscription(sub, customerId);
+
+  const baseLog = {
+    eventId: event.id,
+    eventType: event.type,
+    amountPence: null,
+    currency: sub.currency ?? null,
+    stripeCustomerId: customerId,
+    stripeSubscriptionId: sub.id,
+    stripeCheckoutSessionId: null,
+    stripePaymentIntentId: null,
+    stripeInvoiceId: null,
+    stripeChargeId: null,
+    productKind: "featured_monthly" as const,
+    rawPayload: JSON.stringify(event).slice(0, 50_000),
+  };
+
+  if (!tradesmanId) {
+    await storage.createPaymentsLog({
+      ...baseLog,
+      tradesmanId: null,
+      action: "flagged_for_review",
+      creditsDelta: 0,
+      notes: notes ?? "could not reconcile subscription.deleted",
+    });
+    return;
+  }
+
+  // Deliberately leave featuredUntil intact — Stripe fires `deleted` at
+  // period end for cancel-at-period-end. Clearing it here would cut the
+  // tradesperson off prematurely on every cancel.
+  await storage.updateTradesman(tradesmanId, {
+    subscriptionStatus: "canceled",
+    stripeSubscriptionId: null,
+  } as Parameters<typeof storage.updateTradesman>[1]);
+
+  await storage.createPaymentsLog({
+    ...baseLog,
+    tradesmanId,
+    action: "featured_degraded",
+    creditsDelta: 0,
+    notes: "subscription.deleted — marked canceled, featuredUntil left intact through paid period",
   });
 }
