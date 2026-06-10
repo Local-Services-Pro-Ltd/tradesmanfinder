@@ -78,6 +78,12 @@ export interface Tradesman {
   ratingCount: number;
   responseTimeMinutes: number;
   createdAt: number;
+  // Stripe / Featured Listing (PR-E3 series). May be null when the
+  // tradesperson has never opened a Checkout session.
+  stripeCustomerId: string | null;
+  stripeSubscriptionId: string | null;
+  subscriptionStatus: string | null; // 'active' | 'past_due' | 'canceled' | etc.
+  featuredUntil: number | null;       // unix ms; >0 while Featured is paid through
   // Attached by the server when card data is loaded:
   cardSummary?: CardSummary;
   cards?: TradesmanCard[];

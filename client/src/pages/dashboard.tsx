@@ -12,7 +12,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient, getQueryFn } from "@/lib/queryClient";
 import type { DashboardData, Tradesman } from "@/lib/api-types";
 import { timeAgo } from "@/lib/api-types";
-import { Wallet, Inbox, Star, TrendingUp, CheckCircle2, Phone, Mail, Plus, LogIn, Zap, Gavel, AlertTriangle, Ban, Square, Info, LogOut } from "lucide-react";
+import { Wallet, Inbox, Star, TrendingUp, CheckCircle2, Phone, Mail, Plus, LogIn, Zap, Gavel, AlertTriangle, Ban, Square, Info, LogOut, CreditCard } from "lucide-react";
 import { CardBadge } from "@/components/card-badge";
 
 // Lead pack catalogue. The `priceEnvKey` matches a STRIPE_PRICE_LEAD_PACK_*
@@ -34,6 +34,7 @@ export default function Dashboard() {
   const [, navigate] = useLocation();
   const [buying, setBuying] = useState<number | null>(null);
   const [signingOut, setSigningOut] = useState(false);
+  const [openingPortal, setOpeningPortal] = useState(false);
 
   // Identity probe. `on401: returnNull` so we can render the signed-out CTA
   // without throwing. retry:false so a real outage doesn't spin.
@@ -63,6 +64,30 @@ export default function Dashboard() {
       queryClient.clear();
       setSigningOut(false);
       navigate("/sign-in");
+    }
+  };
+
+  // Open Stripe's hosted Customer Billing Portal. The endpoint returns a
+  // short-lived URL we redirect the browser to; the portal handles all
+  // payment-method, invoice, and cancellation flows for us. Returns the user
+  // back to /checkout/return?kind=portal when they're done.
+  const openBillingPortal = async () => {
+    if (!tradesmanId) return;
+    setOpeningPortal(true);
+    try {
+      const res = await apiRequest("POST", "/api/billing/portal", { tradesmanId });
+      const body = await res.json();
+      if (!body?.url) throw new Error("No portal URL returned");
+      window.location.href = body.url;
+      return; // page unloading
+    } catch {
+      toast({
+        title: "Couldn’t open billing portal",
+        description: "Please try again, or contact support if the issue persists.",
+        variant: "destructive",
+      });
+    } finally {
+      setOpeningPortal(false);
     }
   };
 
@@ -158,6 +183,22 @@ export default function Dashboard() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Link href={`/tradesman/${t.slug}`}><Button variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" data-testid="button-view-public">View public profile</Button></Link>
+            {/* Manage billing — only rendered for tradespeople who have a
+                Stripe customer record (i.e. they’ve completed at least one
+                Checkout). The endpoint returns 409 if customer is missing,
+                so we gate at the UI to avoid a confusing error toast. */}
+            {t.stripeCustomerId && (
+              <Button
+                variant="outline"
+                className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white"
+                disabled={openingPortal}
+                onClick={openBillingPortal}
+                data-testid="button-manage-billing"
+              >
+                <CreditCard className="mr-1.5 h-4 w-4" />
+                {openingPortal ? "Opening…" : "Manage billing"}
+              </Button>
+            )}
             <Button
               variant="outline"
               className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white"
