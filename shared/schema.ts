@@ -60,11 +60,18 @@ export const tradesmen = pgTable("tradesmen", {
   ratingCount: integer("rating_count").notNull().default(0),
   responseTimeMinutes: integer("response_time_minutes").notNull().default(120),
   createdAt: bigint("created_at", { mode: "number" }).notNull().default(0),
-  /* ── Stripe linkage (PR-E1) ──
+  /* ── Stripe linkage (PR-E1, updated PR-D3b) ──
      stripeCustomerId is created lazily the first time a tradesperson opens
      checkout, and reused across all subsequent payments + subscriptions.
-     subscriptionStatus mirrors Stripe's subscription.status enum verbatim:
+     subscriptionStatus is mostly Stripe's subscription.status enum, with
+     one product-level remapping for cancel-at-period-end:
        'active' | 'trialing' | 'past_due' | 'unpaid' | 'canceled' | 'incomplete' | 'incomplete_expired' | 'paused' | null
+     PR-D3b: when Stripe reports status=active|trialing AND
+     cancel_at_period_end=true (portal-initiated cancel), we store 'canceled'
+     so shared/featured-state.ts's `lapsing` branch fires immediately rather
+     than waiting up to a month for subscription.deleted. featuredUntil is
+     still set from the period end so Featured placement persists through
+     the paid window. See server/stripe-webhook.ts:resolveSubscriptionStatus.
      featuredUntil is the timestamp the Featured Listing is paid through.
      The legacy `featured` boolean above is retained for back-compat with
      existing query paths; new code should derive featured-ness from
