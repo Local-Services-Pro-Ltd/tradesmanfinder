@@ -1,0 +1,5 @@
+# Source TSX for the /api/og function. We compile it to api/og.js in
+# script/build.ts (esbuild, @vercel/og external) and Vercel deploys
+# the .js file. Including the .tsx would make Vercel auto-build a
+# second, duplicate (and broken) function entry.
+api/og.tsx
