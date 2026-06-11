@@ -17,6 +17,7 @@
     { "source": "/p/o/(.*)", "destination": "/api/index.js" },
     { "source": "/sitemap.xml", "destination": "/api/index.js" },
     { "source": "/robots.txt", "destination": "/api/index.js" },
+    { "source": "/:slug([^/]+-in-[^/]+)", "destination": "/api/index.js" },
     { "source": "/((?!api/|p/c/|p/o/|assets/|.*\\.[a-zA-Z0-9]+$).*)", "destination": "/index.html" }
   ],
   "crons": [
