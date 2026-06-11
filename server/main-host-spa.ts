@@ -42,19 +42,61 @@ import {
   buildMainHostSeo,
   type MainHostSeoPayload,
 } from "../shared/main-host-seo";
+import { BUNDLED_INDEX_HTML } from "./generated/index-html";
 
 let cachedIndexHtml: string | null = null;
 let cachedIndexPath: string | null = null;
 
+/**
+ * Resolve the index.html string to inject into.
+ *
+ * Resolution order:
+ *   1. BUNDLED_INDEX_HTML — baked in at build time from
+ *      dist/public/index.html (see script/build.ts). This is the only
+ *      thing that works in the Vercel serverless function, where the
+ *      static dist/ tree is NOT shipped with the function bundle.
+ *   2. Local filesystem (dist/public/index.html or sibling public/) —
+ *      used by the dev Express server (server/index.ts) and by any
+ *      standalone Node deployment where the build artefact is co-located
+ *      with the bundle.
+ *
+ * We prefer the bundled string when it looks like a real build (a
+ * file >=512 bytes containing the React Vite asset marker). The
+ * checked-in placeholder is a few hundred bytes, so the heuristic
+ * keeps tests honest — if the build step hasn't replaced the
+ * placeholder, we fall through to a filesystem read.
+ */
+function looksLikeRealBuild(html: string): boolean {
+  return html.length >= 512 && /\/assets\/index-/.test(html);
+}
+
 function loadIndexHtml(): string | null {
-  // Mirror microsite-spa.ts: production build sits at dist/public/index.html.
-  // In dev, Vite middleware owns the HTML response, so this code path is
-  // bypassed by the NODE_ENV check at the call site in server/index.ts.
-  const distPath = path.resolve(__dirname, "public", "index.html");
-  if (cachedIndexHtml && cachedIndexPath === distPath) return cachedIndexHtml;
-  if (!fs.existsSync(distPath)) return null;
-  cachedIndexHtml = fs.readFileSync(distPath, "utf8");
-  cachedIndexPath = distPath;
+  if (cachedIndexHtml) return cachedIndexHtml;
+
+  if (BUNDLED_INDEX_HTML && looksLikeRealBuild(BUNDLED_INDEX_HTML)) {
+    cachedIndexHtml = BUNDLED_INDEX_HTML;
+    cachedIndexPath = "<bundled>";
+    return cachedIndexHtml;
+  }
+
+  // Filesystem fallback for local dev / standalone Node deployments.
+  // Try the path layout used by the standalone server bundle first.
+  const candidates = [
+    path.resolve(__dirname, "public", "index.html"),
+    path.resolve(process.cwd(), "dist", "public", "index.html"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      cachedIndexHtml = fs.readFileSync(p, "utf8");
+      cachedIndexPath = p;
+      return cachedIndexHtml;
+    }
+  }
+
+  // Last resort: the placeholder. Better to inject into a stub than
+  // 404 the request — the client renderer will replace it anyway.
+  cachedIndexHtml = BUNDLED_INDEX_HTML;
+  cachedIndexPath = "<placeholder>";
   return cachedIndexHtml;
 }
 
@@ -222,7 +264,7 @@ export function registerMainHostSpa(app: Express): void {
     if (!parsed.catSlug || !parsed.areaSlug) return next();
 
     const html = loadIndexHtml();
-    if (!html) return next(); // dev or missing build — Vite handles it
+    if (!html) return next(); // unexpected — no HTML to inject into
 
     // Resolve the DB rows. If either is missing the URL isn't a real
     // landing page, so we let it fall through to serveStatic — the

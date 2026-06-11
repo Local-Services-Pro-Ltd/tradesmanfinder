@@ -20,19 +20,52 @@ import path from 'node:path';
 import type { Express, Request, Response, NextFunction } from 'express';
 import { storage } from './storage';
 import { buildMicrositeSeo, injectMicrositeSeo } from './microsite-seo';
+import { BUNDLED_INDEX_HTML } from './generated/index-html';
 
 let cachedIndexHtml: string | null = null;
 let cachedIndexPath: string | null = null;
 
+/**
+ * Resolve the index.html string to inject into.
+ *
+ * Mirrors the resolution strategy in server/main-host-spa.ts:
+ * prefer the build-time bundled HTML (the only thing that works in
+ * the Vercel serverless function, where dist/public is not shipped
+ * with the function bundle); fall back to filesystem reads for local
+ * dev and standalone Node deployments.
+ *
+ * Until script/build.ts inlines the real HTML, BUNDLED_INDEX_HTML is
+ * the committed placeholder — we detect that case via a size +
+ * asset-marker heuristic and prefer a filesystem read so dev still
+ * serves the real client bundle.
+ */
+function looksLikeRealBuild(html: string): boolean {
+  return html.length >= 512 && /\/assets\/index-/.test(html);
+}
+
 function loadIndexHtml(): string | null {
-  // In production the build is at dist/public/index.html; that's what
-  // serveStatic uses. In dev, Vite middleware serves it dynamically, so
-  // this code path is bypassed (see the NODE_ENV check at the call site).
-  const distPath = path.resolve(__dirname, 'public', 'index.html');
-  if (cachedIndexHtml && cachedIndexPath === distPath) return cachedIndexHtml;
-  if (!fs.existsSync(distPath)) return null;
-  cachedIndexHtml = fs.readFileSync(distPath, 'utf8');
-  cachedIndexPath = distPath;
+  if (cachedIndexHtml) return cachedIndexHtml;
+
+  if (BUNDLED_INDEX_HTML && looksLikeRealBuild(BUNDLED_INDEX_HTML)) {
+    cachedIndexHtml = BUNDLED_INDEX_HTML;
+    cachedIndexPath = '<bundled>';
+    return cachedIndexHtml;
+  }
+
+  const candidates = [
+    path.resolve(__dirname, 'public', 'index.html'),
+    path.resolve(process.cwd(), 'dist', 'public', 'index.html'),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      cachedIndexHtml = fs.readFileSync(p, 'utf8');
+      cachedIndexPath = p;
+      return cachedIndexHtml;
+    }
+  }
+
+  cachedIndexHtml = BUNDLED_INDEX_HTML;
+  cachedIndexPath = '<placeholder>';
   return cachedIndexHtml;
 }
 
