@@ -344,33 +344,98 @@ function tradeFor(slug: string): TradePhrases {
 }
 
 /**
- * Region phrasing. Region values in the DB are mixed-case full names
- * ("England", "Scotland", "Wales", "Northern Ireland"); we lowercase
- * before the lookup so casing drift never causes a silent fallback.
+ * Region phrasing. The DB's `areas.region` column stores county-level
+ * strings (e.g. "Greater Manchester M1", "West Midlands B1", "City of
+ * Edinburgh EH1"), so a literal lookup for "england" / "scotland" /
+ * etc. always misses. We resolve UK nation in TWO steps:
+ *
+ *   1. Try the area slug — covers the 20 production city slugs cleanly
+ *      and is the strongest signal (slug never drifts).
+ *   2. Fall back to a substring match against the region string —
+ *      catches anything new that happens to mention the nation by name.
+ *   3. Default to "the UK" — never blocks page render.
  */
-const REGION_PHRASES: Record<string, { area: string; coverage: string }> = {
-  england: {
-    area: "England",
-    coverage: "across England",
-  },
-  scotland: {
-    area: "Scotland",
-    coverage: "across Scotland",
-  },
-  wales: {
-    area: "Wales",
-    coverage: "across Wales",
-  },
-  "northern ireland": {
+const REGION_PHRASES = {
+  england: { area: "England", coverage: "across England" },
+  scotland: { area: "Scotland", coverage: "across Scotland" },
+  wales: { area: "Wales", coverage: "across Wales" },
+  "northern-ireland": {
     area: "Northern Ireland",
     coverage: "across Northern Ireland",
   },
+} as const;
+
+type Nation = keyof typeof REGION_PHRASES;
+
+/**
+ * Map known production area slugs to their UK nation. Keeps the data
+ * close to the trade-phrases dictionary above — easy to extend when we
+ * add new cities. Boroughs of London (plumstead, woolwich, abbey-wood,
+ * bexleyheath, catford) are England.
+ */
+const AREA_SLUG_TO_NATION: Record<string, Nation> = {
+  // England — major metros
+  london: "england",
+  manchester: "england",
+  birmingham: "england",
+  leeds: "england",
+  liverpool: "england",
+  sheffield: "england",
+  bristol: "england",
+  "newcastle-upon-tyne": "england",
+  nottingham: "england",
+  leicester: "england",
+  coventry: "england",
+  brighton: "england",
+  plymouth: "england",
+  reading: "england",
+  southampton: "england",
+  // England — London boroughs / SE London
+  plumstead: "england",
+  woolwich: "england",
+  "abbey-wood": "england",
+  bexleyheath: "england",
+  catford: "england",
+  greenwich: "england",
+  // England — northern market towns (sampled set)
+  burnley: "england",
+  accrington: "england",
+  // Scotland
+  glasgow: "scotland",
+  edinburgh: "scotland",
+  // Wales
+  cardiff: "wales",
+  // Northern Ireland
+  belfast: "northern-ireland",
 };
 
 const FALLBACK_REGION = { area: "the UK", coverage: "across the UK" };
 
-function regionFor(region: string): { area: string; coverage: string } {
-  return REGION_PHRASES[region.toLowerCase()] ?? FALLBACK_REGION;
+function regionFor(input: {
+  slug: string;
+  region: string;
+}): { area: string; coverage: string } {
+  // Step 1: slug-based lookup (strongest signal)
+  const bySlug = AREA_SLUG_TO_NATION[input.slug];
+  if (bySlug) return REGION_PHRASES[bySlug];
+
+  // Step 2: substring match on the DB region string
+  const r = input.region.toLowerCase();
+  if (r.includes("scotland") || r.includes("glasgow") || r.includes("lothian") || r.includes("highland")) {
+    return REGION_PHRASES.scotland;
+  }
+  if (r.includes("wales") || r.includes("cardiff") || r.includes("gwent") || r.includes("powys")) {
+    return REGION_PHRASES.wales;
+  }
+  if (r.includes("northern ireland") || r.includes("antrim") || r.includes("belfast") || r.includes("down") || r.includes("tyrone")) {
+    return REGION_PHRASES["northern-ireland"];
+  }
+  if (r.includes("england") || /\b(yorkshire|midlands|merseyside|tyne|wessex|essex|sussex|kent|surrey|hampshire|devon|cornwall|lancashire|cheshire|cumbria|northumberland|greater manchester|london)\b/.test(r)) {
+    return REGION_PHRASES.england;
+  }
+
+  // Step 3: safe default
+  return FALLBACK_REGION;
 }
 
 /**
@@ -471,7 +536,7 @@ export function wordCount(s: string): number {
  */
 export function buildBodyCopy(input: BodyCopyInput): BodyCopyPayload {
   const trade = tradeFor(input.category.slug);
-  const region = regionFor(input.area.region);
+  const region = regionFor({ slug: input.area.slug, region: input.area.region });
   const seed = `${input.category.slug}|${input.area.slug}`;
   const h = fnv1a(seed);
 
