@@ -27,11 +27,17 @@ vi.mock("./storage", () => ({
     getCategoryBySlug: vi.fn(),
     getAreaBySlug: vi.fn(),
     getTradesmen: vi.fn(),
+    getCategories: vi.fn(),
+    getAreas: vi.fn(),
   },
 }));
 
-import { injectMainHostSeo } from "./main-host-spa";
+import {
+  injectMainHostSeo,
+  injectMainHostCrosslinks,
+} from "./main-host-spa";
 import { buildMainHostSeo } from "../shared/main-host-seo";
+import type { MainHostCrosslinks } from "../shared/main-host-crosslinks";
 
 const ORIGIN = "https://tradesmanfinder.com";
 
@@ -214,5 +220,111 @@ describe("injectMainHostSeo — supply-count title flips", () => {
   it("supply>0 uses the verified-pros framing", () => {
     const out = injectMainHostSeo(RAW_HTML, makePayload(5));
     expect(out).toContain("5 Verified Local Pros");
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────
+// PR-#19-E — internal cross-link injection
+// ──────────────────────────────────────────────────────────────────
+
+const SAMPLE_CROSSLINKS: MainHostCrosslinks = {
+  nearbyCities: [
+    { label: "Plumbers in Liverpool", href: "/plumber-in-liverpool", slug: "liverpool" },
+    { label: "Plumbers in Leeds", href: "/plumber-in-leeds", slug: "leeds" },
+  ],
+  relatedTrades: [
+    { label: "Electricians in Manchester", href: "/electrician-in-manchester", slug: "electrician" },
+    { label: "Builders in Manchester", href: "/builder-in-manchester", slug: "builder" },
+  ],
+};
+
+describe("injectMainHostCrosslinks — first injection", () => {
+  it("inserts the marker-bracketed block before </body>", () => {
+    const out = injectMainHostCrosslinks(RAW_HTML, SAMPLE_CROSSLINKS);
+    const startIdx = out.indexOf("<!-- main-host-crosslinks:start -->");
+    const endIdx = out.indexOf("<!-- main-host-crosslinks:end -->");
+    const bodyCloseIdx = out.indexOf("</body>");
+    expect(startIdx).toBeGreaterThan(0);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    expect(endIdx).toBeLessThan(bodyCloseIdx);
+  });
+
+  it("renders an anchor for every nearby city and every related trade", () => {
+    const out = injectMainHostCrosslinks(RAW_HTML, SAMPLE_CROSSLINKS);
+    expect(out).toContain('href="/plumber-in-liverpool"');
+    expect(out).toContain('href="/plumber-in-leeds"');
+    expect(out).toContain('href="/electrician-in-manchester"');
+    expect(out).toContain('href="/builder-in-manchester"');
+    expect(out).toContain("Plumbers in Liverpool");
+    expect(out).toContain("Electricians in Manchester");
+  });
+
+  it("marks the SSR block with data-server-crosslinks for client de-dup", () => {
+    const out = injectMainHostCrosslinks(RAW_HTML, SAMPLE_CROSSLINKS);
+    expect(out).toContain('data-server-crosslinks="true"');
+  });
+
+  it("uses semantic <nav> + <ul><li><a> structure for crawler-friendliness", () => {
+    const out = injectMainHostCrosslinks(RAW_HTML, SAMPLE_CROSSLINKS);
+    const navCount = (out.match(/<nav /g) || []).length;
+    expect(navCount).toBeGreaterThanOrEqual(2);
+    expect(out).toContain('aria-label="Nearby cities"');
+    expect(out).toContain('aria-label="Related trades"');
+  });
+});
+
+describe("injectMainHostCrosslinks — idempotency", () => {
+  it("re-injecting replaces the existing block rather than duplicating", () => {
+    const first = injectMainHostCrosslinks(RAW_HTML, SAMPLE_CROSSLINKS);
+    const second = injectMainHostCrosslinks(first, {
+      nearbyCities: [
+        { label: "Plumbers in Bristol", href: "/plumber-in-bristol", slug: "bristol" },
+      ],
+      relatedTrades: [],
+    });
+    const startCount = (second.match(/main-host-crosslinks:start/g) || []).length;
+    const endCount = (second.match(/main-host-crosslinks:end/g) || []).length;
+    expect(startCount).toBe(1);
+    expect(endCount).toBe(1);
+    expect(second).not.toContain("/plumber-in-liverpool");
+    expect(second).toContain("/plumber-in-bristol");
+  });
+
+  it("strips any previous block when given empty inputs", () => {
+    const first = injectMainHostCrosslinks(RAW_HTML, SAMPLE_CROSSLINKS);
+    const second = injectMainHostCrosslinks(first, {
+      nearbyCities: [],
+      relatedTrades: [],
+    });
+    expect(second).not.toContain("main-host-crosslinks:start");
+    expect(second).not.toContain("/plumber-in-liverpool");
+  });
+});
+
+describe("injectMainHostCrosslinks — empty inputs", () => {
+  it("returns the HTML unchanged when both clusters are empty", () => {
+    const out = injectMainHostCrosslinks(RAW_HTML, {
+      nearbyCities: [],
+      relatedTrades: [],
+    });
+    expect(out).toBe(RAW_HTML);
+  });
+});
+
+describe("injectMainHostCrosslinks — escaping", () => {
+  it("HTML-escapes hostile labels and hrefs", () => {
+    const out = injectMainHostCrosslinks(RAW_HTML, {
+      nearbyCities: [
+        {
+          label: "<script>alert(1)</script>",
+          href: '/x"><script>alert(2)</script>',
+          slug: "x",
+        },
+      ],
+      relatedTrades: [],
+    });
+    expect(out).not.toContain("<script>alert(1)</script>");
+    expect(out).not.toContain('/x"><script>');
+    expect(out).toContain("&lt;script&gt;");
   });
 });

@@ -42,6 +42,10 @@ import {
   buildMainHostSeo,
   type MainHostSeoPayload,
 } from "../shared/main-host-seo";
+import {
+  buildCrosslinks,
+  type MainHostCrosslinks,
+} from "../shared/main-host-crosslinks";
 import { BUNDLED_INDEX_HTML } from "./generated/index-html";
 
 let cachedIndexHtml: string | null = null;
@@ -192,6 +196,87 @@ export function injectMainHostSeo(
   return `${block}\n${stripped}`;
 }
 
+/**
+ * Inject the internal cross-link clusters (PR-#19-E) into the HTML.
+ *
+ * Rendered as a real <nav> block — visible by default, server-rendered
+ * so crawlers see the anchors without executing JS. The React component
+ * also renders the same links on hydration; CSS class
+ * `data-server-crosslinks` is a sentinel React reads to suppress its
+ * duplicate render (see hyperlocal.tsx). We use marker comments for
+ * idempotency in dev hot-reload, the same pattern as injectMainHostSeo.
+ *
+ * Why a separate function from injectMainHostSeo: crosslinks belong in
+ * <body>, not <head>. Splitting also keeps each function's responsibility
+ * narrow and its unit tests focused.
+ *
+ * Exposed for direct unit testing.
+ */
+export function injectMainHostCrosslinks(
+  html: string,
+  crosslinks: MainHostCrosslinks,
+): string {
+  const marker = "<!-- main-host-crosslinks:start -->";
+  const endMarker = "<!-- main-host-crosslinks:end -->";
+
+  if (
+    crosslinks.nearbyCities.length === 0 &&
+    crosslinks.relatedTrades.length === 0
+  ) {
+    // Nothing to inject. If a previous injection exists (dev hot-reload),
+    // strip it so the page doesn't keep stale links.
+    if (html.includes(marker) && html.includes(endMarker)) {
+      return html.replace(
+        new RegExp(`${marker}[\\s\\S]*?${endMarker}\\s*`),
+        "",
+      );
+    }
+    return html;
+  }
+
+  const renderList = (
+    items: MainHostCrosslinks["nearbyCities"],
+    heading: string,
+    ariaLabel: string,
+  ): string => {
+    if (items.length === 0) return "";
+    const lis = items
+      .map(
+        (i) =>
+          `<li><a href="${escapeHtml(i.href)}">${escapeHtml(i.label)}</a></li>`,
+      )
+      .join("");
+    return `<nav aria-label="${escapeHtml(ariaLabel)}"><h2>${escapeHtml(heading)}</h2><ul>${lis}</ul></nav>`;
+  };
+
+  const nearbyHeading =
+    crosslinks.nearbyCities[0]?.label.split(" in ")[0] + " in nearby cities";
+  const relatedHeading =
+    "Related trades in " +
+    (crosslinks.relatedTrades[0]?.label.split(" in ")[1] ?? "");
+
+  const inner = [
+    renderList(crosslinks.nearbyCities, nearbyHeading, "Nearby cities"),
+    renderList(crosslinks.relatedTrades, relatedHeading, "Related trades"),
+  ].join("");
+
+  const block = `${marker}<div data-server-crosslinks="true" hidden>${inner}</div>${endMarker}`;
+
+  // Idempotent re-injection.
+  if (html.includes(marker) && html.includes(endMarker)) {
+    return html.replace(
+      new RegExp(`${marker}[\\s\\S]*?${endMarker}`),
+      block,
+    );
+  }
+
+  if (html.includes("</body>")) {
+    return html.replace("</body>", `${block}\n</body>`);
+  }
+  // Fallback — append. The links still get crawled.
+  return `${html}\n${block}`;
+}
+
 function originOf(req: Request): string {
   const proto =
     (req.headers["x-forwarded-proto"] as string) || req.protocol || "https";
@@ -296,9 +381,39 @@ export function registerMainHostSpa(app: Express): void {
       return next();
     }
 
+    // Cross-link data — same builder the React page uses on hydration so
+    // SSR HTML and client render produce the same anchors. Best-effort:
+    // if the lookup fails we still ship the SEO-injected HTML.
+    let crosslinks: MainHostCrosslinks = {
+      nearbyCities: [],
+      relatedTrades: [],
+    };
+    try {
+      const [allCats, allAreas] = await Promise.all([
+        storage.getCategories(),
+        storage.getAreas(),
+      ]);
+      crosslinks = buildCrosslinks({
+        category: { id: category.id, slug: category.slug, name: category.name, parentId: (allCats.find(c => c.id === category.id)?.parentId) ?? null },
+        area,
+        allCategories: allCats.map((c) => ({ id: c.id, slug: c.slug, name: c.name, parentId: c.parentId })),
+        allAreas: allAreas.map((a) => ({
+          id: a.id,
+          slug: a.slug,
+          name: a.name,
+          region: a.region,
+          latitude: a.latitude,
+          longitude: a.longitude,
+        })),
+      });
+    } catch (e) {
+      console.warn("[main-host-spa] crosslinks lookup failed:", e);
+    }
+
     const origin = originOf(req);
     const seo = buildMainHostSeo({ category, area, origin, supplyCount });
-    const injected = injectMainHostSeo(html, seo);
+    let injected = injectMainHostSeo(html, seo);
+    injected = injectMainHostCrosslinks(injected, crosslinks);
     res.type("text/html").send(injected);
   });
 }

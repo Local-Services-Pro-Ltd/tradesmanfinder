@@ -15,6 +15,7 @@ import {
   parseFlatHyperlocalSlug,
   buildFlatHyperlocalPath,
 } from "@shared/hyperlocal-slug";
+import { buildCrosslinks } from "@shared/main-host-crosslinks";
 import { ChevronRight, CheckCircle2, MapPin } from "lucide-react";
 
 // Common jobs by trade for local-flavoured content
@@ -100,6 +101,19 @@ export default function Hyperlocal() {
       }
     };
   }, [category, area]);
+
+  // Internal cross-links: nearby cities (same trade) + related trades (same
+  // area). Driven by the pure builder in shared/ so the server-side injector
+  // can render the identical list into the SSR HTML. Empty arrays when data
+  // is still loading — keeps render cheap and avoids hydration mismatch.
+  const crosslinks = category && area && categories && areas
+    ? buildCrosslinks({
+        category,
+        area,
+        allCategories: categories,
+        allAreas: areas,
+      })
+    : { nearbyCities: [], relatedTrades: [] };
 
   const faqs = category && area ? [
     { q: `How much does a ${category.name.toLowerCase()} cost in ${area.name}?`, a: `Prices vary by job. Posting a job on TradesmanFinder is free and gets you up to three no-obligation quotes from verified ${category.name.toLowerCase()}s in ${area.name}, so you can compare fairly.` },
@@ -190,6 +204,54 @@ export default function Hyperlocal() {
                 </AccordionItem>
               ))}
             </Accordion>
+          </div>
+        )}
+
+        {/* Internal cross-links — boosts crawl depth across the area and
+            trade dimensions, gives users an obvious "what about the next
+            town?" / "what about a related trade?" jump. */}
+        {(crosslinks.nearbyCities.length > 0 || crosslinks.relatedTrades.length > 0) && (
+          <div className="mt-16 grid gap-10 sm:grid-cols-2" data-testid="crosslinks">
+            {crosslinks.nearbyCities.length > 0 && (
+              <nav aria-label="Nearby cities" data-testid="crosslinks-nearby">
+                <h2 className="font-display text-lg font-semibold text-foreground">
+                  {category?.name}s in nearby cities
+                </h2>
+                <ul className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {crosslinks.nearbyCities.map((item) => (
+                    <li key={item.href}>
+                      <Link
+                        href={item.href}
+                        className="text-sm text-primary hover:underline"
+                        data-testid={`crosslink-area-${item.slug}`}
+                      >
+                        {item.label}
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </nav>
+            )}
+            {crosslinks.relatedTrades.length > 0 && (
+              <nav aria-label="Related trades" data-testid="crosslinks-related">
+                <h2 className="font-display text-lg font-semibold text-foreground">
+                  Related trades in {area?.name}
+                </h2>
+                <ul className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {crosslinks.relatedTrades.map((item) => (
+                    <li key={item.href}>
+                      <Link
+                        href={item.href}
+                        className="text-sm text-primary hover:underline"
+                        data-testid={`crosslink-trade-${item.slug}`}
+                      >
+                        {item.label}
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </nav>
+            )}
           </div>
         )}
       </div>
