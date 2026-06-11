@@ -358,7 +358,6 @@ __export(og_exports, {
   GET: () => GET
 });
 module.exports = __toCommonJS(og_exports);
-var import_og = require("@vercel/og");
 
 // shared/og-params.ts
 var OG_MAX_TRADE_LEN = 40;
@@ -398,6 +397,19 @@ var OG_WIDTH = 1200;
 var OG_HEIGHT = 630;
 var FALLBACK_PATH = "/og-default.png";
 async function GET(request) {
+  try {
+    return await handle(request);
+  } catch (err) {
+    const msg = err?.stack || err?.message || String(err);
+    return new Response(`OG_DEBUG_ERROR
+${msg}`, {
+      status: 500,
+      headers: { "Content-Type": "text/plain; charset=utf-8" }
+    });
+  }
+}
+async function handle(request) {
+  const { ImageResponse } = await import("@vercel/og");
   let url;
   try {
     url = new URL(request.url);
@@ -417,7 +429,7 @@ async function GET(request) {
   const { trade, area, supply } = parsed;
   const showCount = supply > 0;
   try {
-    return new import_og.ImageResponse(
+    return new ImageResponse(
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
         "div",
         {
