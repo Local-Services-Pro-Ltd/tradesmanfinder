@@ -228,17 +228,43 @@ describe("buildMainHostSeo — JSON-LD", () => {
 // ──────────────────────────────────────────────────────────────────
 
 describe("buildMainHostSeo — OG image", () => {
-  it("emits an absolute og:image URL pointing at /og-default.png on origin", () => {
+  it("emits a per-page dynamic og:image URL at /api/og with trade/area/n params", () => {
     const seo = buildMainHostSeo({
       category: PLUMBER,
       area: MANCHESTER,
       origin: ORIGIN,
       supplyCount: 3,
     });
-    expect(seo.ogImage).toBe("https://tradesmanfinder.com/og-default.png");
+    expect(seo.ogImage).toBe(
+      "https://tradesmanfinder.com/api/og?trade=Plumber&area=Manchester&n=3",
+    );
   });
 
-  it("declares the OG image dimensions (1200x630)", () => {
+  it("omits the count param when supply is 0 (dynamic image shows no chip)", () => {
+    const seo = buildMainHostSeo({
+      category: PLUMBER,
+      area: MANCHESTER,
+      origin: ORIGIN,
+      supplyCount: 0,
+    });
+    expect(seo.ogImage).toBe(
+      "https://tradesmanfinder.com/api/og?trade=Plumber&area=Manchester",
+    );
+  });
+
+  it("emits a static fallback og:image (/og-default.png) for crawler resilience", () => {
+    // PR-#19-G ships dynamic + static together. Facebook / Twitter walk
+    // the og:image list if the first 5xx's, so we never lose the card.
+    const seo = buildMainHostSeo({
+      category: PLUMBER,
+      area: MANCHESTER,
+      origin: ORIGIN,
+      supplyCount: 3,
+    });
+    expect(seo.ogImageFallback).toBe("https://tradesmanfinder.com/og-default.png");
+  });
+
+  it("declares the OG image dimensions (1200x630) — same for dynamic + fallback", () => {
     const seo = buildMainHostSeo({
       category: PLUMBER,
       area: MANCHESTER,
@@ -258,6 +284,16 @@ describe("buildMainHostSeo — OG image", () => {
     });
     expect(seo.ogImageAlt).toContain("plumber");
     expect(seo.ogImageAlt).toContain("Manchester");
+  });
+
+  it("URL-encodes multi-word area names in the dynamic OG URL", () => {
+    const seo = buildMainHostSeo({
+      category: PLUMBER,
+      area: NEWCASTLE,
+      origin: ORIGIN,
+      supplyCount: 2,
+    });
+    expect(seo.ogImage).toContain("area=Newcastle+upon+Tyne");
   });
 });
 

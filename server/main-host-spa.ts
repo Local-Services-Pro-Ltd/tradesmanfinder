@@ -159,6 +159,9 @@ export function injectMainHostSeo(
     `<meta property="og:image:width" content="${seo.ogImageWidth}">`,
     `<meta property="og:image:height" content="${seo.ogImageHeight}">`,
     `<meta property="og:image:alt" content="${escapeHtml(seo.ogImageAlt)}">`,
+    // Static fallback OG image (PR-#19-G). Crawlers walk this if the
+    // dynamic render at /api/og is unhealthy, so social cards never break.
+    `<meta property="og:image" content="${escapeHtml(seo.ogImageFallback)}">`,
     `<meta name="twitter:card" content="summary_large_image">`,
     `<meta name="twitter:title" content="${escapeHtml(seo.ogTitle)}">`,
     `<meta name="twitter:description" content="${escapeHtml(seo.ogDescription)}">`,

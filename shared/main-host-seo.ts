@@ -19,6 +19,8 @@
  * the Express dependency tree.
  */
 
+import { buildOgImageQuery } from "./og-params";
+
 /** Inputs needed to build the payload. */
 export type MainHostSeoInput = {
   /** Resolved DB row for the category — must include id, slug, name. */
@@ -55,8 +57,17 @@ export type MainHostSeoPayload = {
   ogTitle: string;
   ogDescription: string;
   ogType: "website";
-  /** Absolute URL of the OG/Twitter preview image (1200x630 PNG). */
+  /**
+   * Absolute URL of the PRIMARY OG/Twitter preview image (1200x630 PNG).
+   * From PR-#19-G this is a per-page dynamic render at `/api/og?...`.
+   */
   ogImage: string;
+  /**
+   * Absolute URL of the static brand fallback OG image, emitted as a
+   * second `og:image` tag. Acts as a safety net if the dynamic render
+   * endpoint is unhealthy — Facebook/Twitter walk to the next image.
+   */
+  ogImageFallback: string;
   /** Width/height help Facebook & Twitter render the card without a re-fetch. */
   ogImageWidth: number;
   ogImageHeight: number;
@@ -82,13 +93,27 @@ export type MainHostSeoPayload = {
 };
 
 /**
- * Path (under the public origin) of the default OG preview image.
+ * Path (under the public origin) of the static fallback OG image.
  * Build step copies `client/public/og-default.png` to the root of
  * dist/public so it is served at `<origin>/og-default.png`.
+ *
+ * Kept as a safety net even after PR-#19-G shipped per-page dynamic
+ * images: if `/api/og` ever 5xx's (Vercel function cold start blip,
+ * runtime regression, …) the crawler still gets a valid OG image
+ * because we emit BOTH og:image tags and the Facebook/Twitter
+ * scrapers walk to the next one when the first fails.
  */
 export const DEFAULT_OG_IMAGE_PATH = "/og-default.png";
 export const DEFAULT_OG_IMAGE_WIDTH = 1200;
 export const DEFAULT_OG_IMAGE_HEIGHT = 630;
+
+/**
+ * Path of the dynamic per-page OG image endpoint (PR-#19-G). Combined
+ * with the (trade, area, supply) query built by `buildOgImageQuery`,
+ * this yields a unique, brand-consistent, crawler-friendly card per
+ * /{cat}-in-{area} page.
+ */
+export const DYNAMIC_OG_IMAGE_PATH = "/api/og";
 
 /**
  * Build the SEO payload for a hyperlocal landing page.
@@ -201,6 +226,15 @@ export function buildMainHostSeo(input: MainHostSeoInput): MainHostSeoPayload {
     ? `${area.latitude!.toFixed(4)};${area.longitude!.toFixed(4)}`
     : undefined;
 
+  // Per-page dynamic OG image (PR-#19-G). Query carries trade/area/
+  // supply so the renderer is O(1) and fully cacheable behind the CDN.
+  const ogQuery = buildOgImageQuery({
+    trade: tradeName,
+    area: areaName,
+    supply: supplyCount,
+  });
+  const dynamicOgImage = `${origin}${DYNAMIC_OG_IMAGE_PATH}${ogQuery}`;
+
   return {
     title,
     description,
@@ -208,7 +242,8 @@ export function buildMainHostSeo(input: MainHostSeoInput): MainHostSeoPayload {
     ogTitle: title,
     ogDescription: description,
     ogType: "website",
-    ogImage: `${origin}${DEFAULT_OG_IMAGE_PATH}`,
+    ogImage: dynamicOgImage,
+    ogImageFallback: `${origin}${DEFAULT_OG_IMAGE_PATH}`,
     ogImageWidth: DEFAULT_OG_IMAGE_WIDTH,
     ogImageHeight: DEFAULT_OG_IMAGE_HEIGHT,
     ogImageAlt: `TradesmanFinder — find a trusted ${tradeLower} in ${areaName}`,
