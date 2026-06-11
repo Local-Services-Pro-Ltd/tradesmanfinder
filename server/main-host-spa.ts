@@ -46,6 +46,10 @@ import {
   buildCrosslinks,
   type MainHostCrosslinks,
 } from "../shared/main-host-crosslinks";
+import {
+  buildBodyCopy,
+  type BodyCopyPayload,
+} from "../shared/main-host-body-copy";
 import { BUNDLED_INDEX_HTML } from "./generated/index-html";
 
 let cachedIndexHtml: string | null = null;
@@ -330,6 +334,58 @@ export function injectMainHostCrosslinks(
   return `${html}\n${block}`;
 }
 
+/**
+ * Inject the unique 80–150 word body copy (PR-#19-H) into the HTML.
+ *
+ * Rendered as a real <section> with the same `hidden` server-render
+ * pattern as cross-links: crawler-visible on first paint, then the
+ * React app owns the user-visible rendering on hydration. Without this,
+ * the page body before React mounts is ~343 chars of cross-link anchors
+ * — below Google's content-depth threshold and a doorway-page risk
+ * across the 400-route surface.
+ *
+ * Placement: inside <body>, just before </body>, same as cross-links.
+ * Order between the two body injections doesn't matter for crawlers
+ * (both end up in the DOM before </body>).
+ *
+ * Exposed for direct unit testing.
+ */
+export function injectMainHostBodyCopy(
+  html: string,
+  body: BodyCopyPayload,
+): string {
+  const marker = "<!-- main-host-body:start -->";
+  const endMarker = "<!-- main-host-body:end -->";
+
+  if (body.paragraphs.length === 0) {
+    if (html.includes(marker) && html.includes(endMarker)) {
+      return html.replace(
+        new RegExp(`${marker}[\\s\\S]*?${endMarker}\\s*`),
+        "",
+      );
+    }
+    return html;
+  }
+
+  const paras = body.paragraphs
+    .map((p) => `<p>${escapeHtml(p)}</p>`)
+    .join("");
+  const block = `${marker}<section data-server-body="true" hidden>${paras}</section>${endMarker}`;
+
+  // Idempotent re-injection (dev hot-reload).
+  if (html.includes(marker) && html.includes(endMarker)) {
+    return html.replace(
+      new RegExp(`${marker}[\\s\\S]*?${endMarker}`),
+      block,
+    );
+  }
+
+  if (html.includes("</body>")) {
+    return html.replace("</body>", `${block}\n</body>`);
+  }
+  return `${html}\n${block}`;
+}
+
 function originOf(req: Request): string {
   const proto =
     (req.headers["x-forwarded-proto"] as string) || req.protocol || "https";
@@ -484,8 +540,14 @@ export function registerMainHostSpa(app: Express): void {
 
     const origin = originOf(req);
     const seo = buildMainHostSeo({ category, area, origin, supplyCount });
+    const bodyCopy = buildBodyCopy({
+      category: { slug: category.slug, name: category.name },
+      area: { slug: area.slug, name: area.name, region: area.region },
+      supplyCount,
+    });
     let injected = injectMainHostSeo(html, seo);
     injected = injectMainHostCrosslinks(injected, crosslinks);
+    injected = injectMainHostBodyCopy(injected, bodyCopy);
     res.type("text/html").send(injected);
   });
 }
