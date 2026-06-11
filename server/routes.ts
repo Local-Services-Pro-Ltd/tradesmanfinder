@@ -205,16 +205,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           requestUserAgent: ua,
         });
 
-        // Fire-and-forget the email. Storage row is the system of record;
-        // a Resend outage shouldn't cause the request to 500.
-        sendMagicLinkEmail({
-          to: email,
-          token: rawToken,
-          purpose,
-          tradesmanId: existing?.id ?? null,
-        }).catch((err) => {
+        // Await the email send so the Vercel serverless function stays alive
+        // until Resend responds. Fire-and-forget worked locally (Express keeps
+        // the process alive) but on Vercel the function is frozen the moment
+        // res.json() returns, killing in-flight Promises before Resend is
+        // reached — see incident 2026-06-11 (token row created, no email_log,
+        // no email delivered). A Resend outage still shouldn't 500 the
+        // request, so swallow errors and return 200 either way; the email_log
+        // row written by mailer.send() is the system of record for delivery.
+        try {
+          await sendMagicLinkEmail({
+            to: email,
+            token: rawToken,
+            purpose,
+            tradesmanId: existing?.id ?? null,
+          });
+        } catch (err: any) {
           console.error(`[auth] sendMagicLinkEmail failed for ${email}:`, err?.message);
-        });
+        }
 
         res.json({ ok: true });
       } catch (e) {
