@@ -34,8 +34,8 @@
  *     hostile crawler URLs.
  */
 
-import { ImageResponse } from "@vercel/og";
-
+// DEBUG (PR #87): defer the @vercel/og import + wrap the whole handler
+// so we can surface the real error instead of a generic 500.
 import { parseOgImageQuery } from "../shared/og-params";
 
 // No `export const config = { runtime: ... }` here.
@@ -61,6 +61,22 @@ const OG_HEIGHT = 630;
 const FALLBACK_PATH = "/og-default.png";
 
 export async function GET(request: Request): Promise<Response> {
+  // DEBUG: surface any error as text/plain so we can read it via curl.
+  try {
+    return await handle(request);
+  } catch (err: any) {
+    const msg = err?.stack || err?.message || String(err);
+    return new Response(`OG_DEBUG_ERROR\n${msg}`, {
+      status: 500,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
+}
+
+async function handle(request: Request): Promise<Response> {
+  // Dynamic import so we can catch a load-time crash above.
+  const { ImageResponse } = await import("@vercel/og");
+
   // Defensive URL parse — Vercel passes an absolute URL here, but if
   // a future runtime ever passes a relative one we don't want to 5xx
   // before reaching our fallback.
