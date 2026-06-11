@@ -186,6 +186,72 @@ describe('AUTH REGRESSION GUARD (locks in PR #43 / issue #28 fix)', () => {
       });
     });
 
+    // Locks in fix for incident 2026-06-11: on Vercel serverless, the
+    // request handler must await sendMagicLinkEmail before responding.
+    // Fire-and-forget caused the Promise to be killed when the function
+    // was suspended after res.json(), so no email was sent and no
+    // email_log row was written. This test fails the moment the handler
+    // returns before the mock resolves.
+    it('POST /api/auth/request-link AWAITS sendMagicLinkEmail before responding (Vercel serverless fix)', async () => {
+      const mailer = await import('./mailer');
+      let resolveSend!: (v: any) => void;
+      const sendPromise = new Promise((r) => { resolveSend = r; });
+      let sendStarted = false;
+      let sendFinished = false;
+      (mailer.sendMagicLinkEmail as any).mockImplementationOnce(() => {
+        sendStarted = true;
+        return sendPromise.then(() => { sendFinished = true; return { ok: true, id: 'e5' }; });
+      });
+
+      const app = await buildApp();
+      await withServer(app, async (port) => {
+        const fetchPromise = fetch(`http://127.0.0.1:${port}/api/auth/request-link`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: 'await-test@example.com' }),
+        });
+
+        // Give the handler time to reach (and block on) sendMagicLinkEmail.
+        await new Promise((r) => setTimeout(r, 100));
+        expect(sendStarted, 'handler should have invoked sendMagicLinkEmail').toBe(true);
+        expect(sendFinished, 'send should NOT be finished yet (Promise still pending)').toBe(false);
+
+        // If the handler awaits, the fetch is still pending. If it fires-and-forgets,
+        // the response would already be available and Promise.race resolves to 'fetch'.
+        const winner = await Promise.race([
+          fetchPromise.then(() => 'fetch'),
+          new Promise((r) => setTimeout(() => r('timeout'), 150)),
+        ]);
+        expect(winner, 'response must not return before sendMagicLinkEmail resolves').toBe('timeout');
+
+        // Now let the send complete and confirm the response arrives.
+        resolveSend({ ok: true, id: 'e5' });
+        const res = await fetchPromise;
+        expect(res.status).toBe(200);
+        expect(sendFinished).toBe(true);
+      });
+    });
+
+    // Locks in error-swallowing behavior: even if Resend throws (outage),
+    // the request must still return 200 — the magic_link_tokens row is the
+    // system of record. Don't 500 on transient mailer failures.
+    it('POST /api/auth/request-link returns 200 even when sendMagicLinkEmail throws (Resend outage)', async () => {
+      const mailer = await import('./mailer');
+      (mailer.sendMagicLinkEmail as any).mockImplementationOnce(() => Promise.reject(new Error('Resend down')));
+
+      const app = await buildApp();
+      await withServer(app, async (port) => {
+        const res = await fetch(`http://127.0.0.1:${port}/api/auth/request-link`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: 'outage-test@example.com' }),
+        });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body).toMatchObject({ ok: true });
+      });
+    });
+
     it('GET /api/auth/verify with bad token does NOT 404 (endpoint mounted)', async () => {
       const app = await buildApp();
       await withServer(app, async (port) => {
