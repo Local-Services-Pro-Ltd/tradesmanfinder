@@ -13,7 +13,7 @@ import { apiRequest, queryClient, getQueryFn } from "@/lib/queryClient";
 import type { DashboardData, Tradesman } from "@/lib/api-types";
 import { timeAgo } from "@/lib/api-types";
 import { getFeaturedState, formatFeaturedDate, type FeaturedState } from "@shared/featured-state";
-import { Wallet, Inbox, Star, TrendingUp, CheckCircle2, Phone, Mail, Plus, LogIn, Zap, Gavel, AlertTriangle, Ban, Square, Info, LogOut, CreditCard } from "lucide-react";
+import { Wallet, Inbox, Star, TrendingUp, CheckCircle2, Phone, Mail, Plus, LogIn, Zap, Gavel, AlertTriangle, AlertCircle, Ban, Square, Info, LogOut, CreditCard } from "lucide-react";
 import { CardBadge } from "@/components/card-badge";
 
 // Lead pack catalogue. The `priceEnvKey` matches a STRIPE_PRICE_LEAD_PACK_*
@@ -212,10 +212,30 @@ export default function Dashboard() {
           <div className="flex items-center gap-4">
             <span className="flex h-12 w-12 items-center justify-center rounded-full bg-white/10 font-display text-lg font-bold text-white">{t.businessName.charAt(0)}</span>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <h1 className="font-display text-xl font-bold text-white" data-testid="text-dashboard-business">{t.businessName}</h1>
                 {t.verified && <Badge className="bg-trust text-white hover:bg-trust">Verified</Badge>}
                 {t.featured && <Badge className="bg-primary text-primary-foreground hover:bg-primary">Featured</Badge>}
+                {/* past_due pill (PR-D3) — amber chip with payment-failed copy.
+                    Sits next to Featured/Verified so it's the first thing a
+                    tradesperson sees on the dashboard, before they scroll to
+                    the Featured card. Visible regardless of featuredUntil
+                    because past_due is a billing failure, not a state-machine
+                    derivation. Clicking opens the Stripe portal to update
+                    the payment method — same affordance as the Featured
+                    card's past_due CTA, just promoted into the header. */}
+                {t.subscriptionStatus === "past_due" && (
+                  <button
+                    type="button"
+                    onClick={openBillingPortal}
+                    disabled={openingPortal}
+                    data-testid="badge-past-due"
+                    className="inline-flex items-center gap-1 rounded-full border border-amber-300/60 bg-amber-100 px-2.5 py-0.5 text-xs font-semibold text-amber-900 transition hover:bg-amber-200 focus:outline-none focus:ring-2 focus:ring-amber-300 disabled:opacity-60"
+                  >
+                    <AlertCircle className="h-3 w-3" />
+                    {openingPortal ? "Opening…" : "Payment failed — update card"}
+                  </button>
+                )}
               </div>
               <p className="text-sm text-white/60">Welcome back, {t.ownerName.split(" ")[0]}</p>
             </div>
@@ -256,8 +276,15 @@ export default function Dashboard() {
         {/* Stat cards */}
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Card className="p-5">
-            <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">Credit balance</span><Wallet className="h-4 w-4 text-primary" /></div>
+            <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">Leads remaining</span><Wallet className="h-4 w-4 text-primary" /></div>
             <p className="mt-2 font-display text-2xl font-bold text-foreground" data-testid="text-credit-balance">{data.credits}</p>
+            {/* PR-D3: "Credit balance" was ambiguous — 1 credit = 1 lead
+                unlock. Surface that mapping explicitly under the number so
+                tradespeople don't have to read the credits tab to learn
+                what one credit buys. */}
+            <p className="mt-1 text-xs text-muted-foreground" data-testid="text-credit-balance-sub">
+              {data.credits === 1 ? "1 lead unlock available" : `${data.credits} lead unlocks available`}
+            </p>
           </Card>
           <Card className="p-5">
             <div className="flex items-center justify-between"><span className="text-sm text-muted-foreground">Open leads</span><Inbox className="h-4 w-4 text-primary" /></div>
