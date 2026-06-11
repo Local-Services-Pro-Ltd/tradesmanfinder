@@ -10,8 +10,7 @@
       "memory": 1024
     },
     "api/og.tsx": {
-      "maxDuration": 10,
-      "memory": 1024
+      "maxDuration": 10
     }
   },
   "rewrites": [

@@ -38,13 +38,16 @@ import { ImageResponse } from "@vercel/og";
 
 import { parseOgImageQuery } from "../shared/og-params";
 
-export const config = {
-  // Node runtime — keeps us on a single platform target (Vercel auto-
-  // upgrades the @vercel/og runtime requirements). Edge would work too
-  // but pulling in Node-style fetch behaviour matches the rest of the
-  // codebase.
-  runtime: "nodejs",
-};
+// No `export const config = { runtime: ... }` here.
+//
+// For non-framework Vercel Functions (plain api/*.tsx), the supported
+// shape is a named `GET` (or method) export that receives a Web-API
+// `Request`. Vercel's builder picks this up automatically as a
+// Node.js runtime function when `"type": "module"` is set in
+// package.json — which we do. Adding `runtime: "nodejs"` here is
+// redundant and an earlier attempt with a default export + this
+// config string crashed at boot with FUNCTION_INVOCATION_FAILED
+// because the builder couldn't find a method-named export.
 
 // 1200x630 is the canonical OG/Twitter card aspect. Twitter's
 // summary_large_image actually crops to ~1.91:1 (≈1200x628) — 630 is
@@ -57,15 +60,29 @@ const OG_HEIGHT = 630;
 // requested URL and doesn't keep hammering this endpoint.
 const FALLBACK_PATH = "/og-default.png";
 
-export default async function handler(req: Request): Promise<Response> {
-  const url = new URL(req.url);
+export async function GET(request: Request): Promise<Response> {
+  // Defensive URL parse — Vercel passes an absolute URL here, but if
+  // a future runtime ever passes a relative one we don't want to 5xx
+  // before reaching our fallback.
+  let url: URL;
+  try {
+    url = new URL(request.url);
+  } catch {
+    return new Response(null, {
+      status: 302,
+      headers: { Location: FALLBACK_PATH },
+    });
+  }
   const parsed = parseOgImageQuery(url.searchParams);
 
   if (!parsed) {
     // Defensive: bad inputs land on the static brand card. 302
     // because the resolution may change as we improve validation;
     // a 301 would let intermediaries cache the redirect forever.
-    return Response.redirect(`${url.origin}${FALLBACK_PATH}`, 302);
+    return new Response(null, {
+      status: 302,
+      headers: { Location: `${url.origin}${FALLBACK_PATH}` },
+    });
   }
 
   const { trade, area, supply } = parsed;
@@ -244,6 +261,9 @@ export default async function handler(req: Request): Promise<Response> {
     // Belt-and-braces: any Satori / WASM glitch falls through to the
     // static brand card instead of 5xx-ing the crawler.
     console.error("[api/og] render failed:", err);
-    return Response.redirect(`${url.origin}${FALLBACK_PATH}`, 302);
+    return new Response(null, {
+      status: 302,
+      headers: { Location: `${url.origin}${FALLBACK_PATH}` },
+    });
   }
 }
