@@ -56,7 +56,7 @@ const RAW_HTML = `<!doctype html>
   <body><div id="root"></div></body>
 </html>`;
 
-function makePayload(supplyCount = 3) {
+function makePayload(supplyCount = 3, withCoords = true) {
   return buildMainHostSeo({
     category: { id: 2, slug: "plumber", name: "Plumber" },
     area: {
@@ -64,6 +64,7 @@ function makePayload(supplyCount = 3) {
       slug: "manchester",
       name: "Manchester",
       region: "Greater Manchester M1",
+      ...(withCoords ? { latitude: 53.4808, longitude: -2.2426 } : {}),
     },
     origin: ORIGIN,
     supplyCount,
@@ -207,6 +208,95 @@ describe("injectMainHostSeo — escaping", () => {
     // The literal quote inside the trade name must be entity-escaped
     // in attribute contexts.
     expect(out).toContain("Plumber &quot;Pro&quot;");
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────
+// PR-#19-F — OG image + locale + robots + geo + <html lang>
+// ──────────────────────────────────────────────────────────────────
+
+describe("injectMainHostSeo — PR-#19-F head additions", () => {
+  it("emits og:image, og:image:width/height/alt", () => {
+    const out = injectMainHostSeo(RAW_HTML, makePayload());
+    expect(out).toContain(
+      '<meta property="og:image" content="https://tradesmanfinder.com/og-default.png">',
+    );
+    expect(out).toContain('<meta property="og:image:width" content="1200">');
+    expect(out).toContain('<meta property="og:image:height" content="630">');
+    expect(out).toMatch(/<meta property="og:image:alt" content="[^"]+Manchester[^"]*">/);
+  });
+
+  it("emits twitter:image and twitter:image:alt", () => {
+    const out = injectMainHostSeo(RAW_HTML, makePayload());
+    expect(out).toContain(
+      '<meta name="twitter:image" content="https://tradesmanfinder.com/og-default.png">',
+    );
+    expect(out).toContain('<meta name="twitter:image:alt"');
+  });
+
+  it("emits og:locale en_GB", () => {
+    const out = injectMainHostSeo(RAW_HTML, makePayload());
+    expect(out).toContain('<meta property="og:locale" content="en_GB">');
+  });
+
+  it("emits the robots directive with max-image-preview:large", () => {
+    const out = injectMainHostSeo(RAW_HTML, makePayload());
+    expect(out).toMatch(/<meta name="robots" content="[^"]*max-image-preview:large[^"]*">/);
+    expect(out).toMatch(/<meta name="robots" content="index,follow[^"]*">/);
+  });
+
+  it("rewrites <html lang=\"en\"> to <html lang=\"en-GB\">", () => {
+    const out = injectMainHostSeo(RAW_HTML, makePayload());
+    expect(out).toContain('<html lang="en-GB">');
+    expect(out).not.toMatch(/<html lang="en">/);
+    // Only one <html> tag — the rewrite must not duplicate it.
+    const htmlOpenCount = (out.match(/<html\b/g) || []).length;
+    expect(htmlOpenCount).toBe(1);
+  });
+
+  it("adds lang attribute when <html> has none", () => {
+    const noLang = RAW_HTML.replace('<html lang="en">', "<html>");
+    const out = injectMainHostSeo(noLang, makePayload());
+    expect(out).toContain('<html lang="en-GB">');
+  });
+
+  it("emits geo.position, ICBM, geo.placename, geo.region when coords present", () => {
+    const out = injectMainHostSeo(RAW_HTML, makePayload(3, true));
+    expect(out).toContain('<meta name="geo.position" content="53.4808;-2.2426">');
+    expect(out).toContain('<meta name="ICBM" content="53.4808, -2.2426">');
+    expect(out).toContain('<meta name="geo.placename" content="Manchester">');
+    expect(out).toContain('<meta name="geo.region" content="GB-ENG">');
+  });
+
+  it("omits geo meta tags when coords are absent", () => {
+    const out = injectMainHostSeo(RAW_HTML, makePayload(3, false));
+    expect(out).not.toContain('name="geo.position"');
+    expect(out).not.toContain('name="ICBM"');
+    expect(out).not.toContain('name="geo.placename"');
+    expect(out).not.toContain('name="geo.region"');
+  });
+
+  it("strips a pre-existing default robots tag", () => {
+    const withRobots = RAW_HTML.replace(
+      "<title>",
+      '<meta name="robots" content="noindex"><title>',
+    );
+    const out = injectMainHostSeo(withRobots, makePayload());
+    expect(out).not.toContain('content="noindex"');
+    // Exactly one robots tag.
+    const robotsCount = (out.match(/name="robots"/g) || []).length;
+    expect(robotsCount).toBe(1);
+  });
+
+  it("strips a pre-existing default twitter:* tag", () => {
+    const withTw = RAW_HTML.replace(
+      "<title>",
+      '<meta name="twitter:card" content="summary"><title>',
+    );
+    const out = injectMainHostSeo(withTw, makePayload());
+    // The default summary card was stripped; ours (summary_large_image) is the only one.
+    expect(out).toContain('twitter:card" content="summary_large_image"');
+    expect(out).not.toMatch(/twitter:card" content="summary"/);
   });
 });
 

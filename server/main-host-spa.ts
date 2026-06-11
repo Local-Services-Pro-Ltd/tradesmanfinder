@@ -147,16 +147,44 @@ export function injectMainHostSeo(
     marker,
     `<title>${escapeHtml(seo.title)}</title>`,
     `<meta name="description" content="${escapeHtml(seo.description)}">`,
+    `<meta name="robots" content="${escapeHtml(seo.robots)}">`,
     `<link rel="canonical" href="${escapeHtml(seo.canonical)}">`,
     `<meta property="og:title" content="${escapeHtml(seo.ogTitle)}">`,
     `<meta property="og:description" content="${escapeHtml(seo.ogDescription)}">`,
     `<meta property="og:url" content="${escapeHtml(seo.canonical)}">`,
     `<meta property="og:type" content="${escapeHtml(seo.ogType)}">`,
     `<meta property="og:site_name" content="TradesmanFinder">`,
+    `<meta property="og:locale" content="${escapeHtml(seo.ogLocale)}">`,
+    `<meta property="og:image" content="${escapeHtml(seo.ogImage)}">`,
+    `<meta property="og:image:width" content="${seo.ogImageWidth}">`,
+    `<meta property="og:image:height" content="${seo.ogImageHeight}">`,
+    `<meta property="og:image:alt" content="${escapeHtml(seo.ogImageAlt)}">`,
     `<meta name="twitter:card" content="summary_large_image">`,
     `<meta name="twitter:title" content="${escapeHtml(seo.ogTitle)}">`,
     `<meta name="twitter:description" content="${escapeHtml(seo.ogDescription)}">`,
+    `<meta name="twitter:image" content="${escapeHtml(seo.ogImage)}">`,
+    `<meta name="twitter:image:alt" content="${escapeHtml(seo.ogImageAlt)}">`,
   ];
+
+  // Geo meta — only when the payload has them. Treated as defensive
+  // (only emit non-empty tags) so other consumers of buildMainHostSeo
+  // (e.g. tests with no coords) don't ship empty content="" tags.
+  if (seo.geoPosition) {
+    lines.push(
+      `<meta name="geo.position" content="${escapeHtml(seo.geoPosition)}">`,
+    );
+    lines.push(`<meta name="ICBM" content="${escapeHtml(seo.geoPosition.replace(";", ", "))}">`);
+  }
+  if (seo.geoPlacename) {
+    lines.push(
+      `<meta name="geo.placename" content="${escapeHtml(seo.geoPlacename)}">`,
+    );
+  }
+  if (seo.geoRegion) {
+    lines.push(
+      `<meta name="geo.region" content="${escapeHtml(seo.geoRegion)}">`,
+    );
+  }
 
   for (const block of seo.jsonLd) {
     // JSON.stringify is safe inside a <script type="application/ld+json">
@@ -177,15 +205,37 @@ export function injectMainHostSeo(
     );
   }
 
-  // Strip default <title> / description / og:* so ours doesn't double up.
+  // Strip default <title> / description / og:* / twitter:* / robots so
+  // ours doesn't double up. (Vite's default index.html doesn't currently
+  // ship twitter/robots tags, but stripping defensively means if someone
+  // adds them later they don't fight ours.)
   let stripped = html.replace(/<title>[\s\S]*?<\/title>/i, "");
   stripped = stripped.replace(
     /<meta\s+name=["']description["'][^>]*>\s*/gi,
     "",
   );
   stripped = stripped.replace(
+    /<meta\s+name=["']robots["'][^>]*>\s*/gi,
+    "",
+  );
+  stripped = stripped.replace(
     /<meta\s+property=["']og:[^"']+["'][^>]*>\s*/gi,
     "",
+  );
+  stripped = stripped.replace(
+    /<meta\s+name=["']twitter:[^"']+["'][^>]*>\s*/gi,
+    "",
+  );
+
+  // Replace the <html lang="…"> attribute so the document advertises
+  // the right locale (en-GB) for our UK-only content. If <html> has
+  // no lang attribute we add one; if it has one we overwrite it.
+  stripped = stripped.replace(
+    /<html\b([^>]*)>/i,
+    (_match, attrs) => {
+      const cleaned = attrs.replace(/\s+lang="[^"]*"/i, "");
+      return `<html lang="${seo.htmlLang}"${cleaned}>`;
+    },
   );
 
   if (stripped.includes("</head>")) {
