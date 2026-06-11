@@ -112,7 +112,14 @@ async function buildAll() {
     entryPoints: ["src/og.tsx"],
     platform: "node",
     bundle: true,
-    format: "esm",
+    // CJS, not ESM. Vercel's Node lambda runtime compiles ESM files
+    // to CommonJS on deploy ("Compiling 'og.js' from ESM to
+    // CommonJS..." in the build log) and that transform breaks our
+    // createRequire/import.meta.url shim, leaving the lambda crashing
+    // at boot with FUNCTION_INVOCATION_FAILED. Outputting CJS
+    // directly skips the conversion step and gives Node a file it
+    // can require() unchanged. Same format we use for api/index.js.
+    format: "cjs",
     target: "node20",
     outfile: "api/og.js",
     jsx: "automatic",
@@ -124,17 +131,7 @@ async function buildAll() {
     // it MUST stay external — node_modules is uploaded alongside the
     // lambda by Vercel's Node runtime.
     external: ["@vercel/og"],
-    // ESM output needs the `.js` import-path suffix to be present on
-    // bundled imports, but with bundle: true the only external is
-    // @vercel/og (resolved by Node's algorithm), so no extra resolver
-    // config is needed.
     logLevel: "info",
-    // Banner avoids the "require is not defined in ES module scope"
-    // crash if @vercel/og's CJS entry tries `require()` from our ESM
-    // file. Node 20+ exposes `createRequire` via this shim.
-    banner: {
-      js: "import { createRequire as _createRequire } from 'node:module'; const require = _createRequire(import.meta.url);",
-    },
   });
 }
 

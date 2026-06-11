@@ -1,4 +1,4 @@
-import { createRequire as _createRequire } from 'node:module'; const require = _createRequire(import.meta.url);
+"use strict";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -7,6 +7,10 @@ var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __commonJS = (cb, mod) => function __require() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+};
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
 };
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
@@ -24,10 +28,11 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
   mod
 ));
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // node_modules/react/cjs/react.production.min.js
 var require_react_production_min = __commonJS({
-  "node_modules/react/cjs/react.production.min.js"(exports) {
+  "node_modules/react/cjs/react.production.min.js"(exports2) {
     "use strict";
     var l = Symbol.for("react.element");
     var n = Symbol.for("react.portal");
@@ -172,7 +177,7 @@ var require_react_production_min = __commonJS({
     function X() {
       throw Error("act(...) is not supported in production builds of React.");
     }
-    exports.Children = { map: S, forEach: function(a, b, e) {
+    exports2.Children = { map: S, forEach: function(a, b, e) {
       S(a, function() {
         b.apply(this, arguments);
       }, e);
@@ -190,15 +195,15 @@ var require_react_production_min = __commonJS({
       if (!O(a)) throw Error("React.Children.only expected to receive a single React element child.");
       return a;
     } };
-    exports.Component = E;
-    exports.Fragment = p;
-    exports.Profiler = r;
-    exports.PureComponent = G;
-    exports.StrictMode = q;
-    exports.Suspense = w;
-    exports.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED = W;
-    exports.act = X;
-    exports.cloneElement = function(a, b, e) {
+    exports2.Component = E;
+    exports2.Fragment = p;
+    exports2.Profiler = r;
+    exports2.PureComponent = G;
+    exports2.StrictMode = q;
+    exports2.Suspense = w;
+    exports2.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED = W;
+    exports2.act = X;
+    exports2.cloneElement = function(a, b, e) {
       if (null === a || void 0 === a) throw Error("React.cloneElement(...): The argument must be a React element, but you passed " + a + ".");
       var d = C({}, a.props), c = a.key, k = a.ref, h = a._owner;
       if (null != b) {
@@ -216,31 +221,31 @@ var require_react_production_min = __commonJS({
       }
       return { $$typeof: l, type: a.type, key: c, ref: k, props: d, _owner: h };
     };
-    exports.createContext = function(a) {
+    exports2.createContext = function(a) {
       a = { $$typeof: u, _currentValue: a, _currentValue2: a, _threadCount: 0, Provider: null, Consumer: null, _defaultValue: null, _globalName: null };
       a.Provider = { $$typeof: t, _context: a };
       return a.Consumer = a;
     };
-    exports.createElement = M;
-    exports.createFactory = function(a) {
+    exports2.createElement = M;
+    exports2.createFactory = function(a) {
       var b = M.bind(null, a);
       b.type = a;
       return b;
     };
-    exports.createRef = function() {
+    exports2.createRef = function() {
       return { current: null };
     };
-    exports.forwardRef = function(a) {
+    exports2.forwardRef = function(a) {
       return { $$typeof: v, render: a };
     };
-    exports.isValidElement = O;
-    exports.lazy = function(a) {
+    exports2.isValidElement = O;
+    exports2.lazy = function(a) {
       return { $$typeof: y, _payload: { _status: -1, _result: a }, _init: T };
     };
-    exports.memo = function(a, b) {
+    exports2.memo = function(a, b) {
       return { $$typeof: x, type: a, compare: void 0 === b ? null : b };
     };
-    exports.startTransition = function(a) {
+    exports2.startTransition = function(a) {
       var b = V.transition;
       V.transition = {};
       try {
@@ -249,70 +254,70 @@ var require_react_production_min = __commonJS({
         V.transition = b;
       }
     };
-    exports.unstable_act = X;
-    exports.useCallback = function(a, b) {
+    exports2.unstable_act = X;
+    exports2.useCallback = function(a, b) {
       return U.current.useCallback(a, b);
     };
-    exports.useContext = function(a) {
+    exports2.useContext = function(a) {
       return U.current.useContext(a);
     };
-    exports.useDebugValue = function() {
+    exports2.useDebugValue = function() {
     };
-    exports.useDeferredValue = function(a) {
+    exports2.useDeferredValue = function(a) {
       return U.current.useDeferredValue(a);
     };
-    exports.useEffect = function(a, b) {
+    exports2.useEffect = function(a, b) {
       return U.current.useEffect(a, b);
     };
-    exports.useId = function() {
+    exports2.useId = function() {
       return U.current.useId();
     };
-    exports.useImperativeHandle = function(a, b, e) {
+    exports2.useImperativeHandle = function(a, b, e) {
       return U.current.useImperativeHandle(a, b, e);
     };
-    exports.useInsertionEffect = function(a, b) {
+    exports2.useInsertionEffect = function(a, b) {
       return U.current.useInsertionEffect(a, b);
     };
-    exports.useLayoutEffect = function(a, b) {
+    exports2.useLayoutEffect = function(a, b) {
       return U.current.useLayoutEffect(a, b);
     };
-    exports.useMemo = function(a, b) {
+    exports2.useMemo = function(a, b) {
       return U.current.useMemo(a, b);
     };
-    exports.useReducer = function(a, b, e) {
+    exports2.useReducer = function(a, b, e) {
       return U.current.useReducer(a, b, e);
     };
-    exports.useRef = function(a) {
+    exports2.useRef = function(a) {
       return U.current.useRef(a);
     };
-    exports.useState = function(a) {
+    exports2.useState = function(a) {
       return U.current.useState(a);
     };
-    exports.useSyncExternalStore = function(a, b, e) {
+    exports2.useSyncExternalStore = function(a, b, e) {
       return U.current.useSyncExternalStore(a, b, e);
     };
-    exports.useTransition = function() {
+    exports2.useTransition = function() {
       return U.current.useTransition();
     };
-    exports.version = "18.3.1";
+    exports2.version = "18.3.1";
   }
 });
 
 // node_modules/react/index.js
 var require_react = __commonJS({
-  "node_modules/react/index.js"(exports, module) {
+  "node_modules/react/index.js"(exports2, module2) {
     "use strict";
     if (true) {
-      module.exports = require_react_production_min();
+      module2.exports = require_react_production_min();
     } else {
-      module.exports = null;
+      module2.exports = null;
     }
   }
 });
 
 // node_modules/react/cjs/react-jsx-runtime.production.min.js
 var require_react_jsx_runtime_production_min = __commonJS({
-  "node_modules/react/cjs/react-jsx-runtime.production.min.js"(exports) {
+  "node_modules/react/cjs/react-jsx-runtime.production.min.js"(exports2) {
     "use strict";
     var f = require_react();
     var k = Symbol.for("react.element");
@@ -329,26 +334,31 @@ var require_react_jsx_runtime_production_min = __commonJS({
       if (c && c.defaultProps) for (b in a = c.defaultProps, a) void 0 === d[b] && (d[b] = a[b]);
       return { $$typeof: k, type: c, key: e, ref: h, props: d, _owner: n.current };
     }
-    exports.Fragment = l;
-    exports.jsx = q;
-    exports.jsxs = q;
+    exports2.Fragment = l;
+    exports2.jsx = q;
+    exports2.jsxs = q;
   }
 });
 
 // node_modules/react/jsx-runtime.js
 var require_jsx_runtime = __commonJS({
-  "node_modules/react/jsx-runtime.js"(exports, module) {
+  "node_modules/react/jsx-runtime.js"(exports2, module2) {
     "use strict";
     if (true) {
-      module.exports = require_react_jsx_runtime_production_min();
+      module2.exports = require_react_jsx_runtime_production_min();
     } else {
-      module.exports = null;
+      module2.exports = null;
     }
   }
 });
 
 // src/og.tsx
-import { ImageResponse } from "@vercel/og";
+var og_exports = {};
+__export(og_exports, {
+  GET: () => GET
+});
+module.exports = __toCommonJS(og_exports);
+var import_og = require("@vercel/og");
 
 // shared/og-params.ts
 var OG_MAX_TRADE_LEN = 40;
@@ -407,7 +417,7 @@ async function GET(request) {
   const { trade, area, supply } = parsed;
   const showCount = supply > 0;
   try {
-    return new ImageResponse(
+    return new import_og.ImageResponse(
       /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
         "div",
         {
@@ -588,9 +598,10 @@ async function GET(request) {
     });
   }
 }
-export {
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
   GET
-};
+});
 /*! Bundled license information:
 
 react/cjs/react.production.min.js:
