@@ -88,6 +88,49 @@ async function buildAll() {
     external: externals,
     logLevel: "info",
   });
+
+  // PR-#19-G: bundle the /api/og function ourselves rather than relying
+  // on Vercel's native TSX function auto-build.
+  //
+  // Why: when we ship api/og.tsx as a source TSX file and let Vercel's
+  // platform-side TSX builder handle it, we hit FUNCTION_INVOCATION_FAILED
+  // at runtime (cold-start crash). Vercel's auto-build for non-framework
+  // TSX functions produces a tiny lambda that imports `@vercel/og` at
+  // runtime, but with our buildCommand + outputDirectory overrides it
+  // doesn't reliably resolve the workspace's `../shared/` imports or
+  // even the `@vercel/og` dependency from node_modules. Bundling here
+  // ESM-style with `@vercel/og` external (and node_modules uploaded
+  // alongside the lambda) gives us a deterministic, self-contained
+  // entrypoint.
+  console.log("building /api/og function...");
+  await esbuild({
+    entryPoints: ["api/og.tsx"],
+    platform: "node",
+    bundle: true,
+    format: "esm",
+    target: "node20",
+    outfile: "api/og.js",
+    jsx: "automatic",
+    define: {
+      "process.env.NODE_ENV": '"production"',
+    },
+    // @vercel/og pulls in WASM (yoga.wasm, resvg.wasm) and a font
+    // asset via runtime path resolution against import.meta.url, so
+    // it MUST stay external — node_modules is uploaded alongside the
+    // lambda by Vercel's Node runtime.
+    external: ["@vercel/og"],
+    // ESM output needs the `.js` import-path suffix to be present on
+    // bundled imports, but with bundle: true the only external is
+    // @vercel/og (resolved by Node's algorithm), so no extra resolver
+    // config is needed.
+    logLevel: "info",
+    // Banner avoids the "require is not defined in ES module scope"
+    // crash if @vercel/og's CJS entry tries `require()` from our ESM
+    // file. Node 20+ exposes `createRequire` via this shim.
+    banner: {
+      js: "import { createRequire as _createRequire } from 'node:module'; const require = _createRequire(import.meta.url);",
+    },
+  });
 }
 
 buildAll().catch((err) => {

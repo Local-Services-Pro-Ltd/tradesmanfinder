@@ -9,7 +9,7 @@
       "maxDuration": 30,
       "memory": 1024
     },
-    "api/og.tsx": {
+    "api/og.js": {
       "maxDuration": 10
     }
   },
