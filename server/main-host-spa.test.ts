@@ -216,20 +216,30 @@ describe("injectMainHostSeo — escaping", () => {
 // ──────────────────────────────────────────────────────────────────
 
 describe("injectMainHostSeo — PR-#19-F head additions", () => {
-  it("emits og:image, og:image:width/height/alt", () => {
+  it("emits the dynamic og:image at /api/og + a static fallback (PR-#19-G)", () => {
     const out = injectMainHostSeo(RAW_HTML, makePayload());
+    // Dynamic per-page image
+    expect(out).toContain(
+      '<meta property="og:image" content="https://tradesmanfinder.com/api/og?trade=Plumber&amp;area=Manchester&amp;n=3">',
+    );
+    // Static fallback (second og:image tag — crawlers walk to it if the
+    // first 5xx's)
     expect(out).toContain(
       '<meta property="og:image" content="https://tradesmanfinder.com/og-default.png">',
     );
+    // Exactly two og:image tags.
+    const ogImageCount = (out.match(/property="og:image"/g) || []).length;
+    expect(ogImageCount).toBe(2);
     expect(out).toContain('<meta property="og:image:width" content="1200">');
     expect(out).toContain('<meta property="og:image:height" content="630">');
     expect(out).toMatch(/<meta property="og:image:alt" content="[^"]+Manchester[^"]*">/);
   });
 
-  it("emits twitter:image and twitter:image:alt", () => {
+  it("emits twitter:image (dynamic) and twitter:image:alt", () => {
     const out = injectMainHostSeo(RAW_HTML, makePayload());
+    // Twitter only honours one image — we point it at the dynamic render.
     expect(out).toContain(
-      '<meta name="twitter:image" content="https://tradesmanfinder.com/og-default.png">',
+      '<meta name="twitter:image" content="https://tradesmanfinder.com/api/og?trade=Plumber&amp;area=Manchester&amp;n=3">',
     );
     expect(out).toContain('<meta name="twitter:image:alt"');
   });

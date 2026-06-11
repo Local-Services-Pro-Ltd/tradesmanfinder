@@ -8,10 +8,14 @@
     "api/index.js": {
       "maxDuration": 30,
       "memory": 1024
+    },
+    "api/og.tsx": {
+      "maxDuration": 10,
+      "memory": 1024
     }
   },
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index.js" },
+    { "source": "/api/:path((?!og$|og\\?).*)", "destination": "/api/index.js" },
     { "source": "/checkout/return", "destination": "/api/index.js" },
     { "source": "/p/c/(.*)", "destination": "/api/index.js" },
     { "source": "/p/o/(.*)", "destination": "/api/index.js" },
