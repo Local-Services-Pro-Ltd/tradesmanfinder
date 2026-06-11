@@ -3,6 +3,10 @@ import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { createServer } from "node:http";
 import { registerRoutes } from "./routes";
+import { micrositeMiddleware } from "./microsite-middleware";
+import { registerMicrositeRoutes } from "./microsite-routes";
+import { registerMainSiteRoutes } from "./main-sitemap";
+import { registerMicrositeSpa } from "./microsite-spa";
 
 // Mirror the rawBody hook from server/index.ts so the Stripe webhook handler
 // can verify signatures. Without `verify`, express.json() consumes the stream
@@ -29,8 +33,28 @@ function getApp(): Promise<express.Express> {
       );
       app.use(express.urlencoded({ extended: false }));
 
+      // Mini-site host resolution must run before route handlers so /api/*
+      // can read req.microsite for source attribution, and before the per-host
+      // SPA SEO injector can intercept HTML responses.
+      app.use(micrositeMiddleware);
+
       const httpServer = createServer(app);
       await registerRoutes(httpServer, app);
+
+      // Main-host /sitemap.xml + /robots.txt. Must be registered BEFORE
+      // registerMicrositeRoutes so the main-host (req.microsite == null)
+      // check runs first; mini-site hosts fall through via next().
+      registerMainSiteRoutes(app);
+
+      // Per-host sitemap.xml + robots.txt for mini-sites. Registered after the
+      // main API so /api/* takes precedence on every host.
+      registerMicrositeRoutes(app);
+
+      // SEO injector for mini-site hosts. In the Express server (server/index.ts)
+      // this runs before serveStatic; in the Vercel serverless handler there is
+      // no serveStatic (Vercel serves static assets), so this is the last
+      // middleware before the error handler.
+      registerMicrositeSpa(app);
 
       app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
         const status = err.status || err.statusCode || 500;
