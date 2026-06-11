@@ -106,7 +106,53 @@ describe("buildBodyCopy — region phrasing", () => {
     expect(out.paragraphs.join(" ")).toMatch(/England/);
   });
 
-  it("Scotland city includes 'Scotland'", () => {
+  it("resolves Scotland from area slug even when DB region is county-level", () => {
+    // Real-world DB shape: region is 'City of Glasgow G1' not 'Scotland'.
+    const out = buildBodyCopy({
+      category: PLUMBER,
+      area: { slug: "glasgow", name: "Glasgow", region: "City of Glasgow G1" },
+      supplyCount: 5,
+    });
+    expect(out.paragraphs.join(" ")).toMatch(/Scotland/);
+  });
+
+  it("resolves England from area slug even when DB region is county-level", () => {
+    const out = buildBodyCopy({
+      category: PLUMBER,
+      area: { slug: "manchester", name: "Manchester", region: "Greater Manchester M1" },
+      supplyCount: 5,
+    });
+    expect(out.paragraphs.join(" ")).toMatch(/England/);
+  });
+
+  it("resolves Wales from area slug", () => {
+    const out = buildBodyCopy({
+      category: PLUMBER,
+      area: { slug: "cardiff", name: "Cardiff", region: "South Glamorgan CF1" },
+      supplyCount: 5,
+    });
+    expect(out.paragraphs.join(" ")).toMatch(/Wales/);
+  });
+
+  it("resolves Northern Ireland from area slug", () => {
+    const out = buildBodyCopy({
+      category: PLUMBER,
+      area: { slug: "belfast", name: "Belfast", region: "County Antrim BT1" },
+      supplyCount: 5,
+    });
+    expect(out.paragraphs.join(" ")).toMatch(/Northern Ireland/);
+  });
+
+  it("falls back to region-string substring match for unknown slug", () => {
+    const out = buildBodyCopy({
+      category: PLUMBER,
+      area: { slug: "some-new-town", name: "Some New Town", region: "West Yorkshire WY1" },
+      supplyCount: 5,
+    });
+    expect(out.paragraphs.join(" ")).toMatch(/England/);
+  });
+
+  it("Scotland city includes 'Scotland' (legacy region=Scotland string)", () => {
     const out = buildBodyCopy({ category: PLUMBER, area: GLASGOW, supplyCount: 5 });
     expect(out.paragraphs.join(" ")).toMatch(/Scotland/);
   });
