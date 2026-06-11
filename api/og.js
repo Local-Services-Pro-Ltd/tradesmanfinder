@@ -347,7 +347,7 @@ var require_jsx_runtime = __commonJS({
   }
 });
 
-// api/og.tsx
+// src/og.tsx
 import { ImageResponse } from "@vercel/og";
 
 // shared/og-params.ts
@@ -382,8 +382,8 @@ function clampSupply(n) {
   return rounded;
 }
 
-// api/og.tsx
-var import_jsx_runtime = __toESM(require_jsx_runtime());
+// src/og.tsx
+var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
 var OG_WIDTH = 1200;
 var OG_HEIGHT = 630;
 var FALLBACK_PATH = "/og-default.png";

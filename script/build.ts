@@ -102,9 +102,14 @@ async function buildAll() {
   // ESM-style with `@vercel/og` external (and node_modules uploaded
   // alongside the lambda) gives us a deterministic, self-contained
   // entrypoint.
+  // Source lives at src/og.tsx (NOT api/og.tsx) so that the .tsx
+  // source and the bundled .js output don't collide as two routes
+  // both wanting to be /api/og — Vercel rejects that with
+  // `conflicting_file_path`. By keeping the source outside api/ we
+  // get a clean one-route-per-output mapping.
   console.log("building /api/og function...");
   await esbuild({
-    entryPoints: ["api/og.tsx"],
+    entryPoints: ["src/og.tsx"],
     platform: "node",
     bundle: true,
     format: "esm",
