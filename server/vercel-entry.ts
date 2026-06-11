@@ -6,6 +6,7 @@ import { registerRoutes } from "./routes";
 import { micrositeMiddleware } from "./microsite-middleware";
 import { registerMicrositeRoutes } from "./microsite-routes";
 import { registerMainSiteRoutes } from "./main-sitemap";
+import { registerMainHostSpa } from "./main-host-spa";
 import { registerMicrositeSpa } from "./microsite-spa";
 
 // Mirror the rawBody hook from server/index.ts so the Stripe webhook handler
@@ -50,10 +51,12 @@ function getApp(): Promise<express.Express> {
       // main API so /api/* takes precedence on every host.
       registerMicrositeRoutes(app);
 
-      // SEO injector for mini-site hosts. In the Express server (server/index.ts)
-      // this runs before serveStatic; in the Vercel serverless handler there is
-      // no serveStatic (Vercel serves static assets), so this is the last
-      // middleware before the error handler.
+      // SEO injectors for both host families. In the Express server
+      // (server/index.ts) these run before serveStatic; in the Vercel
+      // serverless handler there is no serveStatic (Vercel serves static
+      // assets directly), so these are the last middlewares before the
+      // error handler.
+      registerMainHostSpa(app);
       registerMicrositeSpa(app);
 
       app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
