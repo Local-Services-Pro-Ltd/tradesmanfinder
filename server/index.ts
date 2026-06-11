@@ -5,6 +5,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { micrositeMiddleware } from "./microsite-middleware";
 import { registerMicrositeRoutes } from "./microsite-routes";
+import { registerMainSiteRoutes } from "./main-sitemap";
 import { registerMicrositeSpa } from "./microsite-spa";
 import { createServer } from "node:http";
 
@@ -71,6 +72,11 @@ app.use((req, res, next) => {
 
 (async () => {
   await registerRoutes(httpServer, app);
+
+  // Main-host /sitemap.xml + /robots.txt. Must be registered BEFORE
+  // registerMicrositeRoutes so the main-host (req.microsite == null)
+  // check runs first; mini-site hosts fall through via next().
+  registerMainSiteRoutes(app);
 
   // Per-host sitemap.xml + robots.txt for mini-sites. Registered after the
   // main API so /api/* takes precedence on every host.
