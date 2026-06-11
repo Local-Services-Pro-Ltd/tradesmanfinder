@@ -6,6 +6,7 @@ import { serveStatic } from "./static";
 import { micrositeMiddleware } from "./microsite-middleware";
 import { registerMicrositeRoutes } from "./microsite-routes";
 import { registerMainSiteRoutes } from "./main-sitemap";
+import { registerMainHostSpa } from "./main-host-spa";
 import { registerMicrositeSpa } from "./microsite-spa";
 import { createServer } from "node:http";
 
@@ -99,8 +100,11 @@ app.use((req, res, next) => {
   // setting up all the other routes so the catch-all route
   // doesn't interfere with the other routes
   if (process.env.NODE_ENV === "production") {
-    // SEO injector for mini-site hosts must run BEFORE serveStatic's
-    // catch-all, otherwise the un-injected index.html wins.
+    // SEO injectors for both host families must run BEFORE serveStatic's
+    // catch-all, otherwise the un-injected index.html wins. Order between
+    // the two doesn't matter — each gates on req.microsite and falls
+    // through for the other host family.
+    registerMainHostSpa(app);
     registerMicrositeSpa(app);
     serveStatic(app);
   } else {
