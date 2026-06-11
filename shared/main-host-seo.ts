@@ -23,8 +23,18 @@
 export type MainHostSeoInput = {
   /** Resolved DB row for the category — must include id, slug, name. */
   category: { id: number; slug: string; name: string };
-  /** Resolved DB row for the area — must include id, slug, name, region. */
-  area: { id: number; slug: string; name: string; region: string };
+  /**
+   * Resolved DB row for the area. Region is required; latitude/longitude
+   * are optional and only used to emit the (lightweight) geo meta tags.
+   */
+  area: {
+    id: number;
+    slug: string;
+    name: string;
+    region: string;
+    latitude?: number;
+    longitude?: number;
+  };
   /** Public origin for the request (e.g. https://tradesmanfinder.com). */
   origin: string;
   /**
@@ -45,6 +55,23 @@ export type MainHostSeoPayload = {
   ogTitle: string;
   ogDescription: string;
   ogType: "website";
+  /** Absolute URL of the OG/Twitter preview image (1200x630 PNG). */
+  ogImage: string;
+  /** Width/height help Facebook & Twitter render the card without a re-fetch. */
+  ogImageWidth: number;
+  ogImageHeight: number;
+  /** Alt text for the OG image (accessibility + screenreaders that surface OG). */
+  ogImageAlt: string;
+  /** Locale string (e.g. `en_GB`). */
+  ogLocale: string;
+  /** BCP-47 language tag for the <html lang="…"> attribute. */
+  htmlLang: string;
+  /** robots directive — explicit allow-large-image-previews per Google docs. */
+  robots: string;
+  /** Optional geo meta tags — only set when the area has coords. */
+  geoPosition?: string; // e.g. "53.4808;-2.2426"
+  geoPlacename?: string; // e.g. "Manchester"
+  geoRegion?: string; // ISO 3166-2 region; we use GB-ENG as a coarse default.
   /**
    * Array of JSON-LD payloads. We emit multiple separate <script> blocks
    * (one per @type) rather than a single @graph because Google's
@@ -53,6 +80,15 @@ export type MainHostSeoPayload = {
    */
   jsonLd: ReadonlyArray<Record<string, unknown>>;
 };
+
+/**
+ * Path (under the public origin) of the default OG preview image.
+ * Build step copies `client/public/og-default.png` to the root of
+ * dist/public so it is served at `<origin>/og-default.png`.
+ */
+export const DEFAULT_OG_IMAGE_PATH = "/og-default.png";
+export const DEFAULT_OG_IMAGE_WIDTH = 1200;
+export const DEFAULT_OG_IMAGE_HEIGHT = 630;
 
 /**
  * Build the SEO payload for a hyperlocal landing page.
@@ -154,6 +190,17 @@ export function buildMainHostSeo(input: MainHostSeoInput): MainHostSeoPayload {
     ],
   };
 
+  // Geo meta — only when we have real coords. These are a minor SEO
+  // signal (Bing reads them, Google ignores most), but on local-intent
+  // landing pages they don't hurt and help disambiguate similarly-named
+  // areas.
+  const hasCoords =
+    typeof area.latitude === "number" && Number.isFinite(area.latitude) &&
+    typeof area.longitude === "number" && Number.isFinite(area.longitude);
+  const geoPosition = hasCoords
+    ? `${area.latitude!.toFixed(4)};${area.longitude!.toFixed(4)}`
+    : undefined;
+
   return {
     title,
     description,
@@ -161,6 +208,19 @@ export function buildMainHostSeo(input: MainHostSeoInput): MainHostSeoPayload {
     ogTitle: title,
     ogDescription: description,
     ogType: "website",
+    ogImage: `${origin}${DEFAULT_OG_IMAGE_PATH}`,
+    ogImageWidth: DEFAULT_OG_IMAGE_WIDTH,
+    ogImageHeight: DEFAULT_OG_IMAGE_HEIGHT,
+    ogImageAlt: `TradesmanFinder — find a trusted ${tradeLower} in ${areaName}`,
+    ogLocale: "en_GB",
+    htmlLang: "en-GB",
+    // max-image-preview:large is what unlocks the full-width image card
+    // in Google's rich SERP modules. The other defaults are explicit
+    // because some legacy bots assume noindex when robots is absent.
+    robots: "index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1",
+    geoPosition,
+    geoPlacename: hasCoords ? areaName : undefined,
+    geoRegion: hasCoords ? "GB-ENG" : undefined,
     jsonLd: [localBusiness, service, breadcrumb],
   };
 }

@@ -222,3 +222,111 @@ describe("buildMainHostSeo — JSON-LD", () => {
     }
   });
 });
+
+// ──────────────────────────────────────────────────────────────────
+// PR-#19-F — OG/Twitter/locale/robots/geo polish
+// ──────────────────────────────────────────────────────────────────
+
+describe("buildMainHostSeo — OG image", () => {
+  it("emits an absolute og:image URL pointing at /og-default.png on origin", () => {
+    const seo = buildMainHostSeo({
+      category: PLUMBER,
+      area: MANCHESTER,
+      origin: ORIGIN,
+      supplyCount: 3,
+    });
+    expect(seo.ogImage).toBe("https://tradesmanfinder.com/og-default.png");
+  });
+
+  it("declares the OG image dimensions (1200x630)", () => {
+    const seo = buildMainHostSeo({
+      category: PLUMBER,
+      area: MANCHESTER,
+      origin: ORIGIN,
+      supplyCount: 3,
+    });
+    expect(seo.ogImageWidth).toBe(1200);
+    expect(seo.ogImageHeight).toBe(630);
+  });
+
+  it("includes area- and trade-specific alt text", () => {
+    const seo = buildMainHostSeo({
+      category: PLUMBER,
+      area: MANCHESTER,
+      origin: ORIGIN,
+      supplyCount: 3,
+    });
+    expect(seo.ogImageAlt).toContain("plumber");
+    expect(seo.ogImageAlt).toContain("Manchester");
+  });
+});
+
+describe("buildMainHostSeo — locale & robots", () => {
+  it("uses en_GB OpenGraph locale", () => {
+    const seo = buildMainHostSeo({
+      category: PLUMBER,
+      area: MANCHESTER,
+      origin: ORIGIN,
+      supplyCount: 0,
+    });
+    expect(seo.ogLocale).toBe("en_GB");
+  });
+
+  it("uses en-GB BCP-47 html lang tag", () => {
+    const seo = buildMainHostSeo({
+      category: PLUMBER,
+      area: MANCHESTER,
+      origin: ORIGIN,
+      supplyCount: 0,
+    });
+    expect(seo.htmlLang).toBe("en-GB");
+  });
+
+  it("requests large image previews via robots directive", () => {
+    const seo = buildMainHostSeo({
+      category: PLUMBER,
+      area: MANCHESTER,
+      origin: ORIGIN,
+      supplyCount: 0,
+    });
+    expect(seo.robots).toContain("index");
+    expect(seo.robots).toContain("follow");
+    expect(seo.robots).toContain("max-image-preview:large");
+  });
+});
+
+describe("buildMainHostSeo — geo meta", () => {
+  it("emits geo position when lat/lng are present", () => {
+    const seo = buildMainHostSeo({
+      category: PLUMBER,
+      area: { ...MANCHESTER, latitude: 53.4808, longitude: -2.2426 },
+      origin: ORIGIN,
+      supplyCount: 0,
+    });
+    expect(seo.geoPosition).toBe("53.4808;-2.2426");
+    expect(seo.geoPlacename).toBe("Manchester");
+    expect(seo.geoRegion).toBe("GB-ENG");
+  });
+
+  it("omits geo meta when coords are missing", () => {
+    const seo = buildMainHostSeo({
+      category: PLUMBER,
+      area: MANCHESTER, // no lat/lng
+      origin: ORIGIN,
+      supplyCount: 0,
+    });
+    expect(seo.geoPosition).toBeUndefined();
+    expect(seo.geoPlacename).toBeUndefined();
+    expect(seo.geoRegion).toBeUndefined();
+  });
+
+  it("omits geo meta when coords are NaN", () => {
+    const seo = buildMainHostSeo({
+      category: PLUMBER,
+      area: { ...MANCHESTER, latitude: NaN, longitude: NaN },
+      origin: ORIGIN,
+      supplyCount: 0,
+    });
+    expect(seo.geoPosition).toBeUndefined();
+  });
+});
