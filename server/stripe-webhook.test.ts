@@ -549,6 +549,119 @@ describe("handleStripeWebhook — customer.subscription.updated", () => {
       expect.objectContaining({ action: "featured_degraded", tradesmanId: 42 }),
     );
   });
+
+  // PR-D3b: portal-initiated cancel keeps Stripe status=active with
+  // cancel_at_period_end=true until the period elapses. The webhook must
+  // remap that to subscriptionStatus="canceled" so featured-state.ts
+  // returns `lapsing` immediately instead of staying `active` for ~a month.
+  // Incident 2026-06-11: real portal cancel left DB stuck at status=active.
+  it("remaps active + cancel_at_period_end → subscriptionStatus=canceled (lapsing UX)", async () => {
+    constructEvent.mockReturnValue({
+      id: "evt_sub_cap",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub_cap",
+          customer: "cus_x",
+          status: "active",
+          cancel_at_period_end: true,
+          cancel_at: 2_000_000_000,
+          canceled_at: 1_800_000_000,
+          currency: "gbp",
+          current_period_end: 2_000_000_000,
+          metadata: { tradesman_id: "42" },
+          items: { data: [] },
+        },
+      },
+    });
+
+    const res = mockRes();
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      res,
+    );
+
+    expect(res._status).toBe(200);
+    expect(storageMock.updateTradesman).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({
+        subscriptionStatus: "canceled",
+        featuredUntil: 2_000_000_000_000,
+      }),
+    );
+    expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "featured_degraded",
+        tradesmanId: 42,
+        notes: expect.stringContaining("resolved=canceled"),
+      }),
+    );
+  });
+
+  // Same remapping applies to trialing subscriptions — a user who cancels
+  // during trial should also see lapsing immediately.
+  it("remaps trialing + cancel_at_period_end → subscriptionStatus=canceled", async () => {
+    constructEvent.mockReturnValue({
+      id: "evt_sub_trial_cap",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub_trial_cap",
+          customer: "cus_x",
+          status: "trialing",
+          cancel_at_period_end: true,
+          currency: "gbp",
+          current_period_end: 2_000_000_000,
+          metadata: { tradesman_id: "42" },
+          items: { data: [] },
+        },
+      },
+    });
+
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      mockRes(),
+    );
+
+    expect(storageMock.updateTradesman).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({ subscriptionStatus: "canceled" }),
+    );
+  });
+
+  // Defensive: cancel_at_period_end=false must keep status verbatim.
+  // Guards against an overzealous remap that swallows the active state.
+  it("keeps status=active verbatim when cancel_at_period_end=false", async () => {
+    constructEvent.mockReturnValue({
+      id: "evt_sub_active_no_cap",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub_active_no_cap",
+          customer: "cus_x",
+          status: "active",
+          cancel_at_period_end: false,
+          currency: "gbp",
+          current_period_end: 2_000_000_000,
+          metadata: { tradesman_id: "42" },
+          items: { data: [] },
+        },
+      },
+    });
+
+    await handleStripeWebhook(
+      mockReq({ rawBody: Buffer.from("{}"), signature: "sig" }),
+      mockRes(),
+    );
+
+    expect(storageMock.updateTradesman).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({ subscriptionStatus: "active" }),
+    );
+    expect(storageMock.createPaymentsLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "featured_extended", tradesmanId: 42 }),
+    );
+  });
 });
 
 describe("handleStripeWebhook — customer.subscription.deleted", () => {

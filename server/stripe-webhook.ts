@@ -275,6 +275,36 @@ function periodEndMs(sub: Stripe.Subscription): number | null {
 }
 
 /**
+ * Map Stripe's subscription state onto our product's `subscriptionStatus`.
+ *
+ * Stripe represents a portal-initiated "cancel at period end" as
+ * `{ status: 'active', cancel_at_period_end: true }` until the period ends,
+ * at which point it fires `subscription.deleted` and flips status to
+ * 'canceled'. Mirroring Stripe's status verbatim would leave the dashboard
+ * stuck in the green "active" state for the entire paid-through window
+ * (up to ~a month) even after the user cancels, which is the opposite of
+ * what the `lapsing` UX in shared/featured-state.ts is for.
+ *
+ * Treat customer intent-to-cancel as the product-level signal: when
+ * cancel_at_period_end is true and Stripe still reports a paid state,
+ * record "canceled" so featured-state.ts's `lapsing` branch fires.
+ * `featuredUntil` is still set from the period end, so the user retains
+ * Featured placement through the paid window.
+ *
+ * Incident 2026-06-11 (PR-D3b): portal cancel left DB in subscriptionStatus=active
+ * because we mirrored Stripe verbatim. See shared/featured-state.ts for the
+ * UX states this drives.
+ */
+function resolveSubscriptionStatus(sub: Stripe.Subscription): string {
+  const cancelAtPeriodEnd =
+    (sub as unknown as { cancel_at_period_end?: boolean }).cancel_at_period_end === true;
+  if (cancelAtPeriodEnd && (sub.status === "active" || sub.status === "trialing")) {
+    return "canceled";
+  }
+  return sub.status;
+}
+
+/**
  * Try every reasonable hook to attribute a subscription event back to a
  * tradesman. Order: subscription.metadata.tradesman_id, then DB lookup by
  * subscription id, then by customer id. Returns the resolved subscription
@@ -349,7 +379,7 @@ async function handleFeaturedCheckoutCompleted(
   const subId =
     sub?.id ?? (typeof session.subscription === "string" ? session.subscription : null);
   const featuredUntil = sub ? periodEndMs(sub) : null;
-  const status = sub?.status ?? "active";
+  const status = sub ? resolveSubscriptionStatus(sub) : "active";
 
   const patch: Record<string, unknown> = { subscriptionStatus: status };
   if (customerId) patch.stripeCustomerId = customerId;
@@ -431,7 +461,7 @@ async function handleInvoicePaid(event: Stripe.Event): Promise<void> {
   }
 
   const featuredUntil = sub ? periodEndMs(sub) : null;
-  const status = sub?.status ?? "active";
+  const status = sub ? resolveSubscriptionStatus(sub) : "active";
   const patch: Record<string, unknown> = { subscriptionStatus: status };
   if (featuredUntil) patch.featuredUntil = featuredUntil;
   if (sub?.id) patch.stripeSubscriptionId = sub.id;
@@ -482,7 +512,8 @@ async function handleSubscriptionUpdated(event: Stripe.Event): Promise<void> {
   }
 
   const featuredUntil = periodEndMs(sub);
-  const patch: Record<string, unknown> = { subscriptionStatus: sub.status };
+  const resolvedStatus = resolveSubscriptionStatus(sub);
+  const patch: Record<string, unknown> = { subscriptionStatus: resolvedStatus };
   if (featuredUntil) patch.featuredUntil = featuredUntil;
   await storage.updateTradesman(
     tradesmanId,
@@ -490,14 +521,19 @@ async function handleSubscriptionUpdated(event: Stripe.Event): Promise<void> {
   );
 
   // past_due is the dunning trigger — surface in action name so admin filters
-  // on payments_log.action catch the transition immediately.
-  const action = sub.status === "past_due" ? "featured_degraded" : "featured_extended";
+  // on payments_log.action catch the transition immediately. Treat
+  // cancel-at-period-end (resolved to "canceled") as a degrade signal too so
+  // ops can spot churn intent without filtering on raw cancel_at flags.
+  const action =
+    resolvedStatus === "past_due" || resolvedStatus === "canceled"
+      ? "featured_degraded"
+      : "featured_extended";
   await storage.createPaymentsLog({
     ...baseLog,
     tradesmanId,
     action,
     creditsDelta: 0,
-    notes: `subscription.updated → status=${sub.status}; featuredUntil=${featuredUntil ?? "unchanged"}`,
+    notes: `subscription.updated → status=${sub.status} (resolved=${resolvedStatus}); featuredUntil=${featuredUntil ?? "unchanged"}`,
   });
 }
 
