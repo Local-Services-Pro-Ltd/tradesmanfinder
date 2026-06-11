@@ -74,6 +74,23 @@ function AppRouter() {
       <Route path="/terms" component={Terms} />
       <Route path="/privacy" component={Privacy} />
       <Route path="/faq" component={Faq} />
+      {/*
+        Canonical SEO landing-page URL: /{categorySlug}-in-{areaSlug}
+        e.g. /plumber-in-manchester, /electrician-in-newcastle-upon-tyne.
+
+        Why a regex rather than "/:catSlug-in-:areaSlug":
+        wouter's path-to-regexp treats hyphens as part of the param name,
+        so the string form collides with /sign-in, /post-a-job, etc.
+        The regex below requires "-in-" with at least one char on each
+        side, so unrelated single-word routes never match. The component
+        re-parses the segment via parseFlatHyperlocalSlug().
+
+        Placed before NotFound so genuine /{cat}-in-{area} URLs render
+        the page, and everything else (typos, removed slugs) still 404s
+        after Hyperlocal's own "category/area not found" branch handles
+        unknown taxonomy gracefully.
+      */}
+      <Route path={/^\/[^/]+-in-[^/]+$/} component={Hyperlocal} />
       <Route component={NotFound} />
     </Switch>
   );

@@ -37,6 +37,7 @@
  */
 
 import { SEO_CITY_POPULATION, DEFAULT_LONDON_AREA_POPULATION } from "./seo-cities";
+import { buildFlatHyperlocalPath } from "./hyperlocal-slug";
 
 /** Minimal area shape the scorer needs. Compatible with `areas` table. */
 export interface SeoArea {
@@ -159,7 +160,7 @@ export function buildSeoRouteManifest(
 
       const population = populationForArea(area.slug);
       routes.push({
-        path: `/${category.slug}-in-${area.slug}`,
+        path: buildFlatHyperlocalPath(category.slug, area.slug),
         categorySlug: category.slug,
         categoryName: category.name,
         areaSlug: area.slug,
