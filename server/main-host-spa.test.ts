@@ -35,6 +35,7 @@ vi.mock("./storage", () => ({
 import {
   injectMainHostSeo,
   injectMainHostCrosslinks,
+  injectMainHostBodyCopy,
 } from "./main-host-spa";
 import { buildMainHostSeo } from "../shared/main-host-seo";
 import type { MainHostCrosslinks } from "../shared/main-host-crosslinks";
@@ -425,6 +426,90 @@ describe("injectMainHostCrosslinks — escaping", () => {
     });
     expect(out).not.toContain("<script>alert(1)</script>");
     expect(out).not.toContain('/x"><script>');
+    expect(out).toContain("&lt;script&gt;");
+  });
+});
+
+const SAMPLE_BODY = {
+  paragraphs: [
+    "Looking for a trusted plumber in Manchester? TradesmanFinder connects homeowners in England with vetted local tradespeople.",
+    "We currently list 5 plumbers serving Manchester and the surrounding postcodes.",
+    "Posting a job is free for homeowners.",
+  ],
+  wordCount: 30,
+};
+
+describe("injectMainHostBodyCopy — first injection", () => {
+  it("inserts the marker-bracketed block before </body>", () => {
+    const out = injectMainHostBodyCopy(RAW_HTML, SAMPLE_BODY);
+    const startIdx = out.indexOf("<!-- main-host-body:start -->");
+    const endIdx = out.indexOf("<!-- main-host-body:end -->");
+    const bodyCloseIdx = out.indexOf("</body>");
+    expect(startIdx).toBeGreaterThan(0);
+    expect(endIdx).toBeGreaterThan(startIdx);
+    expect(endIdx).toBeLessThan(bodyCloseIdx);
+  });
+
+  it("renders one <p> per paragraph", () => {
+    const out = injectMainHostBodyCopy(RAW_HTML, SAMPLE_BODY);
+    const pCount = (out.match(/<p>/g) || []).length;
+    expect(pCount).toBe(3);
+  });
+
+  it("marks the SSR block with data-server-body for client de-dup", () => {
+    const out = injectMainHostBodyCopy(RAW_HTML, SAMPLE_BODY);
+    expect(out).toContain('data-server-body="true"');
+  });
+
+  it("uses a <section> with hidden attribute for SSR-only visibility", () => {
+    const out = injectMainHostBodyCopy(RAW_HTML, SAMPLE_BODY);
+    expect(out).toMatch(/<section[^>]*data-server-body="true"[^>]*hidden/);
+  });
+});
+
+describe("injectMainHostBodyCopy — idempotency", () => {
+  it("re-injecting replaces the existing block rather than duplicating", () => {
+    const first = injectMainHostBodyCopy(RAW_HTML, SAMPLE_BODY);
+    const second = injectMainHostBodyCopy(first, {
+      paragraphs: ["Brand new paragraph one.", "Brand new paragraph two."],
+      wordCount: 6,
+    });
+    const startCount = (second.match(/main-host-body:start/g) || []).length;
+    const endCount = (second.match(/main-host-body:end/g) || []).length;
+    expect(startCount).toBe(1);
+    expect(endCount).toBe(1);
+    expect(second).not.toContain("Looking for a trusted plumber");
+    expect(second).toContain("Brand new paragraph one.");
+  });
+
+  it("strips any previous block when given empty paragraphs", () => {
+    const first = injectMainHostBodyCopy(RAW_HTML, SAMPLE_BODY);
+    const second = injectMainHostBodyCopy(first, {
+      paragraphs: [],
+      wordCount: 0,
+    });
+    expect(second).not.toContain("main-host-body:start");
+    expect(second).not.toContain("Looking for a trusted plumber");
+  });
+});
+
+describe("injectMainHostBodyCopy — empty input", () => {
+  it("returns the HTML unchanged when paragraphs are empty", () => {
+    const out = injectMainHostBodyCopy(RAW_HTML, {
+      paragraphs: [],
+      wordCount: 0,
+    });
+    expect(out).toBe(RAW_HTML);
+  });
+});
+
+describe("injectMainHostBodyCopy — escaping", () => {
+  it("HTML-escapes hostile paragraph content", () => {
+    const out = injectMainHostBodyCopy(RAW_HTML, {
+      paragraphs: ["<script>alert(1)</script>", "Safe paragraph."],
+      wordCount: 4,
+    });
+    expect(out).not.toContain("<script>alert(1)</script>");
     expect(out).toContain("&lt;script&gt;");
   });
 });
