@@ -131,6 +131,17 @@ async function buildAll() {
     // it MUST stay external — node_modules is uploaded alongside the
     // lambda by Vercel's Node runtime.
     external: ["@vercel/og"],
+    // Vercel's classic Node serverless function runtime expects
+    // `module.exports` to BE the request handler `(req, res) => void`,
+    // not an object of named exports. esbuild's CJS output puts our
+    // handler at `module.exports.default`, which makes Vercel return
+    // 405 Method Not Allowed for every request. This footer rebinds
+    // module.exports to the default-export handler while preserving
+    // the named GET export as a property for callers that might want
+    // the Web-API form (e.g. local tests).
+    footer: {
+      js: "if (module.exports && typeof module.exports.default === 'function') { var __og_named = module.exports; module.exports = module.exports.default; module.exports.GET = __og_named.GET; }",
+    },
     logLevel: "info",
   });
 }

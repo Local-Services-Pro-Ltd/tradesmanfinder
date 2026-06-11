@@ -355,7 +355,8 @@ var require_jsx_runtime = __commonJS({
 // src/og.tsx
 var og_exports = {};
 __export(og_exports, {
-  GET: () => GET
+  GET: () => GET,
+  default: () => handler
 });
 module.exports = __toCommonJS(og_exports);
 
@@ -406,6 +407,36 @@ ${msg}`, {
       status: 500,
       headers: { "Content-Type": "text/plain; charset=utf-8" }
     });
+  }
+}
+async function handler(req, res) {
+  try {
+    const proto = req.headers["x-forwarded-proto"] || "https";
+    const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
+    const url = `${proto}://${host}${req.url}`;
+    const request = new Request(url, { method: req.method || "GET" });
+    const response = await GET(request);
+    res.statusCode = response.status;
+    response.headers.forEach((value, key) => {
+      res.setHeader(key, value);
+    });
+    const body = response.body;
+    if (!body) {
+      res.end();
+      return;
+    }
+    const reader = body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    res.end();
+  } catch (err) {
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.end(`OG_ADAPTER_ERROR
+${err?.stack || err?.message || String(err)}`);
   }
 }
 async function handle(request) {
@@ -476,6 +507,7 @@ async function handle(request) {
                     "div",
                     {
                       style: {
+                        display: "flex",
                         fontSize: "32px",
                         fontWeight: 800,
                         letterSpacing: "-0.5px"
@@ -495,25 +527,24 @@ async function handle(request) {
                   gap: "12px"
                 },
                 children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
                     "div",
                     {
                       style: {
+                        display: "flex",
                         fontSize: "44px",
                         fontWeight: 500,
                         color: "#B8C9DC",
                         lineHeight: 1.1
                       },
-                      children: [
-                        trade,
-                        "s in"
-                      ]
+                      children: `${trade}s in`
                     }
                   ),
                   /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
                     "div",
                     {
                       style: {
+                        display: "flex",
                         fontSize: "96px",
                         fontWeight: 900,
                         lineHeight: 1.05,
@@ -547,12 +578,8 @@ async function handle(request) {
                             gap: "12px"
                           },
                           children: [
-                            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { style: { color: "#F38B1C" }, children: "\u2713" }),
-                            /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
-                              supply,
-                              " verified local pro",
-                              supply === 1 ? "" : "s"
-                            ] })
+                            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { display: "flex", color: "#F38B1C" }, children: "\u2713" }),
+                            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { display: "flex" }, children: `${supply} verified local pro${supply === 1 ? "" : "s"}` })
                           ]
                         }
                       )
@@ -573,14 +600,8 @@ async function handle(request) {
                   fontWeight: 600
                 },
                 children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { children: "tradesmanfinder.com" }),
-                  /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { display: "flex", gap: "20px" }, children: [
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Verified" }),
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { style: { color: "#F38B1C" }, children: "\xB7" }),
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Reviewed" }),
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { style: { color: "#F38B1C" }, children: "\xB7" }),
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Free quotes" })
-                  ] })
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { display: "flex" }, children: "tradesmanfinder.com" }),
+                  /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { display: "flex" }, children: "Verified \xB7 Reviewed \xB7 Free quotes" })
                 ]
               }
             )
@@ -638,3 +659,4 @@ react/cjs/react-jsx-runtime.production.min.js:
    * LICENSE file in the root directory of this source tree.
    *)
 */
+if (module.exports && typeof module.exports.default === 'function') { var __og_named = module.exports; module.exports = module.exports.default; module.exports.GET = __og_named.GET; }

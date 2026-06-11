@@ -73,6 +73,47 @@ export async function GET(request: Request): Promise<Response> {
   }
 }
 
+// Legacy Node serverless function adapter for Vercel.
+//
+// When we pre-bundle api/og.js ourselves (instead of letting Vercel
+// auto-build api/og.tsx), Vercel treats it as a classic Node lambda
+// and expects `module.exports = (req, res) => void`. A named GET
+// export alone returns 405. So we ship a default handler that adapts
+// Node's IncomingMessage -> Web Request, calls GET(), and streams the
+// Response back to res.
+export default async function handler(
+  req: any,
+  res: any,
+): Promise<void> {
+  try {
+    const proto = (req.headers["x-forwarded-proto"] as string) || "https";
+    const host = (req.headers["x-forwarded-host"] as string) || (req.headers.host as string) || "localhost";
+    const url = `${proto}://${host}${req.url}`;
+    const request = new Request(url, { method: req.method || "GET" });
+    const response = await GET(request);
+    res.statusCode = response.status;
+    response.headers.forEach((value: string, key: string) => {
+      res.setHeader(key, value);
+    });
+    const body = response.body;
+    if (!body) {
+      res.end();
+      return;
+    }
+    const reader = body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    res.end();
+  } catch (err: any) {
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.end(`OG_ADAPTER_ERROR\n${err?.stack || err?.message || String(err)}`);
+  }
+}
+
 async function handle(request: Request): Promise<Response> {
   // Dynamic import so we can catch a load-time crash above.
   const { ImageResponse } = await import("@vercel/og");
@@ -165,6 +206,7 @@ async function handle(request: Request): Promise<Response> {
             </div>
             <div
               style={{
+                display: "flex",
                 fontSize: "32px",
                 fontWeight: 800,
                 letterSpacing: "-0.5px",
@@ -184,16 +226,18 @@ async function handle(request: Request): Promise<Response> {
           >
             <div
               style={{
+                display: "flex",
                 fontSize: "44px",
                 fontWeight: 500,
                 color: "#B8C9DC",
                 lineHeight: 1.1,
               }}
             >
-              {trade}s in
+              {`${trade}s in`}
             </div>
             <div
               style={{
+                display: "flex",
                 fontSize: "96px",
                 fontWeight: 900,
                 lineHeight: 1.05,
@@ -226,16 +270,19 @@ async function handle(request: Request): Promise<Response> {
                     gap: "12px",
                   }}
                 >
-                  <span style={{ color: "#F38B1C" }}>✓</span>
-                  <span>
-                    {supply} verified local pro{supply === 1 ? "" : "s"}
-                  </span>
+                  <div style={{ display: "flex", color: "#F38B1C" }}>✓</div>
+                  <div style={{ display: "flex" }}>
+                    {`${supply} verified local pro${supply === 1 ? "" : "s"}`}
+                  </div>
                 </div>
               </div>
             )}
           </div>
 
-          {/* Footer — domain */}
+          {/* Footer — domain. Satori requires every multi-child
+              container to declare display:flex explicitly, so we
+              keep this row simple: two siblings, each a flex div
+              containing a single text node. */}
           <div
             style={{
               display: "flex",
@@ -246,13 +293,9 @@ async function handle(request: Request): Promise<Response> {
               fontWeight: 600,
             }}
           >
-            <div>tradesmanfinder.com</div>
-            <div style={{ display: "flex", gap: "20px" }}>
-              <span>Verified</span>
-              <span style={{ color: "#F38B1C" }}>·</span>
-              <span>Reviewed</span>
-              <span style={{ color: "#F38B1C" }}>·</span>
-              <span>Free quotes</span>
+            <div style={{ display: "flex" }}>tradesmanfinder.com</div>
+            <div style={{ display: "flex" }}>
+              Verified · Reviewed · Free quotes
             </div>
           </div>
         </div>
