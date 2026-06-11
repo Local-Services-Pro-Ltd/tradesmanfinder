@@ -61,6 +61,36 @@ describe("pickNearbyAreas", () => {
     expect(pickNearbyAreas(solo, [solo], 5)).toEqual([]);
   });
 
+  it("returns [] when the input area has missing/NaN coordinates (fail closed)", () => {
+    // Simulates the regression we shipped: a caller dropped lat/lng
+    // from the narrowed area type, every distance was NaN, and the
+    // sort silently kept insertion order — producing 170-mile-away
+    // 'nearby' cities.
+    const badArea = {
+      id: 999,
+      slug: "bad",
+      name: "Bad",
+      region: "r",
+      latitude: NaN,
+      longitude: NaN,
+    } as CrosslinkArea;
+    expect(pickNearbyAreas(badArea, AREAS, 5)).toEqual([]);
+  });
+
+  it("skips candidate areas with missing coordinates", () => {
+    const manchester = AREAS.find((a) => a.slug === "manchester")!;
+    const bad = {
+      id: 100,
+      slug: "bad",
+      name: "Bad",
+      region: "r",
+      latitude: undefined as unknown as number,
+      longitude: undefined as unknown as number,
+    } as CrosslinkArea;
+    const result = pickNearbyAreas(manchester, [...AREAS, bad], 10);
+    expect(result.find((a) => a.id === 100)).toBeUndefined();
+  });
+
   it("breaks ties on id ascending (deterministic)", () => {
     const a: CrosslinkArea = { id: 1, slug: "a", name: "A", region: "r", latitude: 0, longitude: 0 };
     const b: CrosslinkArea = { id: 2, slug: "b", name: "B", region: "r", latitude: 1, longitude: 1 };
