@@ -1,4 +1,4 @@
-import { useRoute, Link } from "wouter";
+import { useRoute, Link, useLocation } from "wouter";
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Layout } from "@/components/layout";
@@ -11,6 +11,10 @@ import {
 } from "@/components/ui/accordion";
 import type { Category, Area, Tradesman } from "@/lib/api-types";
 import { parseJsonArray } from "@/lib/api-types";
+import {
+  parseFlatHyperlocalSlug,
+  buildFlatHyperlocalPath,
+} from "@shared/hyperlocal-slug";
 import { ChevronRight, CheckCircle2, MapPin } from "lucide-react";
 
 // Common jobs by trade for local-flavoured content
@@ -23,10 +27,29 @@ const COMMON_JOBS: Record<string, string[]> = {
 
 function jobsFor(slug?: string) { return COMMON_JOBS[slug || "default"] || COMMON_JOBS.default; }
 
+/**
+ * Resolve (catSlug, areaSlug) from either route pattern:
+ *   - /{catSlug}-in-{areaSlug}            ← canonical (PR-#19-B onwards)
+ *   - /category/{catSlug}/in/{areaSlug}   ← legacy, kept for backlinks
+ */
+function useHyperlocalParams(): { catSlug?: string; areaSlug?: string } {
+  const [location] = useLocation();
+  const [, legacyParams] = useRoute<{ catSlug: string; areaSlug: string }>("/category/:catSlug/in/:areaSlug");
+
+  // Try the canonical flat URL first: /{cat}-in-{area}
+  // (Single segment only — the router regex already enforces this shape.)
+  if (location && !legacyParams) {
+    const segment = location.split("?")[0].replace(/^\/+/, "").replace(/\/+$/, "");
+    if (segment && !segment.includes("/")) {
+      const parsed = parseFlatHyperlocalSlug(segment);
+      if (parsed.catSlug && parsed.areaSlug) return parsed;
+    }
+  }
+  return { catSlug: legacyParams?.catSlug, areaSlug: legacyParams?.areaSlug };
+}
+
 export default function Hyperlocal() {
-  const [, params] = useRoute("/category/:catSlug/in/:areaSlug");
-  const catSlug = params?.catSlug;
-  const areaSlug = params?.areaSlug;
+  const { catSlug, areaSlug } = useHyperlocalParams();
   const { data: categories } = useQuery<Category[]>({ queryKey: ["/api/categories"] });
   const { data: areas } = useQuery<Area[]>({ queryKey: ["/api/areas"] });
   const { data: tradesmen, isLoading } = useQuery<Tradesman[]>({ queryKey: ["/api/tradesmen"] });
@@ -41,9 +64,41 @@ export default function Hyperlocal() {
 
   const h1 = category && area ? `${category.name}s in ${area.name}` : "Local tradesmen";
 
+  // Manage <title> and <link rel="canonical"> so the legacy and canonical
+  // URLs both advertise the SAME canonical (the flat /{cat}-in-{area}
+  // form). Without this, the legacy URL would compete with the new one
+  // for the same intent and dilute ranking signals.
   useEffect(() => {
-    if (category && area) document.title = `${category.name}s in ${area.name} — Reviews & Quotes | TradesmanFinder`;
-    return () => { document.title = "TradesmanFinder — Find a trusted local tradesman"; };
+    if (!category || !area) return;
+    document.title = `${category.name}s in ${area.name} — Reviews & Quotes | TradesmanFinder`;
+
+    const canonicalPath = buildFlatHyperlocalPath(category.slug, area.slug);
+    const canonicalHref =
+      typeof window !== "undefined"
+        ? `${window.location.origin}${canonicalPath}`
+        : canonicalPath;
+
+    let link = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
+    const created = !link;
+    if (!link) {
+      link = document.createElement("link");
+      link.rel = "canonical";
+      document.head.appendChild(link);
+    }
+    const previousHref = link.href;
+    link.href = canonicalHref;
+
+    return () => {
+      document.title = "TradesmanFinder — Find a trusted local tradesman";
+      // If we created the tag, remove it on unmount so other pages don't
+      // inherit a stale canonical. If it was pre-existing (e.g. injected
+      // by the server for a mini-site), restore the previous value.
+      if (created) {
+        link?.parentNode?.removeChild(link);
+      } else if (link) {
+        link.href = previousHref;
+      }
+    };
   }, [category, area]);
 
   const faqs = category && area ? [
