@@ -86,8 +86,19 @@ export function pickNearbyAreas(
   limit: number = DEFAULT_LIMIT,
 ): CrosslinkArea[] {
   if (limit <= 0) return [];
+
+  // Defensive: if the input area or any candidate is missing finite
+  // lat/lng, fail closed rather than silently sort by insertion order.
+  // We learned this the hard way — a caller dropped lat/lng from the
+  // narrowed `area` type and we shipped "nearby cities" that were
+  // 170mi away.
+  const validCoord = (n: number | null | undefined): n is number =>
+    typeof n === "number" && Number.isFinite(n);
+  if (!validCoord(area.latitude) || !validCoord(area.longitude)) return [];
+
   const scored = allAreas
     .filter((a) => a.id !== area.id)
+    .filter((a) => validCoord(a.latitude) && validCoord(a.longitude))
     .map((a) => ({
       area: a,
       dist: haversineMiles(area.latitude, area.longitude, a.latitude, a.longitude),

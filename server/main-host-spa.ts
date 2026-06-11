@@ -355,8 +355,20 @@ export function registerMainHostSpa(app: Express): void {
     // landing page, so we let it fall through to serveStatic — the
     // client renderer will show its own "no results" copy.
     let category: { id: number; slug: string; name: string } | null = null;
+    // Carry lat/lng on `area` so the cross-link builder below can compute
+    // Haversine distance to other areas. Without these fields every
+    // distance is NaN and `pickNearbyAreas` falls back to insertion
+    // order — which silently produced the wrong 'nearby cities' before
+    // this fix. Keep this in sync with shared/main-host-crosslinks.ts:CrosslinkArea.
     let area:
-      | { id: number; slug: string; name: string; region: string }
+      | {
+          id: number;
+          slug: string;
+          name: string;
+          region: string;
+          latitude: number;
+          longitude: number;
+        }
       | null = null;
     let supplyCount = 0;
     try {
@@ -366,7 +378,14 @@ export function registerMainHostSpa(app: Express): void {
       ]);
       if (!cat || !ar) return next();
       category = { id: cat.id, slug: cat.slug, name: cat.name };
-      area = { id: ar.id, slug: ar.slug, name: ar.name, region: ar.region };
+      area = {
+        id: ar.id,
+        slug: ar.slug,
+        name: ar.name,
+        region: ar.region,
+        latitude: ar.latitude,
+        longitude: ar.longitude,
+      };
       // Count once at request time. We could cache, but the entire
       // landing-page HTML response is uncached and DB call cost is
       // dominated by network, not row scan. Revisit if /{cat}-in-{area}
