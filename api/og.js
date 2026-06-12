@@ -401,12 +401,20 @@ async function GET(request) {
   try {
     return await handle(request);
   } catch (err) {
-    const msg = err?.stack || err?.message || String(err);
-    return new Response(`OG_DEBUG_ERROR
-${msg}`, {
-      status: 500,
-      headers: { "Content-Type": "text/plain; charset=utf-8" }
+    console.error("[/api/og] handler error:", err);
+    const fallback = fallbackUrl(request);
+    return new Response(null, {
+      status: 302,
+      headers: { Location: fallback }
     });
+  }
+}
+function fallbackUrl(request) {
+  try {
+    const url = new URL(request.url);
+    return `${url.origin}${FALLBACK_PATH}`;
+  } catch {
+    return FALLBACK_PATH;
   }
 }
 async function handler(req, res) {
@@ -433,10 +441,10 @@ async function handler(req, res) {
     }
     res.end();
   } catch (err) {
-    res.statusCode = 500;
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.end(`OG_ADAPTER_ERROR
-${err?.stack || err?.message || String(err)}`);
+    console.error("[/api/og] adapter error:", err);
+    res.statusCode = 302;
+    res.setHeader("Location", FALLBACK_PATH);
+    res.end();
   }
 }
 async function handle(request) {
