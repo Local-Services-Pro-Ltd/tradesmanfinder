@@ -60,16 +60,42 @@ const OG_HEIGHT = 630;
 // requested URL and doesn't keep hammering this endpoint.
 const FALLBACK_PATH = "/og-default.png";
 
+/**
+ * Web-API style entry. Vercel auto-built `.tsx` functions or Edge
+ * runtimes call this; the Node adapter below also delegates here so
+ * there is a single code path that builds the image.
+ *
+ * Error handling: if anything in the image build throws, we 302 to the
+ * static brand fallback (`/og-default.png`). The outer Node adapter
+ * also has a try/catch so the function never returns a 5xx to the
+ * crawler — broken cards are the worst SEO outcome, fallback is fine.
+ */
 export async function GET(request: Request): Promise<Response> {
-  // DEBUG: surface any error as text/plain so we can read it via curl.
   try {
     return await handle(request);
-  } catch (err: any) {
-    const msg = err?.stack || err?.message || String(err);
-    return new Response(`OG_DEBUG_ERROR\n${msg}`, {
-      status: 500,
-      headers: { "Content-Type": "text/plain; charset=utf-8" },
+  } catch (err) {
+    // Log to the function log so we can still debug regressions in
+    // Vercel's dashboard, but the response body is the safe redirect.
+    console.error("[/api/og] handler error:", err);
+    const fallback = fallbackUrl(request);
+    return new Response(null, {
+      status: 302,
+      headers: { Location: fallback },
     });
+  }
+}
+
+/**
+ * Build the absolute fallback URL. We prefer an absolute URL because
+ * 302 redirects to relative paths get rewritten inconsistently across
+ * crawlers; absolute Location headers are universally honoured.
+ */
+function fallbackUrl(request: Request): string {
+  try {
+    const url = new URL(request.url);
+    return `${url.origin}${FALLBACK_PATH}`;
+  } catch {
+    return FALLBACK_PATH;
   }
 }
 
@@ -107,10 +133,14 @@ export default async function handler(
       res.write(Buffer.from(value));
     }
     res.end();
-  } catch (err: any) {
-    res.statusCode = 500;
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    res.end(`OG_ADAPTER_ERROR\n${err?.stack || err?.message || String(err)}`);
+  } catch (err) {
+    // Last-resort: log + 302 to the static brand fallback. Returning a
+    // 5xx here would break social cards for the whole site if a cold
+    // start ever fails; a redirect to /og-default.png keeps cards working.
+    console.error("[/api/og] adapter error:", err);
+    res.statusCode = 302;
+    res.setHeader("Location", FALLBACK_PATH);
+    res.end();
   }
 }
 
