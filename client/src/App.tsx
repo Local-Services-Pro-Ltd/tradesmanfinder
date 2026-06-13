@@ -15,6 +15,7 @@ import MicrositePage from "@/pages/microsite";
 import TradesmanProfile from "@/pages/tradesman";
 import PostAJob from "@/pages/post-a-job";
 import ForTradesmen from "@/pages/for-tradesmen";
+import FoundingPro from "@/pages/founding-pro";
 import Partners from "@/pages/partners";
 import Join from "@/pages/join";
 import SignIn from "@/pages/sign-in";
@@ -61,6 +62,7 @@ function AppRouter() {
       <Route path="/tradesman/:slug" component={TradesmanProfile} />
       <Route path="/post-a-job" component={PostAJob} />
       <Route path="/for-tradesmen" component={ForTradesmen} />
+      <Route path="/founding-pro" component={FoundingPro} />
       <Route path="/partners" component={Partners} />
       <Route path="/join" component={Join} />
       <Route path="/sign-in" component={SignIn} />
