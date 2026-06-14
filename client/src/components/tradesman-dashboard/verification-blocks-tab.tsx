@@ -1,17 +1,15 @@
 /**
  * VerificationBlocksTab — Manage permanently-blocked homeowner emails.
  *
- * NOTE: There is no GET /api/tradesmen/:id/verification-blocks endpoint in
- * the current backend (PR D). This tab manages local state — blocks you add
- * in this session appear in the list; they are cleared on page reload.
- * A future PR can add a GET endpoint and hydrate the list from the server.
+ * Blocks are loaded from the server on mount and survive page reloads.
  *
  * Endpoints used:
- *   POST   /api/tradesmen/:id/verification-blocks  body: { email, reason? }
+ *   GET    /api/tradesmen/:id/verification-blocks            → { blocks: Block[] }
+ *   POST   /api/tradesmen/:id/verification-blocks            body: { email, reason? }
  *   DELETE /api/tradesmen/:id/verification-blocks/:blockId
  */
-import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,11 +35,31 @@ interface Props {
 
 export function VerificationBlocksTab({ tradesmanId, defaultEmail }: Props) {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const queryKey = ["/api/tradesmen", tradesmanId, "verification-blocks"];
 
-  // Local list — populated by successful POST responses
-  const [blocks, setBlocks] = useState<Block[]>([]);
+  const { data, isLoading, isError } = useQuery<Block[]>({
+    queryKey,
+    queryFn: async () => {
+      const res = await apiRequest(
+        "GET",
+        `/api/tradesmen/${tradesmanId}/verification-blocks`,
+      );
+      const body = (await res.json()) as { blocks: Block[] };
+      return body.blocks ?? [];
+    },
+  });
+
+  const blocks = data ?? [];
+
   const [email, setEmail] = useState(defaultEmail ?? "");
   const [reason, setReason] = useState("");
+
+  // Keep email input in sync if the parent passes a new defaultEmail
+  // (e.g. operator clicks "Also block this email" from the requests tab).
+  useEffect(() => {
+    if (defaultEmail) setEmail(defaultEmail);
+  }, [defaultEmail]);
 
   const addBlock = useMutation({
     mutationFn: async () => {
@@ -55,7 +73,14 @@ export function VerificationBlocksTab({ tradesmanId, defaultEmail }: Props) {
       return res.json() as Promise<Block>;
     },
     onSuccess: (block) => {
-      setBlocks((prev) => [block, ...prev]);
+      // Optimistically prepend, then invalidate to re-sync from server
+      queryClient.setQueryData<Block[]>(queryKey, (prev) => {
+        const existing = prev ?? [];
+        // Avoid dupes if the server normalised the email to one already in the list
+        if (existing.some((b) => b.id === block.id)) return existing;
+        return [block, ...existing];
+      });
+      queryClient.invalidateQueries({ queryKey });
       toast({
         title: "Email blocked",
         description: `${block.homeownerEmail} will no longer be able to request your verification details.`,
@@ -82,7 +107,10 @@ export function VerificationBlocksTab({ tradesmanId, defaultEmail }: Props) {
       return blockId;
     },
     onSuccess: (blockId) => {
-      setBlocks((prev) => prev.filter((b) => b.id !== blockId));
+      queryClient.setQueryData<Block[]>(queryKey, (prev) =>
+        (prev ?? []).filter((b) => b.id !== blockId),
+      );
+      queryClient.invalidateQueries({ queryKey });
       toast({ title: "Block removed" });
     },
     onError: () => {
@@ -156,11 +184,25 @@ export function VerificationBlocksTab({ tradesmanId, defaultEmail }: Props) {
           )}
         </h3>
 
-        {blocks.length === 0 ? (
+        {isLoading ? (
+          <p className="mt-4 text-sm text-muted-foreground" data-testid="blocks-loading">
+            Loading…
+          </p>
+        ) : isError ? (
+          <div
+            className="mt-4 flex items-start gap-2 rounded-md border border-dashed border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive"
+            data-testid="blocks-error"
+          >
+            <Info className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              Could not load your blocked emails. Refresh the page to try again.
+            </span>
+          </div>
+        ) : blocks.length === 0 ? (
           <div className="mt-4 flex items-start gap-2 rounded-md border border-dashed border-border bg-muted/20 p-4 text-sm text-muted-foreground">
             <Info className="mt-0.5 h-4 w-4 shrink-0" />
             <span>
-              No emails blocked this session. Blocks you add above appear here.
+              No emails blocked yet. Blocks you add above will appear here.
             </span>
           </div>
         ) : (
