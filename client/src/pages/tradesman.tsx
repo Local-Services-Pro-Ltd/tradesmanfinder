@@ -15,6 +15,8 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { Tradesman, Category, Area, Review } from "@/lib/api-types";
 import { parseJsonArray, timeAgo } from "@/lib/api-types";
 import { ChevronRight, MapPin, Phone, Mail, Calendar, CheckCircle2, Star } from "lucide-react";
+import { RequestVerificationModal } from "@/components/request-verification-modal";
+import { VerificationProofCard } from "@/components/verification-proof-card";
 
 function RatingHistogram({ reviews }: { reviews: Review[] }) {
   const total = reviews.length || 1;
@@ -30,6 +32,72 @@ function RatingHistogram({ reviews }: { reviews: Review[] }) {
           <span className="w-8 text-right text-muted-foreground">{n}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * VerificationAccessBlock — shows the homeowner's verification access state
+ * on the tradesman public profile. Rendered below the verification chips.
+ */
+function VerificationAccessBlock({ tradesman }: { tradesman: Tradesman }) {
+  const status = tradesman.verificationAccessStatus;
+
+  if (status === "granted" && tradesman.verificationProof) {
+    return (
+      <div className="mt-4">
+        <VerificationProofCard
+          proof={tradesman.verificationProof}
+          expiresAt={tradesman.verificationAccessGrantedUntil}
+        />
+      </div>
+    );
+  }
+
+  if (status === "pending") {
+    return (
+      <div className="mt-4 flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground" data-testid="verification-access-pending">
+        <span className="h-2 w-2 shrink-0 rounded-full bg-amber-400" />
+        Awaiting tradesman response
+      </div>
+    );
+  }
+
+  if (status === "denied") {
+    return (
+      <div className="mt-4 text-sm text-muted-foreground" data-testid="verification-access-denied">
+        The tradesman declined this request.{" "}
+        <RequestVerificationModal
+          tradesmanId={tradesman.id}
+          tradesmanName={tradesman.businessName}
+          trigger={
+            <button type="button" className="text-primary underline underline-offset-2 hover:no-underline">
+              Request again
+            </button>
+          }
+        />
+      </div>
+    );
+  }
+
+  if (status === "revoked") {
+    return (
+      <div className="mt-4 text-sm text-muted-foreground" data-testid="verification-access-revoked">
+        Access was revoked.
+      </div>
+    );
+  }
+
+  // 'none' or undefined — show the request button when tradesman has verifications
+  const hasVerifications = tradesman.insured || tradesman.licensed;
+  if (!hasVerifications) return null;
+
+  return (
+    <div className="mt-4" data-testid="verification-access-none">
+      <RequestVerificationModal
+        tradesmanId={tradesman.id}
+        tradesmanName={tradesman.businessName}
+      />
     </div>
   );
 }
@@ -119,6 +187,9 @@ export default function TradesmanProfile() {
               </div>
 
               <div className="mt-4"><VerificationChips verified={tradesman.verified} insured={tradesman.insured} licensed={tradesman.licensed} verificationSummary={tradesman.verificationSummary} /></div>
+
+              {/* Homeowner verification access block (PR E) */}
+              <VerificationAccessBlock tradesman={tradesman} />
 
               <div className="mt-4 flex flex-wrap gap-2">
                 {cats.map((c) => (
