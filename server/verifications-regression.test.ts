@@ -16,13 +16,15 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { updateTradesmanMock, decideTradesmanVerificationMock, getTradesmanVerificationByIdMock } = vi.hoisted(() => {
+const { updateTradesmanMock, decideTradesmanVerificationMock, getTradesmanVerificationByIdMock, getTradesmanByIdMock, getLatestApprovedVerificationMock } = vi.hoisted(() => {
   process.env.ADMIN_KEY = 'test-secret-key';
   process.env.DATABASE_URL = 'postgres://fake';
   return {
     updateTradesmanMock: vi.fn().mockResolvedValue({ id: 1 }),
     decideTradesmanVerificationMock: vi.fn(),
     getTradesmanVerificationByIdMock: vi.fn(),
+    getTradesmanByIdMock: vi.fn().mockResolvedValue(null),
+    getLatestApprovedVerificationMock: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -42,7 +44,7 @@ vi.mock('./storage', () => ({
     // Mounting stubs (copied from auth-regression.test.ts)
     getCardsByTradesman: vi.fn().mockResolvedValue([]),
     getAllCards: vi.fn().mockResolvedValue([]),
-    getTradesmanById: vi.fn().mockResolvedValue(null),
+    getTradesmanById: getTradesmanByIdMock,
     getTradesmanByEmail: vi.fn().mockResolvedValue(null),
     getTradesmen: vi.fn().mockResolvedValue([]),
     getJobs: vi.fn().mockResolvedValue([]),
@@ -98,7 +100,7 @@ vi.mock('./storage', () => ({
     getTradesmanVerificationById: getTradesmanVerificationByIdMock,
     getPendingTradesmanVerifications: vi.fn().mockResolvedValue([]),
     decideTradesmanVerification: decideTradesmanVerificationMock,
-    getLatestApprovedVerification: vi.fn().mockResolvedValue(undefined),
+    getLatestApprovedVerification: getLatestApprovedVerificationMock,
   },
   db: {},
 }));
@@ -155,6 +157,10 @@ describe('VERIFICATIONS REGRESSION GUARD (PR A)', () => {
     updateTradesmanMock.mockClear();
     decideTradesmanVerificationMock.mockReset();
     getTradesmanVerificationByIdMock.mockReset();
+    getTradesmanByIdMock.mockReset();
+    getTradesmanByIdMock.mockResolvedValue(null);
+    getLatestApprovedVerificationMock.mockReset();
+    getLatestApprovedVerificationMock.mockResolvedValue(undefined);
   });
 
   describe('🔐 Tradesman-facing routes require auth', () => {
@@ -278,6 +284,69 @@ describe('VERIFICATIONS REGRESSION GUARD (PR A)', () => {
       });
       expect(good.status).toBe(200);
       expect(updateTradesmanMock).not.toHaveBeenCalled();
+    });
+
+    it('public profile NEVER exposes filePath; only coverGbp/expiryDate/qualificationType in verificationSummary', async () => {
+      // A tradesman with both insurance & qualification approved.
+      const baseTradesman = {
+        id: 7, businessName: 'Acme Heating', ownerName: 'Acme', slug: 'acme-heating',
+        email: 'a@b.test', phone: '0', tradeId: 1, areaId: 1, postcode: 'M1', bio: 'x',
+        rating: 5, jobsCompleted: 0, responseTime: 'fast', verified: true, insured: true,
+        licensed: true, credits: 0, featuredUntil: null, photoUrl: null, cardStatus: 'none',
+        publishedAt: 1, createdAt: 1, updatedAt: 1,
+      };
+      getTradesmanByIdMock.mockResolvedValue(baseTradesman as any);
+      getLatestApprovedVerificationMock.mockImplementation(async (_id: number, kind: string) => {
+        if (kind === 'insurance') {
+          return {
+            id: 100, tradesmanId: 7, kind: 'insurance',
+            // filePath MUST NOT appear in the API response — verify below.
+            filePath: '7/insurance/SECRET-PATH.pdf',
+            fileMimeType: 'application/pdf', fileSizeBytes: 100, status: 'approved',
+            submittedAt: 1, reviewedAt: 2, reviewedBy: 'admin', reviewerNote: null,
+            qualificationType: null, insuranceCoverGbp: 1_000_000, expiryDate: '2027-01-01',
+          };
+        }
+        if (kind === 'qualification') {
+          return {
+            id: 101, tradesmanId: 7, kind: 'qualification',
+            filePath: '7/qualification/SECRET-PATH.pdf',
+            fileMimeType: 'application/pdf', fileSizeBytes: 100, status: 'approved',
+            submittedAt: 1, reviewedAt: 2, reviewedBy: 'admin', reviewerNote: null,
+            qualificationType: 'Gas Safe', insuranceCoverGbp: null, expiryDate: '2027-06-01',
+          };
+        }
+        return undefined;
+      });
+      const app = await buildApp();
+      const res = await req(app, 'GET', '/api/tradesmen/7');
+      expect(res.status).toBe(200);
+      expect(res.body.verificationSummary).toEqual({
+        insurance: { coverGbp: 1_000_000, expiryDate: '2027-01-01' },
+        qualification: { qualificationType: 'Gas Safe', expiryDate: '2027-06-01' },
+      });
+      // Critical: storage path must NOT leak anywhere in the response payload.
+      expect(JSON.stringify(res.body)).not.toContain('SECRET-PATH');
+      expect(JSON.stringify(res.body)).not.toContain('filePath');
+    });
+
+    it('verificationSummary stays null when tradesman.insured/licensed flags are false', async () => {
+      // Even if storage somehow returned a doc, we never query it because
+      // the boolean flag is the source of truth for whether to enrich.
+      const baseTradesman = {
+        id: 8, businessName: 'Beta Plumbers', ownerName: 'Beta', slug: 'beta-plumbers',
+        email: 'b@b.test', phone: '0', tradeId: 1, areaId: 1, postcode: 'M2', bio: 'x',
+        rating: 5, jobsCompleted: 0, responseTime: 'fast', verified: false, insured: false,
+        licensed: false, credits: 0, featuredUntil: null, photoUrl: null, cardStatus: 'none',
+        publishedAt: 1, createdAt: 1, updatedAt: 1,
+      };
+      getTradesmanByIdMock.mockResolvedValue(baseTradesman as any);
+      const app = await buildApp();
+      const res = await req(app, 'GET', '/api/tradesmen/8');
+      expect(res.status).toBe(200);
+      expect(res.body.verificationSummary).toEqual({ insurance: null, qualification: null });
+      // Skipped the storage call entirely (flags were false).
+      expect(getLatestApprovedVerificationMock).not.toHaveBeenCalled();
     });
 
     it('decide returns 409 when already decided (not pending)', async () => {

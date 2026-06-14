@@ -39,17 +39,45 @@ import {
 
 // Attach a `cardSummary` field to each tradesman so the UI can render badges
 // and the API consumers can know who's suspended/banned.
-async function attachCardSummary<T extends Tradesman>(t: T): Promise<T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[] }> {
+async function attachCardSummary<T extends Tradesman>(t: T): Promise<T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[]; verificationSummary: VerificationPublicSummary }> {
   const cards = await storage.getCardsByTradesman(t.id);
-  return { ...t, cards, cardSummary: summarizeCards(cards) };
+  const verificationSummary = await buildVerificationPublicSummary(t);
+  return { ...t, cards, cardSummary: summarizeCards(cards), verificationSummary };
 }
-async function attachCardSummaryMany<T extends Tradesman>(list: T[]): Promise<(T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[] })[]> {
+async function attachCardSummaryMany<T extends Tradesman>(list: T[]): Promise<(T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[]; verificationSummary: VerificationPublicSummary })[]> {
   // Single batch fetch to avoid N+1
   const all = await storage.getAllCards();
-  return list.map((t) => {
+  // Verification metadata is fetched per-tradesman (one row each); fine for
+  // list pages because most tradesmen don't have approved docs yet. If this
+  // becomes hot we can batch in a single query later.
+  return Promise.all(list.map(async (t) => {
     const cards = all.filter((c) => c.tradesmanId === t.id);
-    return { ...t, cards, cardSummary: summarizeCards(cards) };
-  });
+    const verificationSummary = await buildVerificationPublicSummary(t);
+    return { ...t, cards, cardSummary: summarizeCards(cards), verificationSummary };
+  }));
+}
+
+// What the public profile renders next to the Insured / Licensed chips.
+// We expose only the *factual* fields the admin reviewer approved — cover
+// amount, expiry date, and (for qualifications) the qualification name.
+// We do NOT expose the storage file path here.
+export type VerificationPublicSummary = {
+  insurance: { coverGbp: number | null; expiryDate: string | null } | null;
+  qualification: { qualificationType: string | null; expiryDate: string | null } | null;
+};
+
+async function buildVerificationPublicSummary(t: Tradesman): Promise<VerificationPublicSummary> {
+  const summary: VerificationPublicSummary = { insurance: null, qualification: null };
+  const today = new Date().toISOString().slice(0, 10);
+  if (t.insured) {
+    const v = await storage.getLatestApprovedVerification(t.id, "insurance", today);
+    if (v) summary.insurance = { coverGbp: v.insuranceCoverGbp, expiryDate: v.expiryDate };
+  }
+  if (t.licensed) {
+    const v = await storage.getLatestApprovedVerification(t.id, "qualification", today);
+    if (v) summary.qualification = { qualificationType: v.qualificationType, expiryDate: v.expiryDate };
+  }
+  return summary;
 }
 
 const ADMIN_KEY = process.env.ADMIN_KEY; if (!ADMIN_KEY) throw new Error('ADMIN_KEY environment variable is required');

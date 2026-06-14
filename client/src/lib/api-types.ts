@@ -87,6 +87,36 @@ export interface Tradesman {
   // Attached by the server when card data is loaded:
   cardSummary?: CardSummary;
   cards?: TradesmanCard[];
+  // Attached by attachCardSummary for tradesman GET endpoints. Holds the
+  // factual metadata from the latest *approved + unexpired* verification of
+  // each kind. Null fields mean either (a) no approved doc, or (b) approved
+  // but expired. The storage filePath is NEVER exposed here.
+  verificationSummary?: VerificationPublicSummary;
+}
+
+export interface VerificationPublicSummary {
+  insurance: { coverGbp: number | null; expiryDate: string | null } | null;
+  qualification: { qualificationType: string | null; expiryDate: string | null } | null;
+}
+
+// Mirrors server tradesman_verifications row (admin queue + dashboard list).
+// filePath is included only when the admin is authenticated; the dashboard
+// receives objects with filePath omitted (see server/routes.ts).
+export interface VerificationRecord {
+  id: number;
+  tradesmanId: number;
+  kind: "insurance" | "qualification";
+  filePath?: string;
+  fileMimeType: string;
+  fileSizeBytes: number;
+  qualificationType: string | null;
+  insuranceCoverGbp: number | null;
+  expiryDate: string | null;
+  status: "pending" | "approved" | "rejected";
+  submittedAt: number;
+  reviewedAt: number | null;
+  reviewedBy: string | null;
+  reviewerNote: string | null;
 }
 
 export interface Job {

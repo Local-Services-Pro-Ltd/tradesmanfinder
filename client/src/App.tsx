@@ -23,6 +23,7 @@ import SignIn from "@/pages/sign-in";
 import Dashboard from "@/pages/dashboard";
 import Admin from "@/pages/admin";
 import AdminModeration from "@/pages/admin-moderation";
+import AdminVerifications from "@/pages/admin-verifications";
 import AdminPartners from "@/pages/admin-partners";
 import AdminMicrosites from "@/pages/admin-microsites";
 import { About, Contact, Terms, Privacy, Faq } from "@/pages/static-pages";
@@ -71,6 +72,7 @@ function AppRouter() {
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/admin" component={Admin} />
       <Route path="/admin/moderation" component={AdminModeration} />
+      <Route path="/admin/verifications" component={AdminVerifications} />
       <Route path="/admin/partners" component={AdminPartners} />
       <Route path="/admin/microsites" component={AdminMicrosites} />
       <Route path="/about" component={About} />
