@@ -27,6 +27,7 @@ import AdminVerifications from "@/pages/admin-verifications";
 import AdminPartners from "@/pages/admin-partners";
 import AdminMicrosites from "@/pages/admin-microsites";
 import { About, Contact, Terms, Privacy, Faq } from "@/pages/static-pages";
+import HomeownerVerify from "@/pages/homeowner-verify";
 import { ScrollToTop } from "@/components/scroll-to-top";
 
 // wouter's useHashLocation returns the raw hash as the path (e.g. for
@@ -70,6 +71,7 @@ function AppRouter() {
       <Route path="/join" component={Join} />
       <Route path="/sign-in" component={SignIn} />
       <Route path="/dashboard" component={Dashboard} />
+      <Route path="/homeowner/verify" component={HomeownerVerify} />
       <Route path="/admin" component={Admin} />
       <Route path="/admin/moderation" component={AdminModeration} />
       <Route path="/admin/verifications" component={AdminVerifications} />

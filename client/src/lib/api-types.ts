@@ -92,6 +92,23 @@ export interface Tradesman {
   // each kind. Null fields mean either (a) no approved doc, or (b) approved
   // but expired. The storage filePath is NEVER exposed here.
   verificationSummary?: VerificationPublicSummary;
+  // Added by PR D: homeowner verification access (requires tf_homeowner cookie).
+  verificationAccessStatus?: "none" | "pending" | "granted" | "denied" | "revoked";
+  verificationProof?: VerificationProof;
+  verificationAccessGrantedUntil?: number; // unix ms
+}
+
+export interface VerificationProof {
+  insurance?: {
+    coverGbp: number;
+    expiryDate: string;  // YYYY-MM-DD
+    verifiedAt: string;  // YYYY-MM-DD
+  };
+  qualification?: {
+    qualificationType: string;
+    expiryDate: string;  // YYYY-MM-DD
+    verifiedAt: string;  // YYYY-MM-DD
+  };
 }
 
 export interface VerificationPublicSummary {
