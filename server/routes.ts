@@ -2204,11 +2204,19 @@ res.json(updated);
         const PUBLIC_URL_ENV = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
         const magicLinkUrl = `${PUBLIC_URL_ENV}/api/homeowner/verify?token=${encodeURIComponent(token)}&tradesmanId=${tradesmanId}`;
 
-        sendHomeownerMagicLink({
-          email,
-          magicLinkUrl,
-          tradesmanName: tradesman.businessName,
-        }).catch((err: any) => console.error("[homeowner] sendHomeownerMagicLink failed:", err?.message));
+        // Awaited (not fire-and-forget) so the serverless function doesn't get torn down
+        // before the Resend HTTP call + email_log write complete. The mailer never throws,
+        // it returns {ok:false,error} on failure and we still return 202 to avoid leaking
+        // delivery state to the caller.
+        try {
+          await sendHomeownerMagicLink({
+            email,
+            magicLinkUrl,
+            tradesmanName: tradesman.businessName,
+          });
+        } catch (err: any) {
+          console.error("[homeowner] sendHomeownerMagicLink failed:", err?.message);
+        }
 
         return res.status(202).json({ ok: true, throttle: false });
       } catch (err: any) {
@@ -2244,13 +2252,17 @@ res.json(updated);
       if (tradesman) {
         const PUBLIC_URL_ENV = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
         const dashboardUrl = `${PUBLIC_URL_ENV}/dashboard#verification-requests`;
-        sendVerificationRequestToTradesman({
-          tradesmanEmail: tradesman.email,
-          tradesmanName: tradesman.businessName,
-          tradesmanId: tradesman.id,
-          homeownerEmail: result.email,
-          dashboardUrl,
-        }).catch((err: any) => console.error("[homeowner] sendVerificationRequestToTradesman failed:", err?.message));
+        try {
+          await sendVerificationRequestToTradesman({
+            tradesmanEmail: tradesman.email,
+            tradesmanName: tradesman.businessName,
+            tradesmanId: tradesman.id,
+            homeownerEmail: result.email,
+            dashboardUrl,
+          });
+        } catch (err: any) {
+          console.error("[homeowner] sendVerificationRequestToTradesman failed:", err?.message);
+        }
       }
 
       const PUBLIC_URL_ENV = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
@@ -2386,20 +2398,28 @@ res.json(updated);
 
         if (decision === "granted") {
           const profileUrl = `${PUBLIC_URL_ENV}/tradesman/${tradesmanId}`;
-          sendVerificationAccessGranted({
-            homeownerEmail: existing.homeownerEmail,
-            tradesmanId,
-            tradesmanName: (await storage.getTradesmanById(tradesmanId))?.businessName ?? "The tradesman",
-            profileUrl,
-            expiresAt: updated.grantedUntil!,
-          }).catch((err: any) => console.error("[homeowner] sendVerificationAccessGranted failed:", err?.message));
+          try {
+            await sendVerificationAccessGranted({
+              homeownerEmail: existing.homeownerEmail,
+              tradesmanId,
+              tradesmanName: (await storage.getTradesmanById(tradesmanId))?.businessName ?? "The tradesman",
+              profileUrl,
+              expiresAt: updated.grantedUntil!,
+            });
+          } catch (err: any) {
+            console.error("[homeowner] sendVerificationAccessGranted failed:", err?.message);
+          }
         } else if (decision === "denied") {
-          sendVerificationAccessDenied({
-            homeownerEmail: existing.homeownerEmail,
-            tradesmanId,
-            tradesmanName: (await storage.getTradesmanById(tradesmanId))?.businessName ?? "The tradesman",
-            notes: notes ?? null,
-          }).catch((err: any) => console.error("[homeowner] sendVerificationAccessDenied failed:", err?.message));
+          try {
+            await sendVerificationAccessDenied({
+              homeownerEmail: existing.homeownerEmail,
+              tradesmanId,
+              tradesmanName: (await storage.getTradesmanById(tradesmanId))?.businessName ?? "The tradesman",
+              notes: notes ?? null,
+            });
+          } catch (err: any) {
+            console.error("[homeowner] sendVerificationAccessDenied failed:", err?.message);
+          }
         }
 
         res.json(updated);
