@@ -238,6 +238,7 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
   createBlock(tradesmanId: number, homeownerEmail: string, reason?: string | null): Promise<VerificationAccessBlock>;
   deleteBlock(blockId: number, tradesmanId: number): Promise<void>;
   listBlocks(tradesmanId: number): Promise<VerificationAccessBlock[]>;
+  listVerificationBlocksForTradesman(tradesmanId: number): Promise<VerificationAccessBlock[]>;
 
   // ── rate limiting (PR D) ──
   countAccessRequestsByEmailSince(email: string, sinceMs: number): Promise<number>;
@@ -1140,6 +1141,12 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
   }
 
   async listBlocks(tradesmanId: number): Promise<VerificationAccessBlock[]> {
+    return db.select().from(verificationAccessBlocks)
+      .where(eq(verificationAccessBlocks.tradesmanId, tradesmanId))
+      .orderBy(desc(verificationAccessBlocks.createdAt));
+  }
+
+  async listVerificationBlocksForTradesman(tradesmanId: number): Promise<VerificationAccessBlock[]> {
     return db.select().from(verificationAccessBlocks)
       .where(eq(verificationAccessBlocks.tradesmanId, tradesmanId))
       .orderBy(desc(verificationAccessBlocks.createdAt));

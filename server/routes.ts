@@ -91,7 +91,7 @@ async function buildVerificationProof(t: Tradesman): Promise<VerificationProof |
 async function attachCardSummary<T extends Tradesman>(
   t: T,
   homeownerEmail?: string | null,
-): Promise<T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[]; verificationSummary: VerificationPublicSummary; verificationProof?: VerificationProof; verificationAccessStatus?: string }> {
+): Promise<T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[]; verificationSummary: VerificationPublicSummary; verificationProof?: VerificationProof; verificationAccessStatus?: string; verificationAccessGrantedUntil?: number }> {
   const cards = await storage.getCardsByTradesman(t.id);
   const verificationSummary = await buildVerificationPublicSummary(t);
   const base = { ...t, cards, cardSummary: summarizeCards(cards), verificationSummary };
@@ -109,12 +109,12 @@ async function attachCardSummary<T extends Tradesman>(
   }
 
   const proof = await buildVerificationProof(t);
-  return { ...base, verificationProof: proof, verificationAccessStatus: "granted" };
+  return { ...base, verificationProof: proof, verificationAccessStatus: "granted", verificationAccessGrantedUntil: req_row.grantedUntil! };
 }
 async function attachCardSummaryMany<T extends Tradesman>(
   list: T[],
   homeownerEmail?: string | null,
-): Promise<(T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[]; verificationSummary: VerificationPublicSummary; verificationProof?: VerificationProof; verificationAccessStatus?: string })[]> {
+): Promise<(T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[]; verificationSummary: VerificationPublicSummary; verificationProof?: VerificationProof; verificationAccessStatus?: string; verificationAccessGrantedUntil?: number })[]> {
   // Single batch fetch to avoid N+1
   const all = await storage.getAllCards();
   // Verification metadata is fetched per-tradesman (one row each); fine for
@@ -137,7 +137,7 @@ async function attachCardSummaryMany<T extends Tradesman>(
     }
 
     const proof = await buildVerificationProof(t);
-    return { ...base, verificationProof: proof, verificationAccessStatus: "granted" };
+    return { ...base, verificationProof: proof, verificationAccessStatus: "granted", verificationAccessGrantedUntil: req_row.grantedUntil! };
   }));
 }
 
@@ -2139,6 +2139,7 @@ res.json(updated);
        7. POST /api/tradesmen/:id/verification-requests/:reqId/decide  (requireSelf)
        8. POST /api/tradesmen/:id/verification-blocks  (requireSelf)
        9. DELETE /api/tradesmen/:id/verification-blocks/:blockId  (requireSelf)
+      10. GET  /api/tradesmen/:id/verification-blocks  (requireSelf) → list blocks
      ══════════════════════════════════════════════════════ */
 
   const requestVerifyLinkSchema = z.object({
@@ -2461,6 +2462,22 @@ res.json(updated);
         res.json({ ok: true });
       } catch (err: any) {
         console.error("[verification-blocks/delete] error:", err?.message);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    },
+  );
+
+  // 10. GET /api/tradesmen/:id/verification-blocks  (requireSelf) — list blocks for the dashboard panel
+  app.get(
+    "/api/tradesmen/:id/verification-blocks",
+    requireAuth, requireSelf(),
+    async (req, res) => {
+      try {
+        const tradesmanId = Number(req.params.id);
+        const blocks = await storage.listVerificationBlocksForTradesman(tradesmanId);
+        res.json({ blocks });
+      } catch (err: any) {
+        console.error("[verification-blocks/list] error:", err?.message);
         res.status(500).json({ message: "Internal server error" });
       }
     },
