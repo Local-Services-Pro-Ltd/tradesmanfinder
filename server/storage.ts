@@ -18,6 +18,9 @@ import {
   partnerPlacements,
   partnerEvents,
   partnerInvoices,
+  homeownerSessions,
+  verificationAccessRequests,
+  verificationAccessBlocks,
 } from "@shared/schema";
 import type {
   Category, InsertCategory,
@@ -39,6 +42,9 @@ import type {
   PartnerPlacement, InsertPartnerPlacement,
   PartnerEvent,
   PartnerInvoice, InsertPartnerInvoice,
+  HomeownerSession,
+  VerificationAccessRequest,
+  VerificationAccessBlock,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -207,6 +213,34 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
     kind: VerificationKind,
     nowYmd: string,
   ): Promise<TradesmanVerification | undefined>;
+
+  // ── homeowner sessions (PR D) ──
+  createHomeownerSession(email: string, ip: string | null, ua: string | null): Promise<HomeownerSession>;
+  getHomeownerSessionById(id: string): Promise<HomeownerSession | undefined>;
+  touchHomeownerSession(id: string, patch: { lastSeenAt: number; expiresAt: number }): Promise<HomeownerSession | undefined>;
+  deleteHomeownerSession(id: string): Promise<void>;
+
+  // ── homeowner magic-link issuance (reuses magicLinkTokens, purpose='homeowner_verify_access') ──
+  issueHomeownerMagicLink(email: string, tradesmanId: number, ip: string | null, ua: string | null): Promise<{ token: string; expiresAt: number }>;
+  consumeHomeownerMagicLink(token: string): Promise<{ email: string; tradesmanId: number } | null>;
+
+  // ── verification access requests (PR D) ──
+  createOrRefreshAccessRequest(homeownerEmail: string, tradesmanId: number, ip: string | null, ua: string | null): Promise<VerificationAccessRequest>;
+  listPendingAccessRequestsForTradesman(tradesmanId: number): Promise<VerificationAccessRequest[]>;
+  listAllAccessRequestsForTradesman(tradesmanId: number, limit?: number): Promise<VerificationAccessRequest[]>;
+  getAccessRequestById(id: number): Promise<VerificationAccessRequest | undefined>;
+  decideAccessRequest(id: number, decision: 'granted' | 'denied' | 'revoked', decidedByTradesmanId: number, notes?: string | null): Promise<VerificationAccessRequest>;
+  isAccessGranted(homeownerEmail: string, tradesmanId: number, nowMs: number): Promise<boolean>;
+  getActiveAccessRequest(homeownerEmail: string, tradesmanId: number): Promise<VerificationAccessRequest | undefined>;
+
+  // ── verification access blocks (PR D) ──
+  isBlocked(tradesmanId: number, homeownerEmail: string): Promise<boolean>;
+  createBlock(tradesmanId: number, homeownerEmail: string, reason?: string | null): Promise<VerificationAccessBlock>;
+  deleteBlock(blockId: number, tradesmanId: number): Promise<void>;
+  listBlocks(tradesmanId: number): Promise<VerificationAccessBlock[]>;
+
+  // ── rate limiting (PR D) ──
+  countAccessRequestsByEmailSince(email: string, sinceMs: number): Promise<number>;
 }
 
 const now = () => Date.now();
@@ -861,6 +895,264 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
         .orderBy(desc(tradesmanVerifications.submittedAt))
         .limit(1),
     );
+  }
+
+  /* ─────────────────────────────────────────────
+     HOMEOWNER ACCESS (PR D)
+     ───────────────────────────────────────────── */
+
+  // Homeowner sessions
+  async createHomeownerSession(email: string, ip: string | null, ua: string | null): Promise<HomeownerSession> {
+    const { generateSessionId } = await import("./auth");
+    const { HOMEOWNER_SESSION_TTL_MS } = await import("./homeowner-auth");
+    const id = generateSessionId();
+    const nowMs = now();
+    const [row] = await db.insert(homeownerSessions).values({
+      id,
+      email,
+      createdAt: nowMs,
+      expiresAt: nowMs + HOMEOWNER_SESSION_TTL_MS,
+      lastSeenAt: nowMs,
+      requestIp: ip,
+      requestUserAgent: ua,
+    }).returning();
+    return row;
+  }
+
+  async getHomeownerSessionById(id: string): Promise<HomeownerSession | undefined> {
+    return one(db.select().from(homeownerSessions).where(eq(homeownerSessions.id, id)));
+  }
+
+  async touchHomeownerSession(id: string, patch: { lastSeenAt: number; expiresAt: number }): Promise<HomeownerSession | undefined> {
+    const [row] = await db.update(homeownerSessions)
+      .set({ lastSeenAt: patch.lastSeenAt, expiresAt: patch.expiresAt })
+      .where(eq(homeownerSessions.id, id))
+      .returning();
+    return row;
+  }
+
+  async deleteHomeownerSession(id: string): Promise<void> {
+    await db.delete(homeownerSessions).where(eq(homeownerSessions.id, id));
+  }
+
+  // Homeowner magic links (reuses magicLinkTokens, purpose='homeowner_verify_access')
+  async issueHomeownerMagicLink(
+    email: string,
+    tradesmanId: number,
+    ip: string | null,
+    ua: string | null,
+  ): Promise<{ token: string; expiresAt: number }> {
+    const { generateToken, hashToken } = await import("./auth");
+    const { HOMEOWNER_MAGIC_LINK_TTL_MS } = await import("./homeowner-auth");
+    const token = generateToken();
+    const tokenHash = hashToken(token);
+    const nowMs = now();
+    const expiresAt = nowMs + HOMEOWNER_MAGIC_LINK_TTL_MS;
+    await db.insert(magicLinkTokens).values({
+      tokenHash,
+      email,
+      tradesmanId,
+      purpose: "homeowner_verify_access",
+      expiresAt,
+      createdAt: nowMs,
+      requestIp: ip,
+      requestUserAgent: ua,
+    });
+    return { token, expiresAt };
+  }
+
+  async consumeHomeownerMagicLink(token: string): Promise<{ email: string; tradesmanId: number } | null> {
+    const { hashToken } = await import("./auth");
+    const tokenHash = hashToken(token);
+    const row = await one(
+      db.select().from(magicLinkTokens)
+        .where(and(
+          eq(magicLinkTokens.tokenHash, tokenHash),
+          eq(magicLinkTokens.purpose, "homeowner_verify_access"),
+          isNull(magicLinkTokens.consumedAt),
+          gt(magicLinkTokens.expiresAt, now()),
+        ))
+    );
+    if (!row) return null;
+    await db.update(magicLinkTokens)
+      .set({ consumedAt: now() })
+      .where(eq(magicLinkTokens.id, row.id));
+    if (!row.tradesmanId) return null;
+    return { email: row.email, tradesmanId: row.tradesmanId };
+  }
+
+  // Verification access requests
+  async createOrRefreshAccessRequest(
+    homeownerEmail: string,
+    tradesmanId: number,
+    ip: string | null,
+    ua: string | null,
+  ): Promise<VerificationAccessRequest> {
+    const nowMs = now();
+
+    // Look for the most recent row for this pair
+    const existing = await one(
+      db.select().from(verificationAccessRequests)
+        .where(and(
+          eq(verificationAccessRequests.homeownerEmail, homeownerEmail),
+          eq(verificationAccessRequests.tradesmanId, tradesmanId),
+        ))
+        .orderBy(desc(verificationAccessRequests.requestedAt))
+        .limit(1)
+    );
+
+    if (existing) {
+      // Active grant: no-op
+      if (existing.status === "granted" && existing.grantedUntil && existing.grantedUntil > nowMs) {
+        return existing;
+      }
+      // Pending: bump requested_at to re-notify tradesman
+      if (existing.status === "pending") {
+        const [updated] = await db.update(verificationAccessRequests)
+          .set({ requestedAt: nowMs, requestIp: ip, requestUserAgent: ua })
+          .where(eq(verificationAccessRequests.id, existing.id))
+          .returning();
+        return updated;
+      }
+      // denied / revoked / expired grant: fall through to create new row
+    }
+
+    const [row] = await db.insert(verificationAccessRequests).values({
+      homeownerEmail,
+      tradesmanId,
+      status: "pending",
+      requestedAt: nowMs,
+      requestIp: ip,
+      requestUserAgent: ua,
+    }).returning();
+    return row;
+  }
+
+  async listPendingAccessRequestsForTradesman(tradesmanId: number): Promise<VerificationAccessRequest[]> {
+    return db.select().from(verificationAccessRequests)
+      .where(and(
+        eq(verificationAccessRequests.tradesmanId, tradesmanId),
+        eq(verificationAccessRequests.status, "pending"),
+      ))
+      .orderBy(desc(verificationAccessRequests.requestedAt));
+  }
+
+  async listAllAccessRequestsForTradesman(tradesmanId: number, limit = 50): Promise<VerificationAccessRequest[]> {
+    return db.select().from(verificationAccessRequests)
+      .where(eq(verificationAccessRequests.tradesmanId, tradesmanId))
+      .orderBy(desc(verificationAccessRequests.requestedAt))
+      .limit(limit);
+  }
+
+  async getAccessRequestById(id: number): Promise<VerificationAccessRequest | undefined> {
+    return one(db.select().from(verificationAccessRequests).where(eq(verificationAccessRequests.id, id)));
+  }
+
+  async decideAccessRequest(
+    id: number,
+    decision: "granted" | "denied" | "revoked",
+    decidedByTradesmanId: number,
+    notes?: string | null,
+  ): Promise<VerificationAccessRequest> {
+    const nowMs = now();
+    const { HOMEOWNER_GRANT_TTL_MS } = await import("./homeowner-auth");
+    const patch: Record<string, unknown> = {
+      status: decision,
+      decidedAt: nowMs,
+      decidedByTradesmanId,
+      notes: notes ?? null,
+    };
+    if (decision === "granted") {
+      patch.grantedUntil = nowMs + HOMEOWNER_GRANT_TTL_MS;
+    }
+    if (decision === "revoked") {
+      patch.revokedAt = nowMs;
+    }
+    const [row] = await db.update(verificationAccessRequests)
+      .set(patch)
+      .where(eq(verificationAccessRequests.id, id))
+      .returning();
+    return row;
+  }
+
+  async isAccessGranted(homeownerEmail: string, tradesmanId: number, nowMs: number): Promise<boolean> {
+    const row = await one(
+      db.select().from(verificationAccessRequests)
+        .where(and(
+          eq(verificationAccessRequests.homeownerEmail, homeownerEmail),
+          eq(verificationAccessRequests.tradesmanId, tradesmanId),
+          eq(verificationAccessRequests.status, "granted"),
+          gt(verificationAccessRequests.grantedUntil, nowMs),
+        ))
+        .limit(1)
+    );
+    return !!row;
+  }
+
+  async getActiveAccessRequest(homeownerEmail: string, tradesmanId: number): Promise<VerificationAccessRequest | undefined> {
+    return one(
+      db.select().from(verificationAccessRequests)
+        .where(and(
+          eq(verificationAccessRequests.homeownerEmail, homeownerEmail),
+          eq(verificationAccessRequests.tradesmanId, tradesmanId),
+        ))
+        .orderBy(desc(verificationAccessRequests.requestedAt))
+        .limit(1)
+    );
+  }
+
+  // Verification access blocks
+  async isBlocked(tradesmanId: number, homeownerEmail: string): Promise<boolean> {
+    const row = await one(
+      db.select().from(verificationAccessBlocks)
+        .where(and(
+          eq(verificationAccessBlocks.tradesmanId, tradesmanId),
+          eq(verificationAccessBlocks.homeownerEmail, homeownerEmail),
+        ))
+    );
+    return !!row;
+  }
+
+  async createBlock(tradesmanId: number, homeownerEmail: string, reason?: string | null): Promise<VerificationAccessBlock> {
+    const nowMs = now();
+    const [row] = await db.insert(verificationAccessBlocks)
+      .values({ tradesmanId, homeownerEmail, createdAt: nowMs, reason: reason ?? null })
+      .onConflictDoNothing()
+      .returning();
+    if (row) return row;
+    // Already blocked — return existing
+    const existing = await one(
+      db.select().from(verificationAccessBlocks)
+        .where(and(
+          eq(verificationAccessBlocks.tradesmanId, tradesmanId),
+          eq(verificationAccessBlocks.homeownerEmail, homeownerEmail),
+        ))
+    );
+    return existing!;
+  }
+
+  async deleteBlock(blockId: number, tradesmanId: number): Promise<void> {
+    await db.delete(verificationAccessBlocks)
+      .where(and(
+        eq(verificationAccessBlocks.id, blockId),
+        eq(verificationAccessBlocks.tradesmanId, tradesmanId),
+      ));
+  }
+
+  async listBlocks(tradesmanId: number): Promise<VerificationAccessBlock[]> {
+    return db.select().from(verificationAccessBlocks)
+      .where(eq(verificationAccessBlocks.tradesmanId, tradesmanId))
+      .orderBy(desc(verificationAccessBlocks.createdAt));
+  }
+
+  // Rate limiting
+  async countAccessRequestsByEmailSince(email: string, sinceMs: number): Promise<number> {
+    const rows = await db.select().from(verificationAccessRequests)
+      .where(and(
+        eq(verificationAccessRequests.homeownerEmail, email),
+        gte(verificationAccessRequests.requestedAt, sinceMs),
+      ));
+    return rows.length;
   }
 }
 
