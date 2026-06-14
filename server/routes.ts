@@ -20,7 +20,7 @@ import { registerClickRoute } from "./click-tracking";
 import { registerOutcomeCaptureRoute } from "./outcome-capture";
 import { signOutcomeToken, buildOutcomeLink } from "./outcome-tokens";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
-import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail, sendOutcomeAskEmail, sendHomeownerMagicLink, sendVerificationRequestToTradesman, sendVerificationAccessGranted, sendVerificationAccessDenied } from "./mailer";
+import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail, sendOutcomeAskEmail, sendHomeownerMagicLink, sendVerificationRequestToTradesman, sendVerificationAccessGranted, sendVerificationAccessDenied, sendVerificationApproved, sendVerificationRejected } from "./mailer";
 import {
   requireHomeowner, readHomeownerSessionCookie, setHomeownerSessionCookie, clearHomeownerSessionCookie,
   HOMEOWNER_SESSION_TTL_MS, HOMEOWNER_RATE_LIMIT_MAX, HOMEOWNER_RATE_LIMIT_WINDOW_MS, HOMEOWNER_REQUEST_THROTTLE_MS,
@@ -2117,6 +2117,41 @@ res.json(updated);
       const patch: Partial<Tradesman> =
         updated.kind === "insurance" ? { insured: true } : { licensed: true };
       await storage.updateTradesman(updated.tradesmanId, patch);
+    }
+
+    // Notify the tradesman of the decision. Fire-and-forget: the DB write above
+    // is the source of truth, so an email failure must NOT fail the request or
+    // roll back the decision. Errors are logged only.
+    if (updated) {
+      try {
+        const PUBLIC_URL_ENV = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
+        const tradesman = await storage.getTradesmanById(updated.tradesmanId);
+        if (tradesman?.email) {
+          const tradesmanName = tradesman.ownerName || tradesman.businessName || "there";
+          const kind = updated.kind as "insurance" | "qualification";
+          if (decision.status === "approved") {
+            await sendVerificationApproved({
+              to: tradesman.email,
+              tradesmanName,
+              kind,
+              profileUrl: `${PUBLIC_URL_ENV}/tradesman/${tradesman.slug}`,
+              tradesmanId: updated.tradesmanId,
+            });
+          } else {
+            await sendVerificationRejected({
+              to: tradesman.email,
+              tradesmanName,
+              kind,
+              reviewerNote: updated.reviewerNote ?? "",
+              dashboardUrl: `${PUBLIC_URL_ENV}/dashboard/verification`,
+              tradesmanId: updated.tradesmanId,
+            });
+          }
+        }
+      } catch (err: any) {
+        console.error("[verification-decide] email send failed", { id, decision: decision.status, err: err?.message });
+        // continue — do not fail the request
+      }
     }
 
     res.json(updated);

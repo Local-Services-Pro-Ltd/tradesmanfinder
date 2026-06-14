@@ -16,7 +16,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { updateTradesmanMock, decideTradesmanVerificationMock, getTradesmanVerificationByIdMock, getTradesmanByIdMock, getLatestApprovedVerificationMock } = vi.hoisted(() => {
+const { updateTradesmanMock, decideTradesmanVerificationMock, getTradesmanVerificationByIdMock, getTradesmanByIdMock, getLatestApprovedVerificationMock, sendVerificationApprovedMock, sendVerificationRejectedMock } = vi.hoisted(() => {
   process.env.ADMIN_KEY = 'test-secret-key';
   process.env.DATABASE_URL = 'postgres://fake';
   return {
@@ -25,8 +25,27 @@ const { updateTradesmanMock, decideTradesmanVerificationMock, getTradesmanVerifi
     getTradesmanVerificationByIdMock: vi.fn(),
     getTradesmanByIdMock: vi.fn().mockResolvedValue(null),
     getLatestApprovedVerificationMock: vi.fn().mockResolvedValue(undefined),
+    sendVerificationApprovedMock: vi.fn().mockResolvedValue({ ok: true }),
+    sendVerificationRejectedMock: vi.fn().mockResolvedValue({ ok: true }),
   };
 });
+
+// Mock the mailer so decide-route email sends are observable and never hit the
+// network. Only the transactional senders that routes.ts imports are stubbed.
+vi.mock('./mailer', () => ({
+  sendCardIssuedEmail: vi.fn().mockResolvedValue({ ok: true }),
+  sendCardRescindedEmail: vi.fn().mockResolvedValue({ ok: true }),
+  sendNewLeadEmail: vi.fn().mockResolvedValue({ ok: true }),
+  sendPartnerEnquiryNotification: vi.fn().mockResolvedValue({ ok: true }),
+  sendMagicLinkEmail: vi.fn().mockResolvedValue({ ok: true }),
+  sendOutcomeAskEmail: vi.fn().mockResolvedValue({ ok: true }),
+  sendHomeownerMagicLink: vi.fn().mockResolvedValue({ ok: true }),
+  sendVerificationRequestToTradesman: vi.fn().mockResolvedValue({ ok: true }),
+  sendVerificationAccessGranted: vi.fn().mockResolvedValue({ ok: true }),
+  sendVerificationAccessDenied: vi.fn().mockResolvedValue({ ok: true }),
+  sendVerificationApproved: sendVerificationApprovedMock,
+  sendVerificationRejected: sendVerificationRejectedMock,
+}));
 
 // Stub the Supabase Storage helpers so we don't need a real bucket or key.
 vi.mock('./verifications-storage', () => ({
@@ -161,6 +180,10 @@ describe('VERIFICATIONS REGRESSION GUARD (PR A)', () => {
     getTradesmanByIdMock.mockResolvedValue(null);
     getLatestApprovedVerificationMock.mockReset();
     getLatestApprovedVerificationMock.mockResolvedValue(undefined);
+    sendVerificationApprovedMock.mockReset();
+    sendVerificationApprovedMock.mockResolvedValue({ ok: true });
+    sendVerificationRejectedMock.mockReset();
+    sendVerificationRejectedMock.mockResolvedValue({ ok: true });
   });
 
   describe('🔐 Tradesman-facing routes require auth', () => {
@@ -362,6 +385,110 @@ describe('VERIFICATIONS REGRESSION GUARD (PR A)', () => {
         headers: { 'x-admin-key': 'test-secret-key' },
       });
       expect(res.status).toBe(409);
+    });
+  });
+
+  describe('📧 Decision emails (PR H)', () => {
+    it('approving sends the approval email to the tradesman with kind + profile URL', async () => {
+      getTradesmanVerificationByIdMock.mockResolvedValue({
+        id: 50, tradesmanId: 11, kind: 'insurance', filePath: '11/insurance/x.pdf',
+        fileMimeType: 'application/pdf', fileSizeBytes: 100, status: 'pending',
+        submittedAt: 1, reviewedAt: null, reviewedBy: null, reviewerNote: null,
+        qualificationType: null, insuranceCoverGbp: 1_000_000, expiryDate: null,
+      });
+      decideTradesmanVerificationMock.mockResolvedValue({
+        id: 50, tradesmanId: 11, kind: 'insurance', filePath: '11/insurance/x.pdf',
+        fileMimeType: 'application/pdf', fileSizeBytes: 100, status: 'approved',
+        submittedAt: 1, reviewedAt: 2, reviewedBy: 'admin', reviewerNote: null,
+        qualificationType: null, insuranceCoverGbp: 1_000_000, expiryDate: null,
+      });
+      getTradesmanByIdMock.mockResolvedValue({
+        id: 11, slug: 'acme-electrics', businessName: 'Acme Electrics',
+        ownerName: 'Jane Acme', email: 'jane@acme.test',
+      } as any);
+
+      const app = await buildApp();
+      const res = await req(app, 'POST', '/api/admin/verifications/50/decide', {
+        body: { status: 'approved' },
+        headers: { 'x-admin-key': 'test-secret-key' },
+      });
+      expect(res.status).toBe(200);
+      expect(sendVerificationApprovedMock).toHaveBeenCalledTimes(1);
+      expect(sendVerificationApprovedMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: 'jane@acme.test',
+          kind: 'insurance',
+          tradesmanName: 'Jane Acme',
+          profileUrl: 'https://tradesmanfinder.com/tradesman/acme-electrics',
+        }),
+      );
+      expect(sendVerificationRejectedMock).not.toHaveBeenCalled();
+    });
+
+    it('rejecting sends the rejection email with the reviewer note verbatim', async () => {
+      const note = "blurry scan, can't read expiry";
+      getTradesmanVerificationByIdMock.mockResolvedValue({
+        id: 51, tradesmanId: 12, kind: 'qualification', filePath: '12/qualification/x.pdf',
+        fileMimeType: 'application/pdf', fileSizeBytes: 100, status: 'pending',
+        submittedAt: 1, reviewedAt: null, reviewedBy: null, reviewerNote: null,
+        qualificationType: 'Gas Safe', insuranceCoverGbp: null, expiryDate: null,
+      });
+      decideTradesmanVerificationMock.mockResolvedValue({
+        id: 51, tradesmanId: 12, kind: 'qualification', filePath: '12/qualification/x.pdf',
+        fileMimeType: 'application/pdf', fileSizeBytes: 100, status: 'rejected',
+        submittedAt: 1, reviewedAt: 2, reviewedBy: 'admin', reviewerNote: note,
+        qualificationType: 'Gas Safe', insuranceCoverGbp: null, expiryDate: null,
+      });
+      getTradesmanByIdMock.mockResolvedValue({
+        id: 12, slug: 'beta-gas', businessName: 'Beta Gas',
+        ownerName: 'Bob Beta', email: 'bob@beta.test',
+      } as any);
+
+      const app = await buildApp();
+      const res = await req(app, 'POST', '/api/admin/verifications/51/decide', {
+        body: { status: 'rejected', reviewerNote: note },
+        headers: { 'x-admin-key': 'test-secret-key' },
+      });
+      expect(res.status).toBe(200);
+      expect(sendVerificationRejectedMock).toHaveBeenCalledTimes(1);
+      expect(sendVerificationRejectedMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: 'bob@beta.test',
+          kind: 'qualification',
+          reviewerNote: note,
+          dashboardUrl: 'https://tradesmanfinder.com/dashboard/verification',
+        }),
+      );
+      expect(sendVerificationApprovedMock).not.toHaveBeenCalled();
+    });
+
+    it('a mailer failure does not fail the decide request (DB is source of truth)', async () => {
+      getTradesmanVerificationByIdMock.mockResolvedValue({
+        id: 52, tradesmanId: 13, kind: 'insurance', filePath: '13/insurance/x.pdf',
+        fileMimeType: 'application/pdf', fileSizeBytes: 100, status: 'pending',
+        submittedAt: 1, reviewedAt: null, reviewedBy: null, reviewerNote: null,
+        qualificationType: null, insuranceCoverGbp: 1_000_000, expiryDate: null,
+      });
+      decideTradesmanVerificationMock.mockResolvedValue({
+        id: 52, tradesmanId: 13, kind: 'insurance', filePath: '13/insurance/x.pdf',
+        fileMimeType: 'application/pdf', fileSizeBytes: 100, status: 'approved',
+        submittedAt: 1, reviewedAt: 2, reviewedBy: 'admin', reviewerNote: null,
+        qualificationType: null, insuranceCoverGbp: 1_000_000, expiryDate: null,
+      });
+      getTradesmanByIdMock.mockResolvedValue({
+        id: 13, slug: 'gamma-co', businessName: 'Gamma Co',
+        ownerName: 'Gail Gamma', email: 'gail@gamma.test',
+      } as any);
+      sendVerificationApprovedMock.mockRejectedValue(new Error('resend down'));
+
+      const app = await buildApp();
+      const res = await req(app, 'POST', '/api/admin/verifications/52/decide', {
+        body: { status: 'approved' },
+        headers: { 'x-admin-key': 'test-secret-key' },
+      });
+      // Request still succeeds and the boolean flip (DB write) still happened.
+      expect(res.status).toBe(200);
+      expect(updateTradesmanMock).toHaveBeenCalledWith(13, { insured: true });
     });
   });
 });
