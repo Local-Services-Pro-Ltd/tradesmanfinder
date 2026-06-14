@@ -61,7 +61,7 @@ export function TradesmanCard({
         </div>
 
         <div className="mt-3">
-          <VerificationChips verified={tradesman.verified} insured={tradesman.insured} licensed={tradesman.licensed} />
+          <VerificationChips verified={tradesman.verified} insured={tradesman.insured} licensed={tradesman.licensed} verificationSummary={tradesman.verificationSummary} />
         </div>
 
         <div className="mt-3">

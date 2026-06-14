@@ -118,7 +118,7 @@ export default function TradesmanProfile() {
                 <span className="flex items-center gap-1 text-sm text-muted-foreground"><Calendar className="h-4 w-4" /> {tradesman.yearsExperience} yrs experience</span>
               </div>
 
-              <div className="mt-4"><VerificationChips verified={tradesman.verified} insured={tradesman.insured} licensed={tradesman.licensed} /></div>
+              <div className="mt-4"><VerificationChips verified={tradesman.verified} insured={tradesman.insured} licensed={tradesman.licensed} verificationSummary={tradesman.verificationSummary} /></div>
 
               <div className="mt-4 flex flex-wrap gap-2">
                 {cats.map((c) => (

@@ -64,18 +64,81 @@ export function StarRating({ value, size = 16, className }: { value: number; siz
 }
 
 /* ───────── Verification chips ───────── */
-export function VerificationChips({ verified, insured, licensed, className }: { verified?: boolean; insured?: boolean; licensed?: boolean; className?: string }) {
-  const chips: { label: string; icon: typeof ShieldCheck; on?: boolean }[] = [
-    { label: "Verified", icon: BadgeCheck, on: verified },
-    { label: "Insured", icon: ShieldCheck, on: insured },
-    { label: "Licensed", icon: Award, on: licensed },
+// Optional `verificationSummary` (from PR-VC) enriches the Insured / Licensed
+// chips with the *factual* approved-document detail: PL cover amount, expiry
+// date, qualification name. Phrasing is deliberately non-overclaiming:
+//   "Insurance certificate on file (£1m PL, valid until 14 Jun 2027)"
+//   "Qualification on file: Gas Safe (valid until 14 Jun 2027)"
+// Never "Verified by us".
+type VerificationSummary = {
+  insurance: { coverGbp: number | null; expiryDate: string | null } | null;
+  qualification: { qualificationType: string | null; expiryDate: string | null } | null;
+};
+
+function formatGbpCover(gbp: number | null): string | null {
+  if (gbp == null || gbp <= 0) return null;
+  if (gbp >= 1_000_000) {
+    const m = gbp / 1_000_000;
+    return `£${m.toLocaleString("en-GB", { maximumFractionDigits: 1 })}m`;
+  }
+  if (gbp >= 1_000) return `£${Math.round(gbp / 1_000)}k`;
+  return `£${gbp}`;
+}
+
+function formatIsoDate(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+export function VerificationChips({
+  verified, insured, licensed, verificationSummary, className,
+}: {
+  verified?: boolean;
+  insured?: boolean;
+  licensed?: boolean;
+  verificationSummary?: VerificationSummary;
+  className?: string;
+}) {
+  const ins = verificationSummary?.insurance ?? null;
+  const qual = verificationSummary?.qualification ?? null;
+
+  const insuranceTitle = ins
+    ? `Insurance certificate on file${ins.coverGbp ? ` (${formatGbpCover(ins.coverGbp)} PL` : ""}${ins.expiryDate ? `${ins.coverGbp ? ", " : " ("}valid until ${formatIsoDate(ins.expiryDate)})` : ins.coverGbp ? ")" : ""}`
+    : undefined;
+
+  const qualLabel = qual?.qualificationType
+    ? `${qual.qualificationType}`
+    : "Licensed";
+  const qualTitle = qual
+    ? `Qualification on file: ${qual.qualificationType ?? "—"}${qual.expiryDate ? ` (valid until ${formatIsoDate(qual.expiryDate)})` : ""}`
+    : undefined;
+
+  const chips: { label: string; icon: typeof ShieldCheck; on?: boolean; title?: string; testId: string }[] = [
+    { label: "Verified", icon: BadgeCheck, on: verified, testId: "verified" },
+    {
+      label: ins?.coverGbp ? `Insured · ${formatGbpCover(ins.coverGbp)} PL` : "Insured",
+      icon: ShieldCheck,
+      on: insured,
+      title: insuranceTitle,
+      testId: "insured",
+    },
+    {
+      label: qualLabel,
+      icon: Award,
+      on: licensed,
+      title: qualTitle,
+      testId: "licensed",
+    },
   ];
   return (
     <div className={cn("flex flex-wrap gap-1.5", className)}>
       {chips.filter((c) => c.on).map((c) => (
         <span
-          key={c.label}
-          data-testid={`chip-${c.label.toLowerCase()}`}
+          key={c.testId}
+          data-testid={`chip-${c.testId}`}
+          title={c.title}
           className="inline-flex items-center gap-1 rounded-full bg-trust/10 px-2 py-0.5 text-xs font-medium text-trust"
         >
           <c.icon className="h-3 w-3" /> {c.label}
