@@ -1,5 +1,5 @@
 /**
- * HOMEOWNER ACCESS REGRESSION GUARD — PR D
+ * HOMEOWNER ACCESS REGRESSION GUARD — PR D / PR F
  *
  * Locks in the security boundary for the homeowner consent-gated
  * verification proof-viewing flow:
@@ -16,6 +16,13 @@
  * 10.  POST /api/tradesmen/:id/verification-requests/:reqId/decide granted → grant active
  * 11.  POST /api/tradesmen/:id/verification-requests/:reqId/decide revoked → proof hidden
  * 12.  Block flow → block hides existing grant + prevents new requests
+ *
+ * PR F additions:
+ * 13.  GET  /api/tradesmen/:id/verification-blocks unauthenticated → 401
+ * 14.  GET  /api/tradesmen/:id/verification-blocks as wrong tradesman → 403
+ * 15.  GET  /api/tradesmen/:id/verification-blocks as self → returns only own blocks
+ * 16.  GET  /api/tradesmen/:id WITH active grant → verificationAccessGrantedUntil present and positive
+ * 17.  GET  /api/tradesmen/:id WITH no grant (pending) → verificationAccessGrantedUntil absent
  *
  * All storage / mailer / stripe calls are stubbed — no database required.
  */
@@ -40,6 +47,7 @@ const {
   createBlockMock,
   deleteBlockMock,
   listBlocksMock,
+  listVerificationBlocksForTradesmanMock,
   getTradesmanByIdMock,
   getLatestApprovedVerificationMock,
   sendHomeownerMagicLinkMock,
@@ -68,6 +76,7 @@ const {
     createBlockMock: vi.fn().mockResolvedValue({ id: 1, tradesmanId: 7, homeownerEmail: 'owner@example.com', createdAt: 1, reason: null }),
     deleteBlockMock: vi.fn().mockResolvedValue(undefined),
     listBlocksMock: vi.fn().mockResolvedValue([]),
+    listVerificationBlocksForTradesmanMock: vi.fn().mockResolvedValue([]),
     getTradesmanByIdMock: vi.fn().mockResolvedValue(null),
     getLatestApprovedVerificationMock: vi.fn().mockResolvedValue(undefined),
     sendHomeownerMagicLinkMock: vi.fn().mockResolvedValue({ ok: true, id: 'em1' }),
@@ -152,6 +161,7 @@ vi.mock('./storage', () => ({
     createBlock: createBlockMock,
     deleteBlock: deleteBlockMock,
     listBlocks: listBlocksMock,
+    listVerificationBlocksForTradesman: listVerificationBlocksForTradesmanMock,
   },
   // The db object is used directly in the request-link route for the per-email throttle check
   db: {
@@ -546,5 +556,98 @@ describe('HOMEOWNER ACCESS REGRESSION GUARD (PR D)', () => {
     expect(reqRes.body.ok).toBe(true);
     // No magic link issued
     expect(issueHomeownerMagicLinkMock).not.toHaveBeenCalled();
+  });
+
+  // ── PR F: Gap 1 — GET /api/tradesmen/:id/verification-blocks ───────────────────────
+
+  it('13. GET /api/tradesmen/:id/verification-blocks unauthenticated → 401', async () => {
+    const app = await buildApp();
+    const req = makeReq(app);
+    const res = await req('GET', '/api/tradesmen/7/verification-blocks');
+    expect(res.status).toBe(401);
+  });
+
+  it('14. GET /api/tradesmen/:id/verification-blocks as wrong tradesman → 403', async () => {
+    const nowMs = Date.now();
+    // Session belongs to tradesman 99, not 7
+    const { storage } = await import('./storage');
+    (storage.getSessionById as any).mockResolvedValueOnce({ id: 'sess-99', tradesmanId: 99, createdAt: 1, expiresAt: nowMs + 86400_000, lastSeenAt: 1 });
+
+    const app = await buildApp();
+    const req = makeReq(app);
+    const res = await req('GET', '/api/tradesmen/7/verification-blocks', {
+      headers: { cookie: 'tf_session=sess-99' },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('15. GET /api/tradesmen/:id/verification-blocks as self → returns only own blocks', async () => {
+    const nowMs = Date.now();
+    const ownBlocks = [
+      { id: 10, tradesmanId: 7, homeownerEmail: 'a@example.com', createdAt: nowMs - 1000, reason: null },
+      { id: 11, tradesmanId: 7, homeownerEmail: 'b@example.com', createdAt: nowMs - 2000, reason: 'spam' },
+    ];
+    listVerificationBlocksForTradesmanMock.mockResolvedValue(ownBlocks);
+
+    const { storage } = await import('./storage');
+    (storage.getSessionById as any).mockResolvedValueOnce({ id: 'sess-7', tradesmanId: 7, createdAt: 1, expiresAt: nowMs + 86400_000, lastSeenAt: 1 });
+
+    const app = await buildApp();
+    const req = makeReq(app);
+    const res = await req('GET', '/api/tradesmen/7/verification-blocks', {
+      headers: { cookie: 'tf_session=sess-7' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.blocks).toHaveLength(2);
+    expect(res.body.blocks[0].homeownerEmail).toBe('a@example.com');
+    expect(listVerificationBlocksForTradesmanMock).toHaveBeenCalledWith(7);
+    // Blocks from another tradesman must not leak through
+    expect(res.body.blocks.every((b: any) => b.tradesmanId === 7)).toBe(true);
+  });
+
+  // ── PR F: Gap 2 — verificationAccessGrantedUntil on profile ─────────────────
+
+  it('16. GET /api/tradesmen/:id WITH active grant → verificationAccessGrantedUntil present and positive', async () => {
+    const nowMs = Date.now();
+    getTradesmanByIdMock.mockResolvedValue(baseTradesman as any);
+    getHomeownerSessionByIdMock.mockResolvedValue({ id: 'hsid-1', email: 'owner@example.com', createdAt: 1, expiresAt: nowMs + 86400_000, lastSeenAt: 1 });
+    const grantedUntil = nowMs + 7 * 86400_000;
+    getActiveAccessRequestMock.mockResolvedValue({
+      id: 1, homeownerEmail: 'owner@example.com', tradesmanId: 7,
+      status: 'granted', requestedAt: 1, decidedAt: nowMs - 1000,
+      decidedByTradesmanId: 7, grantedUntil,
+      revokedAt: null, notes: null,
+    });
+
+    const app = await buildApp();
+    const req = makeReq(app);
+    const res = await req('GET', '/api/tradesmen/7', {
+      headers: { cookie: 'tf_homeowner=hsid-1' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.verificationAccessStatus).toBe('granted');
+    expect(res.body.verificationAccessGrantedUntil).toBe(grantedUntil);
+    expect(res.body.verificationAccessGrantedUntil).toBeGreaterThan(0);
+  });
+
+  it('17. GET /api/tradesmen/:id WITH pending request → verificationAccessGrantedUntil absent', async () => {
+    const nowMs = Date.now();
+    getTradesmanByIdMock.mockResolvedValue(baseTradesman as any);
+    getHomeownerSessionByIdMock.mockResolvedValue({ id: 'hsid-1', email: 'owner@example.com', createdAt: 1, expiresAt: nowMs + 86400_000, lastSeenAt: 1 });
+    getActiveAccessRequestMock.mockResolvedValue({
+      id: 1, homeownerEmail: 'owner@example.com', tradesmanId: 7,
+      status: 'pending', requestedAt: 1, decidedAt: null,
+      decidedByTradesmanId: null, grantedUntil: null,
+      revokedAt: null, notes: null,
+    });
+
+    const app = await buildApp();
+    const req = makeReq(app);
+    const res = await req('GET', '/api/tradesmen/7', {
+      headers: { cookie: 'tf_homeowner=hsid-1' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.verificationAccessStatus).toBe('pending');
+    expect(res.body.verificationAccessGrantedUntil).toBeUndefined();
   });
 });
