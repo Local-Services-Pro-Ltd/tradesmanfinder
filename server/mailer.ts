@@ -670,3 +670,195 @@ export async function sendOutcomeAskEmail(opts: {
     },
   });
 }
+
+// ── PR D: Homeowner verification access emails ──────────────────────────────
+
+/**
+ * Send the homeowner magic-link email so they can start a session.
+ * This is the ONLY place the raw token escapes the server.
+ */
+export async function sendHomeownerMagicLink(opts: {
+  email: string;
+  magicLinkUrl: string;
+  tradesmanName: string;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const { email, magicLinkUrl, tradesmanName } = opts;
+  const subject = "Verify your email to view tradesman credentials — TradesmanFinder";
+
+  const bodyHtml = `
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">
+      You requested to view the verified credentials of <strong>${escapeHtml(tradesmanName)}</strong> on TradesmanFinder.
+    </p>
+    <p style="margin:0 0 14px 0;font-size:14px;line-height:1.55;color:#374151">
+      Click the button below to confirm your email address. The link expires in 15 minutes and can only be used once.
+    </p>
+    <p style="font-size:13px;color:#475569;margin:16px 0 6px">Trouble with the button? Copy and paste this link:</p>
+    <p style="font-size:12px;color:#475569;word-break:break-all;margin:0">${magicLinkUrl}</p>
+  `;
+
+  const text =
+    `You requested to view the verified credentials of ${tradesmanName} on TradesmanFinder.\n\n` +
+    `Click the link below to verify your email (expires in 15 minutes):\n\n` +
+    `${magicLinkUrl}\n\n` +
+    `If you did not request this, you can safely ignore this email.\n`;
+
+  const html = wrap({
+    title: subject,
+    bodyHtml,
+    ctaUrl: magicLinkUrl,
+    ctaLabel: "Verify my email",
+    accent: "amber",
+  });
+
+  return send({
+    to: email,
+    subject,
+    html,
+    text,
+    tag: "homeowner_magic_link",
+    log: { template: "homeowner_magic_link" },
+  });
+}
+
+/**
+ * Notify a tradesman that a homeowner wants to view their verification proofs.
+ */
+export async function sendVerificationRequestToTradesman(opts: {
+  tradesmanEmail: string;
+  tradesmanName: string;
+  tradesmanId: number;
+  homeownerEmail: string;
+  dashboardUrl: string;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const { tradesmanEmail, tradesmanName, homeownerEmail, dashboardUrl, tradesmanId } = opts;
+  const subject = `New verification request — ${homeownerEmail} wants to view your credentials`;
+
+  const bodyHtml = `
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">Hi ${escapeHtml(tradesmanName)},</p>
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">
+      A homeowner (<strong>${escapeHtml(homeownerEmail)}</strong>) has requested to view your verified insurance and qualification credentials on TradesmanFinder.
+    </p>
+    <p style="margin:0 0 14px 0;font-size:14px;line-height:1.55;color:#374151">
+      You can approve or deny this request in your dashboard. If approved, they will see a redacted summary — not the raw document. The access expires automatically after 7 days.
+    </p>
+  `;
+
+  const text =
+    `Hi ${tradesmanName},\n\n` +
+    `A homeowner (${homeownerEmail}) has requested to view your verified credentials on TradesmanFinder.\n\n` +
+    `Approve or deny this request in your dashboard: ${dashboardUrl}\n\n` +
+    `If approved, they will see a redacted summary only. Access expires after 7 days.\n\n` +
+    `— TradesmanFinder`;
+
+  const html = wrap({
+    title: subject,
+    bodyHtml,
+    ctaUrl: dashboardUrl,
+    ctaLabel: "View request in dashboard",
+    accent: "amber",
+  });
+
+  return send({
+    to: tradesmanEmail,
+    subject,
+    html,
+    text,
+    tag: "verification_request_notify",
+    log: { template: "verification_request_notify", tradesmanId },
+  });
+}
+
+/**
+ * Notify the homeowner that their access request was approved.
+ */
+export async function sendVerificationAccessGranted(opts: {
+  homeownerEmail: string;
+  tradesmanName: string;
+  tradesmanId: number;
+  profileUrl: string;
+  expiresAt: number;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const { homeownerEmail, tradesmanName, profileUrl, expiresAt, tradesmanId } = opts;
+  const subject = `Access granted — you can now view ${tradesmanName}'s credentials`;
+  const expiryLabel = new Date(expiresAt).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+
+  const bodyHtml = `
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">
+      <strong>${escapeHtml(tradesmanName)}</strong> has approved your request to view their verified credentials on TradesmanFinder.
+    </p>
+    <p style="margin:0 0 14px 0;font-size:14px;line-height:1.55;color:#374151">
+      You can view a redacted summary of their insurance and qualification certificates on their profile page. Access expires on <strong>${expiryLabel}</strong>.
+    </p>
+  `;
+
+  const text =
+    `${tradesmanName} has approved your request to view their verified credentials.\n\n` +
+    `Visit their profile to view the credentials: ${profileUrl}\n\n` +
+    `Access expires on ${expiryLabel}.\n\n` +
+    `— TradesmanFinder`;
+
+  const html = wrap({
+    title: subject,
+    bodyHtml,
+    ctaUrl: profileUrl,
+    ctaLabel: "View credentials",
+    accent: "green",
+  });
+
+  return send({
+    to: homeownerEmail,
+    subject,
+    html,
+    text,
+    tag: "verification_access_granted",
+    log: { template: "verification_access_granted", tradesmanId },
+  });
+}
+
+/**
+ * Notify the homeowner that their access request was denied.
+ */
+export async function sendVerificationAccessDenied(opts: {
+  homeownerEmail: string;
+  tradesmanName: string;
+  tradesmanId: number;
+  notes?: string | null;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const { homeownerEmail, tradesmanName, tradesmanId, notes } = opts;
+  const subject = `Verification request declined — ${tradesmanName}`;
+
+  const notesSection = notes
+    ? `<p style="margin:16px 0 0;font-size:13px;line-height:1.55;color:#374151"><strong>Message from tradesman:</strong> ${escapeHtml(notes)}</p>`
+    : "";
+
+  const bodyHtml = `
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">
+      <strong>${escapeHtml(tradesmanName)}</strong> has declined your request to view their verified credentials.
+    </p>
+    <p style="margin:0 0 14px 0;font-size:14px;line-height:1.55;color:#374151">
+      Tradesmen are not required to share their credentials. You may wish to contact them directly for more information.
+    </p>
+    ${notesSection}
+  `;
+
+  const text =
+    `${tradesmanName} has declined your request to view their verified credentials.\n\n` +
+    (notes ? `Message from tradesman: ${notes}\n\n` : "") +
+    `Tradesmen are not required to share their credentials.\n\n` +
+    `— TradesmanFinder`;
+
+  const html = wrap({
+    title: subject,
+    bodyHtml,
+    accent: "red",
+  });
+
+  return send({
+    to: homeownerEmail,
+    subject,
+    html,
+    text,
+    tag: "verification_access_denied",
+    log: { template: "verification_access_denied", tradesmanId },
+  });
+}

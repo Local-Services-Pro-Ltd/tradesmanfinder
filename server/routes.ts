@@ -20,7 +20,11 @@ import { registerClickRoute } from "./click-tracking";
 import { registerOutcomeCaptureRoute } from "./outcome-capture";
 import { signOutcomeToken, buildOutcomeLink } from "./outcome-tokens";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
-import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail, sendOutcomeAskEmail } from "./mailer";
+import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail, sendOutcomeAskEmail, sendHomeownerMagicLink, sendVerificationRequestToTradesman, sendVerificationAccessGranted, sendVerificationAccessDenied } from "./mailer";
+import {
+  requireHomeowner, readHomeownerSessionCookie, setHomeownerSessionCookie, clearHomeownerSessionCookie,
+  HOMEOWNER_SESSION_TTL_MS, HOMEOWNER_RATE_LIMIT_MAX, HOMEOWNER_RATE_LIMIT_WINDOW_MS, HOMEOWNER_REQUEST_THROTTLE_MS,
+} from "./homeowner-auth";
 import type { Tradesman, TradesmanCard } from "@shared/schema";
 import { z } from "zod";
 import { publicFormGuard, rateLimit } from "./spam-guard";
@@ -37,14 +41,80 @@ import {
   MAGIC_LINK_TTL_MS, SESSION_TTL_MS, REQUEST_LINK_EMAIL_THROTTLE_MS,
 } from "./auth";
 
+// What the public profile renders for homeowners with granted access.
+// filePath is NEVER included — only derived fields the reviewer approved.
+export type VerificationProof = {
+  insurance?: {
+    insurer?: string;       // placeholder — insurer text not yet stored; omitted for now
+    coverGbp: number;
+    expiryDate: string;     // YYYY-MM-DD
+    verifiedAt: string;     // YYYY-MM-DD
+  };
+  qualification?: {
+    qualificationType: string;
+    expiryDate: string;
+    verifiedAt: string;
+  };
+};
+
+async function buildVerificationProof(t: Tradesman): Promise<VerificationProof | undefined> {
+  const today = new Date().toISOString().slice(0, 10);
+  const proof: VerificationProof = {};
+  let hasAny = false;
+  if (t.insured) {
+    const v = await storage.getLatestApprovedVerification(t.id, "insurance", today);
+    if (v && v.insuranceCoverGbp !== null) {
+      proof.insurance = {
+        coverGbp: v.insuranceCoverGbp,
+        expiryDate: v.expiryDate ?? "",
+        verifiedAt: v.reviewedAt ? new Date(v.reviewedAt).toISOString().slice(0, 10) : today,
+      };
+      hasAny = true;
+    }
+  }
+  if (t.licensed) {
+    const v = await storage.getLatestApprovedVerification(t.id, "qualification", today);
+    if (v && v.qualificationType) {
+      proof.qualification = {
+        qualificationType: v.qualificationType,
+        expiryDate: v.expiryDate ?? "",
+        verifiedAt: v.reviewedAt ? new Date(v.reviewedAt).toISOString().slice(0, 10) : today,
+      };
+      hasAny = true;
+    }
+  }
+  return hasAny ? proof : undefined;
+}
+
 // Attach a `cardSummary` field to each tradesman so the UI can render badges
 // and the API consumers can know who's suspended/banned.
-async function attachCardSummary<T extends Tradesman>(t: T): Promise<T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[]; verificationSummary: VerificationPublicSummary }> {
+async function attachCardSummary<T extends Tradesman>(
+  t: T,
+  homeownerEmail?: string | null,
+): Promise<T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[]; verificationSummary: VerificationPublicSummary; verificationProof?: VerificationProof; verificationAccessStatus?: string }> {
   const cards = await storage.getCardsByTradesman(t.id);
   const verificationSummary = await buildVerificationPublicSummary(t);
-  return { ...t, cards, cardSummary: summarizeCards(cards), verificationSummary };
+  const base = { ...t, cards, cardSummary: summarizeCards(cards), verificationSummary };
+
+  // Homeowner enrichment: only run when a homeowner cookie is present
+  if (!homeownerEmail) return base;
+
+  const now = Date.now();
+  const req_row = await storage.getActiveAccessRequest(homeownerEmail, t.id);
+  const accessStatus = req_row ? req_row.status : "none";
+
+  const granted = req_row?.status === "granted" && req_row.grantedUntil && req_row.grantedUntil > now;
+  if (!granted) {
+    return { ...base, verificationAccessStatus: accessStatus };
+  }
+
+  const proof = await buildVerificationProof(t);
+  return { ...base, verificationProof: proof, verificationAccessStatus: "granted" };
 }
-async function attachCardSummaryMany<T extends Tradesman>(list: T[]): Promise<(T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[]; verificationSummary: VerificationPublicSummary })[]> {
+async function attachCardSummaryMany<T extends Tradesman>(
+  list: T[],
+  homeownerEmail?: string | null,
+): Promise<(T & { cardSummary: ReturnType<typeof summarizeCards>; cards: TradesmanCard[]; verificationSummary: VerificationPublicSummary; verificationProof?: VerificationProof; verificationAccessStatus?: string })[]> {
   // Single batch fetch to avoid N+1
   const all = await storage.getAllCards();
   // Verification metadata is fetched per-tradesman (one row each); fine for
@@ -53,7 +123,21 @@ async function attachCardSummaryMany<T extends Tradesman>(list: T[]): Promise<(T
   return Promise.all(list.map(async (t) => {
     const cards = all.filter((c) => c.tradesmanId === t.id);
     const verificationSummary = await buildVerificationPublicSummary(t);
-    return { ...t, cards, cardSummary: summarizeCards(cards), verificationSummary };
+    const base = { ...t, cards, cardSummary: summarizeCards(cards), verificationSummary };
+
+    if (!homeownerEmail) return base;
+
+    const now = Date.now();
+    const req_row = await storage.getActiveAccessRequest(homeownerEmail, t.id);
+    const accessStatus = req_row ? req_row.status : "none";
+
+    const granted = req_row?.status === "granted" && req_row.grantedUntil && req_row.grantedUntil > now;
+    if (!granted) {
+      return { ...base, verificationAccessStatus: accessStatus };
+    }
+
+    const proof = await buildVerificationProof(t);
+    return { ...base, verificationProof: proof, verificationAccessStatus: "granted" };
   }));
 }
 
@@ -141,14 +225,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (area !== undefined) {
       list = list.filter((t) => t.areaId === area);
     }
-    const enriched = await attachCardSummaryMany(list);
+    const homeownerEmail = readHomeownerSessionCookie(req) ? null : null; // list view: skip homeowner enrichment
+    const enriched = await attachCardSummaryMany(list, homeownerEmail);
     const visible = includeBanned ? enriched : enriched.filter((t) => !t.cardSummary.isPubliclyHidden);
     res.json(visible);
   });
   app.get("/api/tradesmen/by-slug/:slug", async (req, res) => {
     const t = await storage.getTradesmanBySlug(req.params.slug);
     if (!t) return res.status(404).json({ message: "Tradesman not found" });
-    const enriched = await attachCardSummary(t);
+    const homeownerSid = readHomeownerSessionCookie(req);
+    let homeownerEmail: string | null = null;
+    if (homeownerSid) {
+      const hsession = await storage.getHomeownerSessionById(homeownerSid);
+      homeownerEmail = hsession?.email ?? null;
+    }
+    const enriched = await attachCardSummary(t, homeownerEmail);
     if (enriched.cardSummary.isPubliclyHidden) return res.status(404).json({ message: "Tradesman not found" });
     res.json(enriched);
   });
@@ -157,7 +248,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid tradesman id" });
     const t = await storage.getTradesmanById(id);
     if (!t) return res.status(404).json({ message: "Tradesman not found" });
-    const enriched = await attachCardSummary(t);
+    const homeownerSid = readHomeownerSessionCookie(req);
+    let homeownerEmail: string | null = null;
+    if (homeownerSid) {
+      const hsession = await storage.getHomeownerSessionById(homeownerSid);
+      homeownerEmail = hsession?.email ?? null;
+    }
+    const enriched = await attachCardSummary(t, homeownerEmail);
     const isAdmin = isAdminReq(req);
     if (enriched.cardSummary.isPubliclyHidden && !isAdmin) return res.status(404).json({ message: "Tradesman not found" });
     res.json(enriched);
@@ -2024,6 +2121,350 @@ res.json(updated);
 
     res.json(updated);
   });
+
+
+  /* ══════════════════════════════════════════════════════
+     HOMEOWNER ACCESS (PR D) — consent-gated verification proof viewing.
+
+     Flow:
+       1. POST /api/homeowner/request-link { email, tradesmanId }
+          → rate-check, blocked-check, issue magic link, send email
+       2. GET  /api/homeowner/verify?token=…&tradesmanId=…
+          → consume token, create homeowner session cookie, create
+            pending access request, redirect to /tradesman/:id?req=pending
+       3. GET  /api/homeowner/me        → { email } or 401
+       4. POST /api/homeowner/logout    → clear cookie
+       5. GET  /api/homeowner/access/:tradesmanId → status + proof if granted
+       6. GET  /api/tradesmen/:id/verification-requests  (requireSelf) → list
+       7. POST /api/tradesmen/:id/verification-requests/:reqId/decide  (requireSelf)
+       8. POST /api/tradesmen/:id/verification-blocks  (requireSelf)
+       9. DELETE /api/tradesmen/:id/verification-blocks/:blockId  (requireSelf)
+     ══════════════════════════════════════════════════════ */
+
+  const requestVerifyLinkSchema = z.object({
+    email: z.string().min(3).max(254),
+    tradesmanId: z.number().int().positive(),
+  });
+
+  // 1. POST /api/homeowner/request-link — issue magic link
+  app.post(
+    "/api/homeowner/request-link",
+    rateLimit({ windowMs: 10 * 60 * 1000, max: 10 }), // IP rate limit
+    async (req, res) => {
+      try {
+        const parsed = requestVerifyLinkSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({ message: "Invalid request", errors: parsed.error.flatten() });
+        }
+        const { tradesmanId } = parsed.data;
+        const email = normaliseEmail(parsed.data.email);
+        if (!isValidEmail(email)) {
+          return res.status(400).json({ message: "Please enter a valid email address" });
+        }
+
+        // Check tradesman exists
+        const tradesman = await storage.getTradesmanById(tradesmanId);
+        if (!tradesman) {
+          return res.status(404).json({ message: "Tradesman not found" });
+        }
+
+        // Check blocked — fail silently (return 202) to not leak block state
+        const blocked = await storage.isBlocked(tradesmanId, email);
+        if (blocked) {
+          return res.status(202).json({ ok: true, throttle: false });
+        }
+
+        // Per-email 1-min throttle: check most recent magic link for this email+purpose
+        const sinceThrottle = Date.now() - HOMEOWNER_REQUEST_THROTTLE_MS;
+        const { db: dbInst } = await import("./storage");
+        const { magicLinkTokens: mlt } = await import("@shared/schema");
+        const { eq: eqOp, and: andOp, gte: gteOp } = await import("drizzle-orm");
+        const recentTokens = await dbInst.select().from(mlt)
+          .where(andOp(
+            eqOp(mlt.email, email),
+            eqOp(mlt.purpose, "homeowner_verify_access"),
+            gteOp(mlt.createdAt, sinceThrottle),
+          ))
+          .limit(1);
+        if (recentTokens.length > 0) {
+          return res.status(429).json({ ok: false, message: "Please wait before requesting another link" });
+        }
+
+        // 5/24h cap per homeowner email across all tradesmen
+        const since24h = Date.now() - HOMEOWNER_RATE_LIMIT_WINDOW_MS;
+        const count24h = await storage.countAccessRequestsByEmailSince(email, since24h);
+        if (count24h >= HOMEOWNER_RATE_LIMIT_MAX) {
+          return res.status(429).json({ ok: false, message: "Too many requests" });
+        }
+
+        const { ip, ua } = requestFingerprint(req);
+        const { token } = await storage.issueHomeownerMagicLink(email, tradesmanId, ip, ua);
+
+        const PUBLIC_URL_ENV = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
+        const magicLinkUrl = `${PUBLIC_URL_ENV}/api/homeowner/verify?token=${encodeURIComponent(token)}&tradesmanId=${tradesmanId}`;
+
+        sendHomeownerMagicLink({
+          email,
+          magicLinkUrl,
+          tradesmanName: tradesman.businessName,
+        }).catch((err: any) => console.error("[homeowner] sendHomeownerMagicLink failed:", err?.message));
+
+        return res.status(202).json({ ok: true, throttle: false });
+      } catch (err: any) {
+        console.error("[homeowner/request-link] error:", err?.message);
+        return res.status(500).json({ message: "Internal server error" });
+      }
+    },
+  );
+
+  // 2. GET /api/homeowner/verify?token=…&tradesmanId=…
+  app.get("/api/homeowner/verify", async (req, res) => {
+    try {
+      const token = String(req.query.token || "");
+      const tradesmanId = Number(req.query.tradesmanId);
+      if (!token || !Number.isFinite(tradesmanId)) {
+        return res.status(400).json({ message: "Missing token or tradesmanId" });
+      }
+
+      const result = await storage.consumeHomeownerMagicLink(token);
+      if (!result || result.tradesmanId !== tradesmanId) {
+        return res.status(401).json({ message: "Invalid or expired link" });
+      }
+
+      const { ip, ua } = requestFingerprint(req);
+      const session = await storage.createHomeownerSession(result.email, ip, ua);
+      setHomeownerSessionCookie(res, session.id);
+
+      // Create pending access request
+      const accessReq = await storage.createOrRefreshAccessRequest(result.email, tradesmanId, ip, ua);
+
+      // Notify tradesman (fire-and-forget)
+      const tradesman = await storage.getTradesmanById(tradesmanId);
+      if (tradesman) {
+        const PUBLIC_URL_ENV = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
+        const dashboardUrl = `${PUBLIC_URL_ENV}/dashboard#verification-requests`;
+        sendVerificationRequestToTradesman({
+          tradesmanEmail: tradesman.email,
+          tradesmanName: tradesman.businessName,
+          tradesmanId: tradesman.id,
+          homeownerEmail: result.email,
+          dashboardUrl,
+        }).catch((err: any) => console.error("[homeowner] sendVerificationRequestToTradesman failed:", err?.message));
+      }
+
+      const PUBLIC_URL_ENV = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
+      return res.redirect(`${PUBLIC_URL_ENV}/tradesman/${tradesmanId}?req=${accessReq.status}`);
+    } catch (err: any) {
+      console.error("[homeowner/verify] error:", err?.message);
+      return res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  // 3. GET /api/homeowner/me
+  app.get("/api/homeowner/me", requireHomeowner, (req, res) => {
+    res.json({ email: req.homeowner!.email });
+  });
+
+  // 4. POST /api/homeowner/logout
+  app.post("/api/homeowner/logout", async (req, res) => {
+    const sid = req.homeowner?.sessionId;
+    if (sid) {
+      await storage.deleteHomeownerSession(sid).catch(() => undefined);
+    }
+    clearHomeownerSessionCookie(res);
+    res.json({ ok: true });
+  });
+
+  // 5. GET /api/homeowner/access/:tradesmanId
+  app.get("/api/homeowner/access/:tradesmanId", requireHomeowner, async (req, res) => {
+    try {
+      const tradesmanId = Number(req.params.tradesmanId);
+      if (!Number.isFinite(tradesmanId)) {
+        return res.status(400).json({ message: "Invalid tradesmanId" });
+      }
+      const email = req.homeowner!.email;
+      const nowMs = Date.now();
+
+      const req_row = await storage.getActiveAccessRequest(email, tradesmanId);
+      const status = req_row ? req_row.status : "none";
+      const grantedUntil = req_row?.grantedUntil ?? undefined;
+
+      const granted = req_row?.status === "granted" && req_row.grantedUntil && req_row.grantedUntil > nowMs;
+      if (!granted) {
+        return res.json({ status, grantedUntil });
+      }
+
+      // Proof enrichment
+      const tradesman = await storage.getTradesmanById(tradesmanId);
+      if (!tradesman) return res.json({ status, grantedUntil });
+
+      const today = new Date().toISOString().slice(0, 10);
+      const proof: Record<string, unknown> = {};
+      if (tradesman.insured) {
+        const v = await storage.getLatestApprovedVerification(tradesman.id, "insurance", today);
+        if (v && v.insuranceCoverGbp !== null) {
+          proof.insurance = {
+            coverGbp: v.insuranceCoverGbp,
+            expiryDate: v.expiryDate ?? "",
+            verifiedAt: v.reviewedAt ? new Date(v.reviewedAt).toISOString().slice(0, 10) : today,
+            // filePath MUST NOT be included
+          };
+        }
+      }
+      if (tradesman.licensed) {
+        const v = await storage.getLatestApprovedVerification(tradesman.id, "qualification", today);
+        if (v && v.qualificationType) {
+          proof.qualification = {
+            qualificationType: v.qualificationType,
+            expiryDate: v.expiryDate ?? "",
+            verifiedAt: v.reviewedAt ? new Date(v.reviewedAt).toISOString().slice(0, 10) : today,
+          };
+        }
+      }
+
+      return res.json({ status: "granted", grantedUntil, proof });
+    } catch (err: any) {
+      console.error("[homeowner/access] error:", err?.message);
+      return res.status(500).json({ message: "Internal server error" });
+    }
+  });
+
+  // 6. GET /api/tradesmen/:id/verification-requests  (requireSelf)
+  app.get(
+    "/api/tradesmen/:id/verification-requests",
+    requireAuth, requireSelf(),
+    async (req, res) => {
+      try {
+        const tradesmanId = Number(req.params.id);
+        const requests = await storage.listAllAccessRequestsForTradesman(tradesmanId);
+        res.json(requests);
+      } catch (err: any) {
+        console.error("[verification-requests] list error:", err?.message);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    },
+  );
+
+  // 7. POST /api/tradesmen/:id/verification-requests/:reqId/decide  (requireSelf)
+  const decideRequestSchema = z.object({
+    decision: z.enum(["granted", "denied", "revoked"]),
+    notes: z.string().max(500).optional(),
+  });
+
+  app.post(
+    "/api/tradesmen/:id/verification-requests/:reqId/decide",
+    requireAuth, requireSelf(),
+    async (req, res) => {
+      try {
+        const tradesmanId = Number(req.params.id);
+        const reqId = Number(req.params.reqId);
+        if (!Number.isFinite(reqId)) return res.status(400).json({ message: "Invalid request id" });
+
+        const parsed = decideRequestSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({ message: "Invalid body", errors: parsed.error.flatten() });
+        }
+        const { decision, notes } = parsed.data;
+
+        const existing = await storage.getAccessRequestById(reqId);
+        if (!existing) return res.status(404).json({ message: "Access request not found" });
+        if (existing.tradesmanId !== tradesmanId) return res.status(403).json({ message: "Forbidden" });
+
+        // Revoke only valid when current status is granted
+        if (decision === "revoked" && existing.status !== "granted") {
+          return res.status(409).json({ message: "Can only revoke a granted request" });
+        }
+        // Cannot decide an already-decided request (other than revoke)
+        if (decision !== "revoked" && existing.status !== "pending") {
+          return res.status(409).json({ message: `Request already ${existing.status}` });
+        }
+
+        const updated = await storage.decideAccessRequest(reqId, decision, tradesmanId, notes ?? null);
+
+        const PUBLIC_URL_ENV = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
+
+        if (decision === "granted") {
+          const profileUrl = `${PUBLIC_URL_ENV}/tradesman/${tradesmanId}`;
+          sendVerificationAccessGranted({
+            homeownerEmail: existing.homeownerEmail,
+            tradesmanId,
+            tradesmanName: (await storage.getTradesmanById(tradesmanId))?.businessName ?? "The tradesman",
+            profileUrl,
+            expiresAt: updated.grantedUntil!,
+          }).catch((err: any) => console.error("[homeowner] sendVerificationAccessGranted failed:", err?.message));
+        } else if (decision === "denied") {
+          sendVerificationAccessDenied({
+            homeownerEmail: existing.homeownerEmail,
+            tradesmanId,
+            tradesmanName: (await storage.getTradesmanById(tradesmanId))?.businessName ?? "The tradesman",
+            notes: notes ?? null,
+          }).catch((err: any) => console.error("[homeowner] sendVerificationAccessDenied failed:", err?.message));
+        }
+
+        res.json(updated);
+      } catch (err: any) {
+        console.error("[verification-requests/decide] error:", err?.message);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    },
+  );
+
+  // 8. POST /api/tradesmen/:id/verification-blocks  (requireSelf)
+  const createBlockSchema = z.object({
+    email: z.string().min(3).max(254),
+    reason: z.string().max(500).optional(),
+  });
+
+  app.post(
+    "/api/tradesmen/:id/verification-blocks",
+    requireAuth, requireSelf(),
+    async (req, res) => {
+      try {
+        const tradesmanId = Number(req.params.id);
+
+        const parsed = createBlockSchema.safeParse(req.body);
+        if (!parsed.success) {
+          return res.status(400).json({ message: "Invalid body", errors: parsed.error.flatten() });
+        }
+        const email = normaliseEmail(parsed.data.email);
+        if (!isValidEmail(email)) {
+          return res.status(400).json({ message: "Invalid email" });
+        }
+
+        const block = await storage.createBlock(tradesmanId, email, parsed.data.reason ?? null);
+
+        // Revoke any active grant for this email
+        const activeReq = await storage.getActiveAccessRequest(email, tradesmanId);
+        if (activeReq && activeReq.status === "granted") {
+          await storage.decideAccessRequest(activeReq.id, "revoked", tradesmanId, "Blocked by tradesman");
+        }
+
+        res.status(201).json(block);
+      } catch (err: any) {
+        console.error("[verification-blocks/create] error:", err?.message);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    },
+  );
+
+  // 9. DELETE /api/tradesmen/:id/verification-blocks/:blockId  (requireSelf)
+  app.delete(
+    "/api/tradesmen/:id/verification-blocks/:blockId",
+    requireAuth, requireSelf(),
+    async (req, res) => {
+      try {
+        const tradesmanId = Number(req.params.id);
+        const blockId = Number(req.params.blockId);
+        if (!Number.isFinite(blockId)) return res.status(400).json({ message: "Invalid block id" });
+
+        await storage.deleteBlock(blockId, tradesmanId);
+        res.json({ ok: true });
+      } catch (err: any) {
+        console.error("[verification-blocks/delete] error:", err?.message);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    },
+  );
 
   return httpServer;
 }

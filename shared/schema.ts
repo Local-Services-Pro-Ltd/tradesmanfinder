@@ -601,3 +601,69 @@ export const PARTNER_ENQUIRY_VERTICALS = [
 export const PARTNER_ENQUIRY_STATUSES = [
   "new", "contacted", "qualified", "won", "lost",
 ] as const;
+
+/* ─────────────────────────────────────────────
+   HOMEOWNER ACCESS (PR D)
+
+   Three tables + reuse of magic_link_tokens (purpose='homeowner_verify_access')
+   that together implement the consent-gated proof-viewing flow:
+
+   homeowner_sessions        — parallel to `sessions` but no tradesman_id;
+                               cookie name tf_homeowner, 30-day sliding
+   verification_access_requests — homeowner requests to view a tradesman's
+                               verification proofs; tradesman approves/denies
+   verification_access_blocks  — permanent block by tradesman of a homeowner
+                               email; prevents future requests
+   ───────────────────────────────────────────── */
+
+export const homeownerSessions = pgTable("homeowner_sessions", {
+  id: text("id").primaryKey(),              // 256-bit hex cookie value
+  email: text("email").notNull(),           // lowercased
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(),  // sliding 30-day
+  lastSeenAt: bigint("last_seen_at", { mode: "number" }).notNull(),
+  requestIp: text("request_ip"),
+  requestUserAgent: text("request_user_agent"),
+});
+export const insertHomeownerSessionSchema = createInsertSchema(homeownerSessions).omit({ createdAt: true, lastSeenAt: true });
+export type InsertHomeownerSession = z.infer<typeof insertHomeownerSessionSchema>;
+export type HomeownerSession = typeof homeownerSessions.$inferSelect;
+
+export const verificationAccessRequests = pgTable("verification_access_requests", {
+  id: serial("id").primaryKey(),
+  homeownerEmail: text("homeowner_email").notNull(),   // lowercased
+  tradesmanId: integer("tradesman_id").notNull(),
+  status: text("status").notNull().default("pending"),  // pending | granted | denied | revoked
+  requestedAt: bigint("requested_at", { mode: "number" }).notNull(),
+  decidedAt: bigint("decided_at", { mode: "number" }),               // when granted/denied
+  decidedByTradesmanId: integer("decided_by_tradesman_id"),           // audit
+  grantedUntil: bigint("granted_until", { mode: "number" }),         // 7d from grant; null when not granted
+  revokedAt: bigint("revoked_at", { mode: "number" }),
+  notes: text("notes"),                                               // optional tradesman note
+  requestIp: text("request_ip"),
+  requestUserAgent: text("request_user_agent"),
+});
+export const insertVerificationAccessRequestSchema = createInsertSchema(verificationAccessRequests).omit({
+  id: true, status: true, decidedAt: true, decidedByTradesmanId: true,
+  grantedUntil: true, revokedAt: true, notes: true,
+});
+export type InsertVerificationAccessRequest = z.infer<typeof insertVerificationAccessRequestSchema>;
+export type VerificationAccessRequest = typeof verificationAccessRequests.$inferSelect;
+
+export const verificationAccessBlocks = pgTable("verification_access_blocks", {
+  id: serial("id").primaryKey(),
+  tradesmanId: integer("tradesman_id").notNull(),
+  homeownerEmail: text("homeowner_email").notNull(),  // lowercased
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  reason: text("reason"),
+});
+export const insertVerificationAccessBlockSchema = createInsertSchema(verificationAccessBlocks).omit({
+  id: true, createdAt: true,
+});
+export type InsertVerificationAccessBlock = z.infer<typeof insertVerificationAccessBlockSchema>;
+export type VerificationAccessBlock = typeof verificationAccessBlocks.$inferSelect;
+
+export const ACCESS_REQUEST_STATUSES = [
+  "pending", "granted", "denied", "revoked",
+] as const;
+export type AccessRequestStatus = (typeof ACCESS_REQUEST_STATUSES)[number];
