@@ -8,6 +8,7 @@ import {
   creditTransactions,
   tradesmanCredits,
   tradesmanCards,
+  tradesmanVerifications,
   moderationLog,
   paymentsLog,
   magicLinkTokens,
@@ -28,6 +29,7 @@ import type {
   CreditTransaction, InsertCreditTransaction,
   TradesmanCredits,
   TradesmanCard, InsertTradesmanCard,
+  TradesmanVerification, InsertTradesmanVerification, VerificationKind, VerificationStatus,
   ModerationLogEntry,
   InsertPaymentsLog, PaymentsLogEntry,
   MagicLinkToken, InsertMagicLinkToken,
@@ -177,6 +179,34 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
     amount_pence: number;
     metadata?: Record<string, unknown>;
   }): Promise<void>;
+  // ── tradesman verifications (insurance / qualifications) ──
+  createTradesmanVerification(input: InsertTradesmanVerification & {
+    fileMimeType: string;
+    fileSizeBytes: number;
+    filePath: string;
+  }): Promise<TradesmanVerification>;
+  /** All verifications for a tradesman, most recent first. */
+  getTradesmanVerificationsByTradesman(tradesmanId: number): Promise<TradesmanVerification[]>;
+  getTradesmanVerificationById(id: number): Promise<TradesmanVerification | undefined>;
+  /** All pending verifications across all tradesmen, oldest first (FIFO review queue). */
+  getPendingTradesmanVerifications(limit?: number): Promise<TradesmanVerification[]>;
+  /** Apply an admin decision. status='rejected' requires reviewerNote. */
+  decideTradesmanVerification(
+    id: number,
+    decision: {
+      status: Exclude<VerificationStatus, "pending">;
+      reviewedBy: string;
+      reviewerNote?: string | null;
+      reviewedAt: number;
+    },
+  ): Promise<TradesmanVerification | undefined>;
+  /** The most recent approved+unexpired record for a given kind, if any. Used
+   *  to drive the `tradesmen.insured` / `tradesmen.licensed` derived flags. */
+  getLatestApprovedVerification(
+    tradesmanId: number,
+    kind: VerificationKind,
+    nowYmd: string,
+  ): Promise<TradesmanVerification | undefined>;
 }
 
 const now = () => Date.now();
@@ -754,6 +784,83 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
       occurredAt: now(),
       metadata: input.metadata ? JSON.stringify(input.metadata) : null,
     });
+  }
+
+  /* ── tradesman verifications (insurance / qualifications) ── */
+  async createTradesmanVerification(input: InsertTradesmanVerification & {
+    fileMimeType: string;
+    fileSizeBytes: number;
+    filePath: string;
+  }): Promise<TradesmanVerification> {
+    const [row] = await db.insert(tradesmanVerifications).values({
+      tradesmanId: input.tradesmanId,
+      kind: input.kind,
+      filePath: input.filePath,
+      fileMimeType: input.fileMimeType,
+      fileSizeBytes: input.fileSizeBytes,
+      qualificationType: input.qualificationType ?? null,
+      insuranceCoverGbp: input.insuranceCoverGbp ?? null,
+      expiryDate: input.expiryDate ?? null,
+      status: "pending",
+      submittedAt: now(),
+    }).returning();
+    return row;
+  }
+
+  async getTradesmanVerificationsByTradesman(tradesmanId: number): Promise<TradesmanVerification[]> {
+    return db.select().from(tradesmanVerifications)
+      .where(eq(tradesmanVerifications.tradesmanId, tradesmanId))
+      .orderBy(desc(tradesmanVerifications.submittedAt));
+  }
+
+  async getTradesmanVerificationById(id: number): Promise<TradesmanVerification | undefined> {
+    return one(db.select().from(tradesmanVerifications).where(eq(tradesmanVerifications.id, id)));
+  }
+
+  async getPendingTradesmanVerifications(limit = 200): Promise<TradesmanVerification[]> {
+    return db.select().from(tradesmanVerifications)
+      .where(eq(tradesmanVerifications.status, "pending"))
+      .orderBy(tradesmanVerifications.submittedAt)
+      .limit(limit);
+  }
+
+  async decideTradesmanVerification(
+    id: number,
+    decision: {
+      status: Exclude<VerificationStatus, "pending">;
+      reviewedBy: string;
+      reviewerNote?: string | null;
+      reviewedAt: number;
+    },
+  ): Promise<TradesmanVerification | undefined> {
+    const [row] = await db.update(tradesmanVerifications).set({
+      status: decision.status,
+      reviewedBy: decision.reviewedBy,
+      reviewerNote: decision.reviewerNote ?? null,
+      reviewedAt: decision.reviewedAt,
+    }).where(eq(tradesmanVerifications.id, id)).returning();
+    return row;
+  }
+
+  async getLatestApprovedVerification(
+    tradesmanId: number,
+    kind: VerificationKind,
+    nowYmd: string,
+  ): Promise<TradesmanVerification | undefined> {
+    // "Unexpired" means expiryDate is NULL (unknown — we treat as valid since the
+    // reviewer chose to approve without one) OR expiryDate >= today's YYYY-MM-DD.
+    // String comparison works because ISO dates are lexicographically ordered.
+    return one(
+      db.select().from(tradesmanVerifications)
+        .where(and(
+          eq(tradesmanVerifications.tradesmanId, tradesmanId),
+          eq(tradesmanVerifications.kind, kind),
+          eq(tradesmanVerifications.status, "approved"),
+          sql`(${tradesmanVerifications.expiryDate} IS NULL OR ${tradesmanVerifications.expiryDate} >= ${nowYmd})`,
+        ))
+        .orderBy(desc(tradesmanVerifications.submittedAt))
+        .limit(1),
+    );
   }
 }
 

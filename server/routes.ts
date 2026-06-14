@@ -1,4 +1,5 @@
 import type { Express } from "express";
+import { json as expressJson } from "express";
 import type { Server } from "node:http";
 import { storage } from "./storage";
 import {
@@ -6,7 +7,12 @@ import {
   insertPartnerEnquirySchema, PARTNER_ENQUIRY_VERTICALS,
   insertPartnerSchema, insertPartnerPlacementSchema,
   PARTNER_ENQUIRY_STATUSES, PARTNER_STATUSES, PARTNER_SURFACES, PARTNER_COMMERCIAL_MODELS, PARTNER_VERTICALS,
+  VERIFICATION_KINDS,
 } from "@shared/schema";
+import {
+  ALLOWED_MIME_TYPES, MAX_FILE_BYTES,
+  newStoragePath, uploadVerificationFile, signVerificationUrl,
+} from "./verifications-storage";
 import { selectPlacements, debugPlacements } from "./placement-engine";
 import { resolveMicrositeByHost, MICROSITES } from "@shared/microsites";
 import { computeInvoice, computeStats } from "./invoice-generator";
@@ -1792,6 +1798,203 @@ res.json(updated);
     });
 
     res.json(result);
+  });
+
+  // ======================================================================
+  // TRADESMAN VERIFICATIONS — PR A (schema + storage wiring)
+  //
+  // Tier-1 manual-review flow for insurance certificates and qualification
+  // documents. Tradesmen upload a single file as a base64-encoded JSON body
+  // (kept small — MAX_FILE_BYTES=5MB). Admins review via a queue endpoint and
+  // approve/reject; on approval we also flip the matching `insured`/`licensed`
+  // boolean on the parent `tradesmen` row (PATCH /api/tradesmen/:id blocks
+  // those fields, so this admin path is the only way they become true).
+  //
+  // The file itself never leaves the server unsigned — admins fetch a short-
+  // lived signed URL (5 min default) from /file-url.
+  // ======================================================================
+
+  // Zod schemas for the upload + decision request bodies. Kept inline because
+  // they're route-local and reference VERIFICATION_KINDS already imported.
+  const uploadVerificationBodySchema = z.object({
+    kind: z.enum(VERIFICATION_KINDS),
+    fileBase64: z.string().min(1, "fileBase64 is required"),
+    fileMimeType: z.string().min(1),
+    fileName: z.string().max(255).optional(),
+    qualificationType: z.string().min(1).max(80).optional().nullable(),
+    insuranceCoverGbp: z.number().int().min(0).max(100_000_000).optional().nullable(),
+    expiryDate: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, "expiry_date must be YYYY-MM-DD")
+      .optional()
+      .nullable(),
+  });
+
+  const decideVerificationBodySchema = z
+    .object({
+      status: z.enum(["approved", "rejected"]),
+      reviewerNote: z.string().max(1000).optional().nullable(),
+    })
+    .refine(
+      (d) => d.status !== "rejected" || (!!d.reviewerNote && d.reviewerNote.trim().length >= 5),
+      { message: "reviewerNote of at least 5 characters is required when rejecting", path: ["reviewerNote"] },
+    );
+
+  // -- POST /api/tradesmen/:id/verifications -- upload a new doc (tradesman only)
+  // Why JSON-base64 instead of multipart: avoids adding a new dependency
+  // (multer/busboy). 5MB cap stays within the per-route express.json limit.
+  app.post(
+    "/api/tradesmen/:id/verifications",
+    expressJson({ limit: "8mb" }), // file is base64 (~33% larger than raw 5MB cap)
+    requireAuth,
+    requireSelf("id"),
+    async (req, res) => {
+      const tradesmanId = Number(req.params.id);
+      if (!Number.isFinite(tradesmanId)) return res.status(400).json({ message: "Invalid tradesman id" });
+
+      const parsed = uploadVerificationBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: "Invalid upload", errors: parsed.error.flatten() });
+      }
+      const body = parsed.data;
+
+      const mime = body.fileMimeType.toLowerCase();
+      if (!ALLOWED_MIME_TYPES.includes(mime)) {
+        return res.status(415).json({
+          message: `Unsupported file type. Allowed: ${ALLOWED_MIME_TYPES.join(", ")}`,
+        });
+      }
+
+      // Decode base64 once and check size before touching Supabase Storage.
+      let buf: Buffer;
+      try {
+        buf = Buffer.from(body.fileBase64, "base64");
+      } catch {
+        return res.status(400).json({ message: "fileBase64 is not valid base64" });
+      }
+      if (buf.byteLength === 0) {
+        return res.status(400).json({ message: "Decoded file is empty" });
+      }
+      if (buf.byteLength > MAX_FILE_BYTES) {
+        return res.status(413).json({
+          message: `File too large. Max ${MAX_FILE_BYTES} bytes (${Math.round(MAX_FILE_BYTES / 1024 / 1024)} MB).`,
+        });
+      }
+
+      // Cross-field sanity: qualificationType only for kind='qualification',
+      // insuranceCoverGbp only for kind='insurance'. Don't 400 — just null the
+      // irrelevant field so older clients can't smuggle data.
+      const qualificationType = body.kind === "qualification" ? body.qualificationType ?? null : null;
+      const insuranceCoverGbp = body.kind === "insurance" ? body.insuranceCoverGbp ?? null : null;
+
+      const path = newStoragePath(tradesmanId, body.kind, mime);
+      try {
+        await uploadVerificationFile(path, buf, mime);
+      } catch (e) {
+        console.error("[verifications] upload failed:", e);
+        return res.status(502).json({ message: "Storage upload failed. Please try again." });
+      }
+
+      const created = await storage.createTradesmanVerification({
+        tradesmanId,
+        kind: body.kind,
+        filePath: path,
+        fileMimeType: mime,
+        fileSizeBytes: buf.byteLength,
+        qualificationType,
+        insuranceCoverGbp,
+        expiryDate: body.expiryDate ?? null,
+      });
+
+      // Don't leak the storage path back to the tradesman — they don't need it.
+      const { filePath: _omit, ...safe } = created;
+      void _omit;
+      res.status(201).json(safe);
+    },
+  );
+
+  // -- GET /api/tradesmen/:id/verifications -- tradesman's own list (or admin)
+  app.get("/api/tradesmen/:id/verifications", requireAuth, async (req: any, res) => {
+    const tradesmanId = Number(req.params.id);
+    if (!Number.isFinite(tradesmanId)) return res.status(400).json({ message: "Invalid tradesman id" });
+    const isAdmin = isAdminReq(req);
+    const isSelf = req.tradesman?.id === tradesmanId;
+    if (!isAdmin && !isSelf) return res.status(403).json({ message: "Forbidden" });
+    const rows = await storage.getTradesmanVerificationsByTradesman(tradesmanId);
+    // Strip filePath for non-admin viewers — admins can fetch /file-url instead.
+    const out = rows.map((r) => {
+      if (isAdmin) return r;
+      const { filePath: _f, ...safe } = r;
+      void _f;
+      return safe;
+    });
+    res.json(out);
+  });
+
+  // -- GET /api/admin/verifications/pending -- moderation queue
+  app.get("/api/admin/verifications/pending", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const limit = req.query.limit ? Math.min(Math.max(Number(req.query.limit) || 50, 1), 500) : 200;
+    const rows = await storage.getPendingTradesmanVerifications(limit);
+    res.json(rows);
+  });
+
+  // -- GET /api/admin/verifications/:id/file-url -- short-lived signed URL
+  app.get("/api/admin/verifications/:id/file-url", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid verification id" });
+    const row = await storage.getTradesmanVerificationById(id);
+    if (!row) return res.status(404).json({ message: "Verification not found" });
+    const ttl = req.query.ttl ? Math.min(Math.max(Number(req.query.ttl) || 300, 30), 3600) : 300;
+    try {
+      const url = await signVerificationUrl(row.filePath, ttl);
+      res.json({ url, expiresInSeconds: ttl, mimeType: row.fileMimeType });
+    } catch (e) {
+      console.error("[verifications] sign-url failed:", e);
+      res.status(502).json({ message: "Could not generate signed URL" });
+    }
+  });
+
+  // -- POST /api/admin/verifications/:id/decide -- approve or reject
+  // On approval, also flip the matching `insured` or `licensed` boolean on the
+  // parent tradesman row so the existing public badge logic Just Works.
+  app.post("/api/admin/verifications/:id/decide", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid verification id" });
+
+    const parsed = decideVerificationBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ message: "Invalid decision", errors: parsed.error.flatten() });
+    }
+    const decision = parsed.data;
+
+    const existing = await storage.getTradesmanVerificationById(id);
+    if (!existing) return res.status(404).json({ message: "Verification not found" });
+    if (existing.status !== "pending") {
+      return res.status(409).json({ message: `Already ${existing.status}` });
+    }
+
+    const adminId = String((req.body && req.body.adminId) || req.headers["x-admin-id"] || "admin");
+    const updated = await storage.decideTradesmanVerification(id, {
+      status: decision.status,
+      reviewedBy: adminId,
+      reviewerNote: decision.reviewerNote ?? null,
+      reviewedAt: Date.now(),
+    });
+
+    // On approval, flip the matching boolean on the tradesman row. We don't
+    // un-flip on rejection — that would create a footgun where a second
+    // rejected upload silently revokes a previously-approved badge. Revocation
+    // is a separate admin action (TODO PR-C, if needed).
+    if (decision.status === "approved" && updated) {
+      const patch: Partial<Tradesman> =
+        updated.kind === "insurance" ? { insured: true } : { licensed: true };
+      await storage.updateTradesman(updated.tradesmanId, patch);
+    }
+
+    res.json(updated);
   });
 
   return httpServer;
