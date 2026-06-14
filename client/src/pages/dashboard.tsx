@@ -15,6 +15,7 @@ import { timeAgo } from "@/lib/api-types";
 import { getFeaturedState, formatFeaturedDate, type FeaturedState } from "@shared/featured-state";
 import { Wallet, Inbox, Star, TrendingUp, CheckCircle2, Phone, Mail, Plus, LogIn, Zap, Gavel, AlertTriangle, AlertCircle, Ban, Square, Info, LogOut, CreditCard } from "lucide-react";
 import { CardBadge } from "@/components/card-badge";
+import { VerificationsTab } from "@/components/verifications-tab";
 
 // Lead pack catalogue. The `priceEnvKey` matches a STRIPE_PRICE_LEAD_PACK_*
 // env var exposed to the client via Vite's VITE_ prefix. If the env var is
@@ -354,6 +355,7 @@ export default function Dashboard() {
             <TabsTrigger value="leads" data-testid="tab-leads">Leads</TabsTrigger>
             <TabsTrigger value="credits" data-testid="tab-credits">Credits</TabsTrigger>
             <TabsTrigger value="reviews" data-testid="tab-reviews">Reviews</TabsTrigger>
+            <TabsTrigger value="verifications" data-testid="tab-verifications">Verification</TabsTrigger>
             <TabsTrigger value="conduct" data-testid="tab-conduct">
               Conduct{data.cardSummary && (data.cardSummary.warnings + data.cardSummary.yellows + data.cardSummary.reds) > 0 ? ` (${data.cardSummary.warnings + data.cardSummary.yellows + data.cardSummary.reds})` : ""}
             </TabsTrigger>
@@ -507,6 +509,15 @@ export default function Dashboard() {
                 </span>
               </div>
             </Card>
+          </TabsContent>
+
+          {/* Verifications — PR B */}
+          <TabsContent value="verifications" className="mt-5">
+            <VerificationsTab
+              tradesmanId={tradesmanId!}
+              insured={!!data.tradesman.insured}
+              licensed={!!data.tradesman.licensed}
+            />
           </TabsContent>
 
           {/* Reviews */}
