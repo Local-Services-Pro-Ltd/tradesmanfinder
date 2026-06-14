@@ -1,17 +1,13 @@
 /**
  * VerificationBlocksTab — Manage permanently-blocked homeowner emails.
  *
- * NOTE: There is no GET /api/tradesmen/:id/verification-blocks endpoint in
- * the current backend (PR D). This tab manages local state — blocks you add
- * in this session appear in the list; they are cleared on page reload.
- * A future PR can add a GET endpoint and hydrate the list from the server.
- *
  * Endpoints used:
+ *   GET    /api/tradesmen/:id/verification-blocks               → list blocks
  *   POST   /api/tradesmen/:id/verification-blocks  body: { email, reason? }
  *   DELETE /api/tradesmen/:id/verification-blocks/:blockId
  */
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,9 +33,23 @@ interface Props {
 
 export function VerificationBlocksTab({ tradesmanId, defaultEmail }: Props) {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
 
-  // Local list — populated by successful POST responses
-  const [blocks, setBlocks] = useState<Block[]>([]);
+  const QUERY_KEY = ["/api/tradesmen", tradesmanId, "verification-blocks"] as const;
+
+  const { data, isLoading, isError } = useQuery<{ blocks: Block[] }>({
+    queryKey: QUERY_KEY,
+    queryFn: async () => {
+      const res = await apiRequest(
+        "GET",
+        `/api/tradesmen/${tradesmanId}/verification-blocks`,
+      );
+      return res.json();
+    },
+  });
+
+  const blocks = data?.blocks ?? [];
+
   const [email, setEmail] = useState(defaultEmail ?? "");
   const [reason, setReason] = useState("");
 
@@ -55,7 +65,7 @@ export function VerificationBlocksTab({ tradesmanId, defaultEmail }: Props) {
       return res.json() as Promise<Block>;
     },
     onSuccess: (block) => {
-      setBlocks((prev) => [block, ...prev]);
+      queryClient.invalidateQueries({ queryKey: QUERY_KEY });
       toast({
         title: "Email blocked",
         description: `${block.homeownerEmail} will no longer be able to request your verification details.`,
@@ -81,8 +91,8 @@ export function VerificationBlocksTab({ tradesmanId, defaultEmail }: Props) {
       );
       return blockId;
     },
-    onSuccess: (blockId) => {
-      setBlocks((prev) => prev.filter((b) => b.id !== blockId));
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: QUERY_KEY });
       toast({ title: "Block removed" });
     },
     onError: () => {
@@ -156,12 +166,16 @@ export function VerificationBlocksTab({ tradesmanId, defaultEmail }: Props) {
           )}
         </h3>
 
-        {blocks.length === 0 ? (
+        {isLoading ? (
+          <p className="mt-4 text-sm text-muted-foreground">Loading blocked emails…</p>
+        ) : isError ? (
+          <p className="mt-4 text-sm text-destructive">
+            Could not load blocked emails. Please refresh and try again.
+          </p>
+        ) : blocks.length === 0 ? (
           <div className="mt-4 flex items-start gap-2 rounded-md border border-dashed border-border bg-muted/20 p-4 text-sm text-muted-foreground">
             <Info className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>
-              No emails blocked this session. Blocks you add above appear here.
-            </span>
+            <span>No blocked emails.</span>
           </div>
         ) : (
           <div className="mt-3 space-y-2">
