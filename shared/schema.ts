@@ -233,6 +233,68 @@ export type InsertTradesmanCard = z.infer<typeof insertTradesmanCardSchema>;
 export type TradesmanCard = typeof tradesmanCards.$inferSelect;
 
 /* ──────────────────────────────────────────────
+   TRADESMAN VERIFICATIONS (Insurance / Qualifications)
+
+   Why a separate table when tradesmen.insured / .licensed already exist:
+   the booleans on `tradesmen` are the *current public-facing flag* (used by
+   listing cards, badges, search filters). This table holds the *evidence*
+   for each submission — kind, uploaded file, reviewer notes, expiry date —
+   and a tradesman can re-submit (e.g. annual insurance renewal) over time.
+   On admin approve we set the boolean on tradesmen; on rejection or expiry
+   we leave it false. Many rows per tradesman, both kinds independent.
+
+   `kind` is one of: "insurance" | "qualification".
+   `status` is one of: "pending" | "approved" | "rejected".
+   `filePath` is the path inside the Supabase Storage bucket
+   `SUPABASE_VERIFICATIONS_BUCKET` (never a public URL — admin views fetch a
+   short-lived signed URL on demand via server/verifications-storage.ts).
+   `qualificationType` is free-form (e.g. "Gas Safe", "NICEIC",
+   "City & Guilds 2391", "Other") for qualification submissions only.
+   ────────────────────────────────────────────── */
+export const tradesmanVerifications = pgTable("tradesman_verifications", {
+  id: serial("id").primaryKey(),
+  tradesmanId: integer("tradesman_id").notNull(),
+  kind: text("kind").notNull(), // 'insurance' | 'qualification'
+  filePath: text("file_path").notNull(), // path inside the private storage bucket
+  fileMimeType: text("file_mime_type").notNull(),
+  fileSizeBytes: integer("file_size_bytes").notNull(),
+  qualificationType: text("qualification_type"), // nullable; only set when kind='qualification'
+  insuranceCoverGbp: integer("insurance_cover_gbp"), // nullable; only set when kind='insurance'
+  expiryDate: text("expiry_date"), // ISO YYYY-MM-DD, nullable until known
+  status: text("status").notNull().default("pending"), // 'pending' | 'approved' | 'rejected'
+  submittedAt: bigint("submitted_at", { mode: "number" }).notNull(),
+  reviewedAt: bigint("reviewed_at", { mode: "number" }), // nullable until reviewed
+  reviewedBy: text("reviewed_by"), // admin identifier ('admin' for now)
+  reviewerNote: text("reviewer_note"), // optional message, required when status='rejected'
+});
+export const VERIFICATION_KINDS = ["insurance", "qualification"] as const;
+export const VERIFICATION_STATUSES = ["pending", "approved", "rejected"] as const;
+export type VerificationKind = (typeof VERIFICATION_KINDS)[number];
+export type VerificationStatus = (typeof VERIFICATION_STATUSES)[number];
+
+export const insertTradesmanVerificationSchema = createInsertSchema(tradesmanVerifications)
+  .omit({
+    id: true,
+    submittedAt: true,
+    reviewedAt: true,
+    reviewedBy: true,
+    reviewerNote: true,
+    status: true,
+  })
+  .extend({
+    kind: z.enum(VERIFICATION_KINDS),
+    qualificationType: z.string().min(1).max(80).optional().nullable(),
+    insuranceCoverGbp: z.number().int().min(0).max(100_000_000).optional().nullable(),
+    expiryDate: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, "expiry_date must be YYYY-MM-DD")
+      .optional()
+      .nullable(),
+  });
+export type InsertTradesmanVerification = z.infer<typeof insertTradesmanVerificationSchema>;
+export type TradesmanVerification = typeof tradesmanVerifications.$inferSelect;
+
+/* ──────────────────────────────────────────────
    MODERATION LOG — full audit trail of card actions
    ────────────────────────────────────────────── */
 export const moderationLog = pgTable("moderation_log", {
