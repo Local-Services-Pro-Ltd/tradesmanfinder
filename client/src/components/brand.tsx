@@ -3,22 +3,23 @@ import * as Icons from "lucide-react";
 import { Star, ShieldCheck, BadgeCheck, Award, Clock } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-/* ───────── Logo (custom SVG word-mark) ─────────
-   Geometric trade-tool inspired mark: a stylised plumb-bob / location pin
-   formed from a triangle + bob, evoking "finding" + "trade tools". */
+/* ───────── Logo (TF monogram badge) ─────────
+   Navy rounded-square badge with white "TF" lockup where the wrench-shaped
+   crossbar of the T doubles as the top arm of the F (one shape, two jobs),
+   plus an orange accent dot. Wordmark kept beside the mark.
+   Source PNG: client/public/logo.png (transparent, square). */
 export function Logo({ className, showText = true }: { className?: string; showText?: boolean }) {
   return (
     <Link href="/" data-testid="link-logo" className={cn("flex items-center gap-2.5 group", className)}>
-      <span className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-navy text-primary-foreground shadow-sm">
-        <svg width="24" height="24" viewBox="0 0 32 32" fill="none" aria-label="TradesmanFinder mark">
-          {/* roof / level triangle */}
-          <path d="M16 3L28 11V13L16 7L4 13V11L16 3Z" fill="hsl(31 81% 51%)" />
-          {/* plumb line */}
-          <line x1="16" y1="9" x2="16" y2="22" stroke="hsl(31 81% 51%)" strokeWidth="2" strokeLinecap="round" />
-          {/* plumb bob */}
-          <path d="M16 21L19 25L16 29L13 25L16 21Z" fill="currentColor" stroke="hsl(31 81% 51%)" strokeWidth="1.2" />
-        </svg>
-      </span>
+      <img
+        src="/logo.png"
+        width={36}
+        height={36}
+        alt="TradesmanFinder"
+        className="h-9 w-9 shrink-0"
+        loading="eager"
+        decoding="async"
+      />
       {showText && (
         <span className="font-display font-bold text-lg leading-none tracking-tight text-foreground">
           Tradesman<span className="text-primary">Finder</span>
