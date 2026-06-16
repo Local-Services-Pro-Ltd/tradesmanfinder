@@ -20,7 +20,7 @@ import { registerClickRoute } from "./click-tracking";
 import { registerOutcomeCaptureRoute } from "./outcome-capture";
 import { signOutcomeToken, buildOutcomeLink } from "./outcome-tokens";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
-import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail, sendOutcomeAskEmail, sendHomeownerMagicLink, sendVerificationRequestToTradesman, sendVerificationAccessGranted, sendVerificationAccessDenied } from "./mailer";
+import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail, sendOutcomeAskEmail, sendHomeownerMagicLink, sendVerificationRequestToTradesman, sendVerificationAccessGranted, sendVerificationAccessDenied, sendFoundingProInterest } from "./mailer";
 import {
   requireHomeowner, readHomeownerSessionCookie, setHomeownerSessionCookie, clearHomeownerSessionCookie,
   HOMEOWNER_SESSION_TTL_MS, HOMEOWNER_RATE_LIMIT_MAX, HOMEOWNER_RATE_LIMIT_WINDOW_MS, HOMEOWNER_REQUEST_THROTTLE_MS,
@@ -920,6 +920,58 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         // Return only the id + a confirmation flag — never echo the submission
         // (defends against reflected-XSS scenarios and reduces enumeration risk).
         res.status(201).json({ id: enquiry.id, ok: true });
+      } catch (e) {
+        if (e instanceof z.ZodError) {
+          return res.status(400).json({ message: "Validation failed", errors: e.errors });
+        }
+        throw e;
+      }
+    },
+  );
+
+  // ── Founding Pro interest form ──
+  // Inbound from /founding-pro/interest. No DB write — this is the Quick fix
+  // to unblock the live pilot cohort (10 invitees sent 15 June 2026). A proper
+  // claim flow with profile pre-fill will replace this.
+  //
+  // Mailer send is AWAITED (not fire-and-forget) so a Vercel serverless
+  // teardown can't kill the in-flight Resend POST — see PR #104 for the
+  // homeowner-access fix that established this pattern.
+  app.post(
+    "/api/founding-pro/interest",
+    publicFormGuard({ windowMs: 10 * 60 * 1000, max: 3 }),
+    async (req, res) => {
+      try {
+        const schema = z.object({
+          companyName: z.string().min(1).max(200),
+          contactName: z.string().min(1).max(120),
+          email: z.string().email().max(200),
+          phone: z.string().min(5).max(40),
+          trades: z.string().min(1).max(200),
+          postcodes: z.string().min(1).max(200),
+          bio: z.string().min(1).max(2000),
+          ref: z.string().max(80).nullable().optional(),
+        });
+        const parsed = schema.parse(req.body);
+
+        const result = await sendFoundingProInterest({
+          companyName: parsed.companyName,
+          contactName: parsed.contactName,
+          email: parsed.email,
+          phone: parsed.phone,
+          trades: parsed.trades,
+          postcodes: parsed.postcodes,
+          bio: parsed.bio,
+          ref: parsed.ref ?? null,
+        });
+
+        if (!result.ok) {
+          // Log internally but still 200 to the user — we'll see the failure in
+          // server logs and email_log; meanwhile the pro doesn't get a scary
+          // error after typing all that, and we have the submission in logs.
+          console.error(`[founding-pro-interest] mailer failed:`, result.error);
+        }
+        res.status(201).json({ ok: true });
       } catch (e) {
         if (e instanceof z.ZodError) {
           return res.status(400).json({ message: "Validation failed", errors: e.errors });
