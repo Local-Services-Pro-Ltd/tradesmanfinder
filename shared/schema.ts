@@ -80,6 +80,10 @@ export const tradesmen = pgTable("tradesmen", {
   stripeSubscriptionId: text("stripe_subscription_id"),
   subscriptionStatus: text("subscription_status"),
   featuredUntil: bigint("featured_until", { mode: "number" }),
+  // Tags a profile created via the Founding Pro pilot claim flow (see
+  // founding_pro_invites below). Drives the 30-day free-unlock window copy and
+  // any future Founding-Pro-only badging. Defaults false for all existing rows.
+  foundingPro: boolean("founding_pro").notNull().default(false),
 });
 
 export const insertTradesmanSchema = createInsertSchema(tradesmen).omit({
@@ -667,3 +671,61 @@ export const ACCESS_REQUEST_STATUSES = [
   "pending", "granted", "denied", "revoked",
 ] as const;
 export type AccessRequestStatus = (typeof ACCESS_REQUEST_STATUSES)[number];
+
+/* ─────────────────────────────────────────────
+   FOUNDING PRO INVITES (pilot claim flow)
+
+   One row per pilot recipient we email an invite link to. The `ref` is the
+   slug from the outreach payload (e.g. 'wandsworth-plumber-1') and is the
+   join key between the email URL (?ref=…) and this table — it is what
+   /founding-pro/claim?ref=… looks up to pre-fill the claim form.
+
+   Lifecycle of `status`: invited → viewed (on first GET of the invite) →
+   claimed (when the pro submits the claim form and we create their tradesman
+   record) | declined (reserved; not yet wired into a route). Claiming is
+   idempotent — re-submitting returns the already-linked tradesman.
+
+   This SUPERSEDES the fire-and-forget interest form (PR #106) as the canonical
+   path, but that form stays as a no-ref fallback.
+   ───────────────────────────────────────────── */
+export const foundingProInvites = pgTable("founding_pro_invites", {
+  id: serial("id").primaryKey(),
+  ref: text("ref").notNull().unique(),               // outreach slug, e.g. 'wandsworth-plumber-1'
+  recipientEmail: text("recipient_email").notNull(),
+  recipientName: text("recipient_name"),
+  companyName: text("company_name"),
+  companiesHouseNumber: text("companies_house_number"),
+  trade: text("trade").notNull(),                    // 'plumber' | 'electrician' | …
+  area: text("area").notNull(),                      // 'Wandsworth' | 'Dulwich' | …
+  postcodes: text("postcodes").array().notNull().default([]), // text[]; suggested coverage
+  campaign: text("campaign").notNull().default("founding-pro-pilot-01"),
+  status: text("status").notNull().default("invited"), // 'invited' | 'viewed' | 'claimed' | 'declined'
+  claimedTradesmanId: integer("claimed_tradesman_id"),  // FK→tradesmen.id; null until claimed
+  viewedAt: bigint("viewed_at", { mode: "number" }),    // epoch ms; stamped on first view
+  claimedAt: bigint("claimed_at", { mode: "number" }),  // epoch ms; stamped on claim
+  createdAt: bigint("created_at", { mode: "number" }).notNull().default(0),
+});
+export const insertFoundingProInviteSchema = createInsertSchema(foundingProInvites).omit({
+  id: true, status: true, claimedTradesmanId: true, viewedAt: true, claimedAt: true, createdAt: true,
+});
+export type InsertFoundingProInvite = z.infer<typeof insertFoundingProInviteSchema>;
+export type FoundingProInvite = typeof foundingProInvites.$inferSelect;
+// Shape accepted by storage.seedFoundingProInvites — narrower than the table
+// row (no server-managed lifecycle columns), wider than the insert schema since
+// callers may omit optional fields entirely.
+export type NewFoundingProInvite = {
+  ref: string;
+  recipientEmail: string;
+  recipientName?: string | null;
+  companyName?: string | null;
+  companiesHouseNumber?: string | null;
+  trade: string;
+  area: string;
+  postcodes?: string[];
+  campaign?: string;
+};
+
+export const FOUNDING_PRO_INVITE_STATUSES = [
+  "invited", "viewed", "claimed", "declined",
+] as const;
+export type FoundingProInviteStatus = (typeof FOUNDING_PRO_INVITE_STATUSES)[number];

@@ -6,7 +6,7 @@
 //   EMAIL_FROM      — From address, e.g. "TradesmanFinder Moderation <moderation@tradesmanfinder.com>"
 //                     Falls back to "TradesmanFinder <onboarding@resend.dev>" if unset.
 
-import type { TradesmanCard } from "@shared/schema";
+import type { TradesmanCard, FoundingProInvite } from "@shared/schema";
 import { emailLog } from "@shared/schema";
 import { db } from "./storage";
 import { redactPII } from "./redact-pii";
@@ -587,6 +587,122 @@ export async function sendFoundingProInterest(opts: {
     log: {
       template: "founding_pro_interest",
       tradesmanId: null,
+      partnerId: null,
+    },
+  });
+}
+
+// ── Founding Pro claim — confirmation to the pro ──
+// Sent (awaited) after a pilot recipient completes /founding-pro/claim and we
+// create their tradesman record. Mirrors the await-not-fire-and-forget pattern
+// established for homeowner magic links in PR #104 so a serverless teardown
+// can't kill the in-flight Resend POST.
+export async function sendFoundingProClaimed(opts: {
+  to: string;
+  firstName?: string | null;
+  companyName?: string | null;
+  dashboardUrl: string;
+  tradesmanId?: number | null;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const greeting = opts.firstName ? `Hi ${escapeHtml(opts.firstName)},` : "Hi,";
+  const who = opts.companyName ? ` for <strong>${escapeHtml(opts.companyName)}</strong>` : "";
+  const subject = "You're in — your Founding Pro profile is live";
+
+  const bodyHtml = `
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">${greeting}</p>
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">Your Founding Pro profile${who} is live on TradesmanFinder. Your 30-day free-unlock window starts now — every job posted in your trade and postcodes unlocks free, no credit purchase needed.</p>
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">Open your dashboard to add photos, review your trades and coverage, and start receiving leads:</p>
+  `;
+  const html = wrap({
+    title: subject,
+    bodyHtml,
+    ctaUrl: opts.dashboardUrl,
+    ctaLabel: "Open my dashboard",
+    accent: "green",
+  });
+  const text =
+    `${opts.firstName ? `Hi ${opts.firstName},` : "Hi,"}\n\n` +
+    `Your Founding Pro profile${opts.companyName ? ` for ${opts.companyName}` : ""} is live on TradesmanFinder. ` +
+    `Your 30-day free-unlock window starts now.\n\n` +
+    `Open your dashboard: ${opts.dashboardUrl}\n`;
+
+  return send({
+    to: opts.to,
+    subject,
+    html,
+    text,
+    tag: "founding_pro_claimed",
+    log: {
+      template: "founding_pro_claimed",
+      tradesmanId: opts.tradesmanId ?? null,
+      partnerId: null,
+    },
+  });
+}
+
+// ── Founding Pro claim — internal notification to hello@ ──
+// The operational heads-up so the team sees each pilot claim land in the same
+// inbox the outreach replies route to. Awaited + email_log'd, same as above.
+export async function sendFoundingProInternalNotification(opts: {
+  invite: FoundingProInvite;
+  claimPayload: {
+    phone: string;
+    bio: string;
+    trades: string[];
+    postcodes: string[];
+    website?: string | null;
+    marketingConsent: boolean;
+  };
+  tradesmanId: number;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const { invite, claimPayload, tradesmanId } = opts;
+  const subject = `Founding Pro CLAIMED — ${invite.companyName || invite.recipientEmail} (ref: ${invite.ref})`;
+
+  const bodyHtml = `
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">A Founding Pro invite was <strong>claimed</strong> via /founding-pro/claim. Tradesman record <strong>#${tradesmanId}</strong> created and tagged Founding Pro.</p>
+    <table cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:18px 0;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px">
+      <tr><td style="padding:14px 16px;font-size:13px;line-height:1.7;color:#374151">
+        <div><strong>Ref:</strong> ${escapeHtml(invite.ref)}</div>
+        <div><strong>Company:</strong> ${escapeHtml(invite.companyName || "—")}</div>
+        <div><strong>Contact:</strong> ${escapeHtml(invite.recipientName || "—")}</div>
+        <div><strong>Email:</strong> <a href="mailto:${escapeHtml(invite.recipientEmail)}" style="color:#1d4ed8">${escapeHtml(invite.recipientEmail)}</a></div>
+        <div><strong>Phone:</strong> ${escapeHtml(claimPayload.phone)}</div>
+        <div><strong>Area:</strong> ${escapeHtml(invite.area)}</div>
+        <div><strong>Trades:</strong> ${escapeHtml(claimPayload.trades.join(", "))}</div>
+        <div><strong>Postcodes:</strong> ${escapeHtml(claimPayload.postcodes.join(", "))}</div>
+        ${claimPayload.website ? `<div><strong>Website:</strong> ${escapeHtml(claimPayload.website)}</div>` : ""}
+        <div><strong>Marketing consent:</strong> ${claimPayload.marketingConsent ? "yes" : "no"}</div>
+        <div style="margin-top:10px"><strong>Bio:</strong></div>
+        <div style="margin-top:4px;color:#111827;white-space:pre-wrap">${escapeHtml(claimPayload.bio)}</div>
+      </td></tr>
+    </table>
+  `;
+  const html = wrap({ title: subject, bodyHtml });
+  const text =
+    `Founding Pro CLAIMED — tradesman #${tradesmanId}\n\n` +
+    `Ref: ${invite.ref}\n` +
+    `Company: ${invite.companyName || "—"}\n` +
+    `Contact: ${invite.recipientName || "—"}\n` +
+    `Email: ${invite.recipientEmail}\n` +
+    `Phone: ${claimPayload.phone}\n` +
+    `Area: ${invite.area}\n` +
+    `Trades: ${claimPayload.trades.join(", ")}\n` +
+    `Postcodes: ${claimPayload.postcodes.join(", ")}\n` +
+    (claimPayload.website ? `Website: ${claimPayload.website}\n` : "") +
+    `Marketing consent: ${claimPayload.marketingConsent ? "yes" : "no"}\n\n` +
+    `Bio:\n${claimPayload.bio}\n`;
+
+  const to = process.env.FOUNDING_PRO_NOTIFICATION_EMAIL || "hello@tradesmanfinder.com";
+
+  return send({
+    to,
+    subject,
+    html,
+    text,
+    tag: "founding_pro_internal",
+    log: {
+      template: "founding_pro_internal",
+      tradesmanId,
       partnerId: null,
     },
   });

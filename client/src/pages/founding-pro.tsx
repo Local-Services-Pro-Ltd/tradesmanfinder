@@ -6,13 +6,17 @@ import { Badge } from "@/components/ui/badge";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Check, ShieldCheck, Sparkles, Clock, MapPin } from "lucide-react";
 
-// Read the ?ref= param if present so the interest form knows which pilot
-// recipient this is. Done at module top-level so it survives client routing.
+// Decide where the "Claim my spot" CTAs point. With a ?ref= present this is a
+// real pilot invite, so route to the ref-aware claim page that pre-fills the
+// profile. With no ref there's no invite to look up, so fall back to the
+// generic interest form (PR #106).
 function claimHref(): string {
   if (typeof window === "undefined") return "/founding-pro/interest";
   const params = new URLSearchParams(window.location.search);
   const ref = params.get("ref");
-  return ref ? `/founding-pro/interest?ref=${encodeURIComponent(ref)}` : "/founding-pro/interest";
+  return ref
+    ? `/founding-pro/claim?ref=${encodeURIComponent(ref)}`
+    : "/founding-pro/interest";
 }
 
 const INCLUDED = [

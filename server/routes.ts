@@ -20,7 +20,7 @@ import { registerClickRoute } from "./click-tracking";
 import { registerOutcomeCaptureRoute } from "./outcome-capture";
 import { signOutcomeToken, buildOutcomeLink } from "./outcome-tokens";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
-import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail, sendOutcomeAskEmail, sendHomeownerMagicLink, sendVerificationRequestToTradesman, sendVerificationAccessGranted, sendVerificationAccessDenied, sendFoundingProInterest } from "./mailer";
+import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail, sendOutcomeAskEmail, sendHomeownerMagicLink, sendVerificationRequestToTradesman, sendVerificationAccessGranted, sendVerificationAccessDenied, sendFoundingProInterest, sendFoundingProClaimed, sendFoundingProInternalNotification } from "./mailer";
 import {
   requireHomeowner, readHomeownerSessionCookie, setHomeownerSessionCookie, clearHomeownerSessionCookie,
   HOMEOWNER_SESSION_TTL_MS, HOMEOWNER_RATE_LIMIT_MAX, HOMEOWNER_RATE_LIMIT_WINDOW_MS, HOMEOWNER_REQUEST_THROTTLE_MS,
@@ -165,6 +165,8 @@ async function buildVerificationPublicSummary(t: Tradesman): Promise<Verificatio
 }
 
 const ADMIN_KEY = process.env.ADMIN_KEY; if (!ADMIN_KEY) throw new Error('ADMIN_KEY environment variable is required');
+// Public site origin used to build absolute links in emails (no trailing slash).
+const PUBLIC_BASE_URL = (process.env.PUBLIC_URL || "https://tradesmanfinder.com").replace(/\/$/, "");
 
 // Schema is managed by Supabase migrations (apply_migration). No runtime migrate needed.
 function migrate() {
@@ -980,6 +982,165 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
     },
   );
+
+  // ── Founding Pro claim flow (canonical path; supersedes the interest form) ──
+  //
+  // GET /api/founding-pro/invite/:ref — fetch the invite for the ref-aware
+  // claim page to pre-fill. Stamps status=viewed on first open. Sensitive
+  // fields (recipient_email, companies_house_number) are NOT returned to the
+  // browser; the page only needs company/trade/area/postcodes to pre-fill.
+  app.get("/api/founding-pro/invite/:ref", async (req, res) => {
+    const ref = String(req.params.ref || "").slice(0, 80);
+    const invite = await storage.getFoundingProInviteByRef(ref);
+    if (!invite) return res.status(404).json({ message: "Invite not found" });
+    if (invite.status === "invited") {
+      await storage.markFoundingProInviteViewed(ref);
+    }
+    res.json({
+      ref: invite.ref,
+      recipientName: invite.recipientName,
+      companyName: invite.companyName,
+      trade: invite.trade,
+      area: invite.area,
+      postcodes: invite.postcodes,
+      campaign: invite.campaign,
+      status: invite.status === "invited" ? "viewed" : invite.status,
+      alreadyClaimed: invite.status === "claimed",
+      claimedTradesmanId: invite.status === "claimed" ? invite.claimedTradesmanId : null,
+    });
+  });
+
+  // POST /api/founding-pro/claim/:ref — create (or reuse) a tradesman record,
+  // tag it Founding Pro, link the invite, and send the two emails (awaited).
+  // Idempotent: re-claiming an already-claimed invite returns the same
+  // tradesmanId without creating a duplicate record or re-sending email.
+  app.post(
+    "/api/founding-pro/claim/:ref",
+    publicFormGuard({ windowMs: 10 * 60 * 1000, max: 5 }),
+    async (req, res) => {
+      try {
+        const ref = String(req.params.ref || "").slice(0, 80);
+        const schema = z.object({
+          phone: z.string().min(5).max(40),
+          bio: z.string().min(10).max(600),
+          trades: z.array(z.string().min(1).max(60)).min(1).max(6),
+          postcodes: z.array(z.string().min(1).max(12)).min(1).max(30),
+          website: z.string().url().max(200).optional().or(z.literal("")),
+          marketing_consent: z.boolean(),
+          // Honeypot — must be absent/empty. Named to attract bots, distinct
+          // from the legit optional `website` field above.
+          website_url: z.string().optional(),
+        });
+        const body = schema.parse(req.body);
+
+        // Honeypot tripped → pretend success-ish but reject. 400 keeps it cheap.
+        if (body.website_url && body.website_url.trim() !== "") {
+          return res.status(400).json({ message: "Rejected" });
+        }
+        if (!body.marketing_consent) {
+          return res.status(400).json({ message: "Marketing consent is required" });
+        }
+
+        const invite = await storage.getFoundingProInviteByRef(ref);
+        if (!invite) return res.status(404).json({ message: "Invite not found" });
+
+        // Idempotent re-claim: invite already linked to a tradesman.
+        if (invite.status === "claimed" && invite.claimedTradesmanId != null) {
+          return res.json({
+            tradesmanId: invite.claimedTradesmanId,
+            dashboardUrl: `${PUBLIC_BASE_URL}/#/dashboard`,
+          });
+        }
+
+        // Resolve the area to an areaId. Match the invite's area name to a
+        // seeded area; fall back to the first area so the claim never blocks on
+        // a taxonomy gap (the internal email carries the real area string).
+        const allAreas = await storage.getAreas();
+        const areaMatch = allAreas.find(
+          (a) => a.name.toLowerCase() === invite.area.toLowerCase(),
+        );
+        const areaId = areaMatch?.id ?? allAreas[0]?.id ?? 1;
+
+        const website = body.website && body.website !== "" ? body.website : null;
+        const baseSlug = slugify(invite.companyName || `${invite.trade}-${invite.ref}`);
+        // Disambiguate against an existing slug — append the ref to keep it
+        // unique without a collision-retry loop.
+        const existingSlug = await storage.getTradesmanBySlug(baseSlug);
+        const slug = existingSlug ? `${baseSlug}-${slugify(invite.ref)}` : baseSlug;
+
+        const created = await storage.createTradesman({
+          slug,
+          businessName: invite.companyName || invite.recipientEmail.split("@")[0],
+          ownerName: invite.recipientName || "",
+          email: invite.recipientEmail,
+          phone: body.phone,
+          bio: body.bio,
+          postcode: body.postcodes[0],
+          areaId,
+          categories: JSON.stringify(body.trades),
+          gallery: JSON.stringify([]),
+          heroImageUrl: "/assets/hero-builder.png",
+          verified: false,
+          licensed: false,
+          insured: false,
+          featured: false,
+          foundingPro: true,
+          yearsExperience: 0,
+          responseTimeMinutes: 60,
+          stripeCustomerId: null,
+          stripeSubscriptionId: null,
+          subscriptionStatus: null,
+          featuredUntil: null,
+        });
+
+        const linked = await storage.claimFoundingProInvite(ref, created.id);
+        const dashboardUrl = `${PUBLIC_BASE_URL}/#/dashboard`;
+
+        // Both sends AWAITED (PR #104 pattern) so serverless teardown can't kill
+        // the in-flight Resend POST. A mailer failure is logged, not fatal —
+        // the claim already succeeded and is recorded in the DB + email_log.
+        const [proResult, internalResult] = await Promise.all([
+          sendFoundingProClaimed({
+            to: invite.recipientEmail,
+            firstName: invite.recipientName,
+            companyName: invite.companyName,
+            dashboardUrl,
+            tradesmanId: created.id,
+          }),
+          sendFoundingProInternalNotification({
+            invite: linked,
+            claimPayload: {
+              phone: body.phone,
+              bio: body.bio,
+              trades: body.trades,
+              postcodes: body.postcodes,
+              website,
+              marketingConsent: body.marketing_consent,
+            },
+            tradesmanId: created.id,
+          }),
+        ]);
+        if (!proResult.ok) console.error(`[founding-pro-claim] pro email failed:`, proResult.error);
+        if (!internalResult.ok) console.error(`[founding-pro-claim] internal email failed:`, internalResult.error);
+
+        res.json({ tradesmanId: created.id, dashboardUrl });
+      } catch (e) {
+        if (e instanceof z.ZodError) {
+          return res.status(400).json({ message: "Validation failed", errors: e.errors });
+        }
+        throw e;
+      }
+    },
+  );
+
+  // GET /api/founding-pro/invites — admin queue. Gated by the existing admin
+  // key (x-admin-key header or ?key= query param), same as all /api/admin/*.
+  app.get("/api/founding-pro/invites", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { status, trade, area } = req.query as Record<string, string | undefined>;
+    const invites = await storage.listFoundingProInvites({ status, trade, area });
+    res.json({ invites });
+  });
 
   // ── Reviews create ──
   app.post("/api/reviews", publicFormGuard(), async (req, res) => {

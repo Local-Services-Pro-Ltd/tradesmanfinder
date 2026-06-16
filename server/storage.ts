@@ -21,6 +21,7 @@ import {
   homeownerSessions,
   verificationAccessRequests,
   verificationAccessBlocks,
+  foundingProInvites,
 } from "@shared/schema";
 import type {
   Category, InsertCategory,
@@ -45,6 +46,7 @@ import type {
   HomeownerSession,
   VerificationAccessRequest,
   VerificationAccessBlock,
+  FoundingProInvite, NewFoundingProInvite,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -242,6 +244,15 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
 
   // ── rate limiting (PR D) ──
   countAccessRequestsByEmailSince(email: string, sinceMs: number): Promise<number>;
+
+  // ── founding pro invites (pilot claim flow) ──
+  getFoundingProInviteByRef(ref: string): Promise<FoundingProInvite | null>;
+  markFoundingProInviteViewed(ref: string): Promise<void>;
+  /** Idempotent: if already claimed, returns the existing row untouched. */
+  claimFoundingProInvite(ref: string, tradesmanId: number): Promise<FoundingProInvite>;
+  listFoundingProInvites(filters?: { status?: string; trade?: string; area?: string }): Promise<FoundingProInvite[]>;
+  /** Upsert by ref — idempotent for re-seeding. Returns count of rows written. */
+  seedFoundingProInvites(rows: NewFoundingProInvite[]): Promise<number>;
 }
 
 const now = () => Date.now();
@@ -1160,6 +1171,95 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
         gte(verificationAccessRequests.requestedAt, sinceMs),
       ));
     return rows.length;
+  }
+
+  // ── founding pro invites (pilot claim flow) ──
+  async getFoundingProInviteByRef(ref: string): Promise<FoundingProInvite | null> {
+    const row = await one(
+      db.select().from(foundingProInvites).where(eq(foundingProInvites.ref, ref)),
+    );
+    return row ?? null;
+  }
+
+  async markFoundingProInviteViewed(ref: string): Promise<void> {
+    // Only stamp the first view — once viewed/claimed/declined, leave it alone
+    // so viewed_at records the genuine first-open time. Idempotent.
+    await db.update(foundingProInvites)
+      .set({ status: "viewed", viewedAt: now() })
+      .where(and(
+        eq(foundingProInvites.ref, ref),
+        eq(foundingProInvites.status, "invited"),
+      ));
+  }
+
+  async claimFoundingProInvite(ref: string, tradesmanId: number): Promise<FoundingProInvite> {
+    const existing = await this.getFoundingProInviteByRef(ref);
+    if (!existing) throw new Error(`founding_pro_invite not found for ref=${ref}`);
+    // Idempotent: a second claim returns the row already linked, untouched.
+    if (existing.status === "claimed" && existing.claimedTradesmanId != null) {
+      return existing;
+    }
+    const [row] = await db.update(foundingProInvites)
+      .set({ status: "claimed", claimedTradesmanId: tradesmanId, claimedAt: now() })
+      .where(eq(foundingProInvites.ref, ref))
+      .returning();
+    return row;
+  }
+
+  async listFoundingProInvites(
+    filters?: { status?: string; trade?: string; area?: string },
+  ): Promise<FoundingProInvite[]> {
+    const conds = [];
+    if (filters?.status) conds.push(eq(foundingProInvites.status, filters.status));
+    if (filters?.trade) conds.push(eq(foundingProInvites.trade, filters.trade));
+    if (filters?.area) conds.push(eq(foundingProInvites.area, filters.area));
+    const q = db.select().from(foundingProInvites);
+    const rows = conds.length
+      ? await q.where(and(...conds)).orderBy(desc(foundingProInvites.createdAt))
+      : await q.orderBy(desc(foundingProInvites.createdAt));
+    return rows;
+  }
+
+  async seedFoundingProInvites(rows: NewFoundingProInvite[]): Promise<number> {
+    if (rows.length === 0) return 0;
+    let written = 0;
+    const nowMs = now();
+    for (const r of rows) {
+      // Upsert by ref so re-seeding the same pilot file is a no-op on identity
+      // fields but refreshes the editable invite metadata. Lifecycle columns
+      // (status/claimed_*) are deliberately NOT touched on conflict so a
+      // re-seed never un-claims a pro who already signed up.
+      // TODO(companies-house): when Companies House pre-fill lands, resolve
+      // companiesHouseNumber + a verified companyName here before upsert.
+      await db.insert(foundingProInvites)
+        .values({
+          ref: r.ref,
+          recipientEmail: r.recipientEmail,
+          recipientName: r.recipientName ?? null,
+          companyName: r.companyName ?? null,
+          companiesHouseNumber: r.companiesHouseNumber ?? null,
+          trade: r.trade,
+          area: r.area,
+          postcodes: r.postcodes ?? [],
+          campaign: r.campaign ?? "founding-pro-pilot-01",
+          createdAt: nowMs,
+        })
+        .onConflictDoUpdate({
+          target: foundingProInvites.ref,
+          set: {
+            recipientEmail: r.recipientEmail,
+            recipientName: r.recipientName ?? null,
+            companyName: r.companyName ?? null,
+            companiesHouseNumber: r.companiesHouseNumber ?? null,
+            trade: r.trade,
+            area: r.area,
+            postcodes: r.postcodes ?? [],
+            campaign: r.campaign ?? "founding-pro-pilot-01",
+          },
+        });
+      written += 1;
+    }
+    return written;
   }
 }
 

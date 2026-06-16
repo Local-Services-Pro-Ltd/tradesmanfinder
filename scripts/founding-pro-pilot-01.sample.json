@@ -1,0 +1,12 @@
+[
+  { "ref": "wandsworth-plumber-1", "recipient_email": "Info@instagasworks.com", "recipient_name": "Chris", "company_name": "Instagasworks Plumbing And Heating", "trade": "plumber", "area": "Wandsworth" },
+  { "ref": "wandsworth-electrician-1", "recipient_email": "kevin@kyddelectrical.co.uk", "recipient_name": "Kevin", "company_name": "Kydd Electrical", "trade": "electrician", "area": "Wandsworth" },
+  { "ref": "dulwich-plumber-1", "recipient_email": "info@pimmsplumbing.com", "company_name": "Pimms Plumbing", "trade": "plumber", "area": "Dulwich" },
+  { "ref": "dulwich-plumber-2", "recipient_email": "patrik@gasify.co.uk", "recipient_name": "Patrik", "company_name": "Gasify", "trade": "plumber", "area": "Dulwich" },
+  { "ref": "dulwich-electrician-1", "recipient_email": "info@n-es.co.uk", "company_name": "N-ES", "trade": "electrician", "area": "Dulwich" },
+  { "ref": "kc-plumber-1", "recipient_email": "info@emergencyplumbers.london", "company_name": "Emergency Plumbers London", "trade": "plumber", "area": "Kensington & Chelsea" },
+  { "ref": "kc-plumber-2", "recipient_email": "hello@keystone.london", "recipient_name": "Samira", "company_name": "Keystone", "trade": "plumber", "area": "Kensington & Chelsea" },
+  { "ref": "kc-electrician-1", "recipient_email": "andy@garrabridge.com", "recipient_name": "Andy", "company_name": "Garra Bridge", "trade": "electrician", "area": "Kensington & Chelsea" },
+  { "ref": "richmond-electrician-1", "recipient_email": "info@flashelectricservices.co.uk", "company_name": "Flash Electric Services", "trade": "electrician", "area": "Richmond" },
+  { "ref": "richmond-electrician-2", "recipient_email": "info@arunelectric.co.uk", "company_name": "Arun Electric", "trade": "electrician", "area": "Richmond" }
+]
