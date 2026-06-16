@@ -7,7 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { useToast } from "@/hooks/use-toast";
-import { ShieldCheck, Users, Heart, Sparkles, Mail, Phone, MapPin, CheckCircle2 } from "lucide-react";
+import { ShieldCheck, Users, Heart, Sparkles, Mail, MapPin, CheckCircle2 } from "lucide-react";
 
 function PageShell({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
@@ -96,7 +96,6 @@ export function Contact() {
         </Card>
         <div className="space-y-4">
           <Card className="p-5"><div className="flex items-center gap-3"><Mail className="h-5 w-5 text-primary" /><div><p className="text-sm font-medium text-foreground">Email</p><p className="text-sm text-muted-foreground">hello@tradesmanfinder.com</p></div></div></Card>
-          <Card className="p-5"><div className="flex items-center gap-3"><Phone className="h-5 w-5 text-primary" /><div><p className="text-sm font-medium text-foreground">Phone</p><p className="text-sm text-muted-foreground">0800 123 4567</p></div></div></Card>
           <Card className="p-5"><div className="flex items-center gap-3"><MapPin className="h-5 w-5 text-primary" /><div><p className="text-sm font-medium text-foreground">Office</p><p className="text-sm text-muted-foreground">London, United Kingdom</p></div></div></Card>
         </div>
       </div>
