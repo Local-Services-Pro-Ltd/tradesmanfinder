@@ -531,6 +531,67 @@ export async function sendPartnerEnquiryNotification(opts: {
   });
 }
 
+export async function sendFoundingProInterest(opts: {
+  companyName: string;
+  contactName: string;
+  email: string;
+  phone: string;
+  trades: string;
+  postcodes: string;
+  bio: string;
+  ref: string | null; // row_id from outreach payload (e.g. 'kc-plumber-2')
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const refLabel = opts.ref ? ` (ref: ${opts.ref})` : "";
+  const subject = `Founding Pro interest — ${opts.companyName}${refLabel}`;
+
+  const bodyHtml = `
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">A Founding Pro pilot recipient has submitted the interest form on <strong>/founding-pro/interest</strong>.</p>
+    <table cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:18px 0;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px">
+      <tr><td style="padding:14px 16px;font-size:13px;line-height:1.7;color:#374151">
+        <div><strong>Company:</strong> ${escapeHtml(opts.companyName)}</div>
+        <div><strong>Contact:</strong> ${escapeHtml(opts.contactName)}</div>
+        <div><strong>Email:</strong> <a href="mailto:${escapeHtml(opts.email)}" style="color:#1d4ed8">${escapeHtml(opts.email)}</a></div>
+        <div><strong>Phone:</strong> ${escapeHtml(opts.phone)}</div>
+        <div><strong>Trades:</strong> ${escapeHtml(opts.trades)}</div>
+        <div><strong>Postcodes:</strong> ${escapeHtml(opts.postcodes)}</div>
+        ${opts.ref ? `<div><strong>Outreach ref:</strong> ${escapeHtml(opts.ref)}</div>` : ""}
+        <div style="margin-top:10px"><strong>Bio:</strong></div>
+        <div style="margin-top:4px;color:#111827;white-space:pre-wrap">${escapeHtml(opts.bio)}</div>
+      </td></tr>
+    </table>
+    <p style="margin:0 0 14px 0;font-size:13px;line-height:1.55;color:#6b7280">Reply within 24h. Pre-fill the tradesman record from Companies House, mark Founding Pro (30-day free unlocks), and send the dashboard link.</p>
+  `;
+
+  const text =
+    `Founding Pro interest — ${opts.companyName}${refLabel}\n\n` +
+    `Contact: ${opts.contactName}\n` +
+    `Email: ${opts.email}\n` +
+    `Phone: ${opts.phone}\n` +
+    `Trades: ${opts.trades}\n` +
+    `Postcodes: ${opts.postcodes}\n` +
+    (opts.ref ? `Outreach ref: ${opts.ref}\n` : "") +
+    `\nBio:\n${opts.bio}\n`;
+
+  const html = wrap({ title: subject, bodyHtml });
+
+  // Recipient: env-driven, defaults to hello@ where the pilot outreach reply-to
+  // already routes, so Steve sees the new interest in the same inbox thread.
+  const to = process.env.FOUNDING_PRO_NOTIFICATION_EMAIL || "hello@tradesmanfinder.com";
+
+  return send({
+    to,
+    subject,
+    html,
+    text,
+    tag: "founding_pro_interest",
+    log: {
+      template: "founding_pro_interest",
+      tradesmanId: null,
+      partnerId: null,
+    },
+  });
+}
+
 export async function sendMagicLinkEmail(opts: {
   to: string;
   token: string;          // raw token (this is the ONLY place the raw token escapes the server)

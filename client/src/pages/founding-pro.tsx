@@ -1,9 +1,19 @@
+import { Link } from "wouter";
 import { Layout } from "@/components/layout";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Check, ShieldCheck, Sparkles, Clock, MapPin } from "lucide-react";
+
+// Read the ?ref= param if present so the interest form knows which pilot
+// recipient this is. Done at module top-level so it survives client routing.
+function claimHref(): string {
+  if (typeof window === "undefined") return "/founding-pro/interest";
+  const params = new URLSearchParams(window.location.search);
+  const ref = params.get("ref");
+  return ref ? `/founding-pro/interest?ref=${encodeURIComponent(ref)}` : "/founding-pro/interest";
+}
 
 const INCLUDED = [
   { icon: Sparkles, title: "30 days of free unlocks", body: "Any job posted in your postcode and trade unlocks for you free — no credit purchase required." },
@@ -29,9 +39,9 @@ export default function FoundingPro() {
             <h1 className="mt-4 font-display text-2xl font-bold leading-tight text-white sm:text-2xl" data-testid="heading-founding-pro">30 days of free leads in your postcode</h1>
             <p className="mt-4 text-lg text-white/70">We're inviting the first 10 verified tradesmen per postcode and trade to be Founding Pros on TradesmanFinder. Every job in your area unlocks free for 30 days. No card. No contract.</p>
             <div className="mt-7 flex flex-wrap gap-3">
-              <a href="mailto:hello@tradesmanfinder.com?subject=Founding%20Pro%20-%20I'm%20in">
+              <Link href={claimHref()}>
                 <Button size="lg" data-testid="button-claim-hero">Claim my Founding Pro spot</Button>
-              </a>
+              </Link>
               <a href="#how" onClick={(e) => { e.preventDefault(); document.getElementById("how")?.scrollIntoView({ behavior: "smooth" }); }}>
                 <Button size="lg" variant="outline" className="border-white/30 bg-transparent text-white hover:bg-white/10 hover:text-white" data-testid="button-how-it-works">How it works</Button>
               </a>
@@ -108,9 +118,9 @@ export default function FoundingPro() {
             ))}
           </Accordion>
           <div className="mt-10 text-center">
-            <a href="mailto:hello@tradesmanfinder.com?subject=Founding%20Pro%20-%20I'm%20in">
+            <Link href={claimHref()}>
               <Button size="lg" data-testid="button-claim-footer">Claim my Founding Pro spot</Button>
-            </a>
+            </Link>
             <p className="mt-3 text-sm text-muted-foreground">Or reply to your invite email — we'll set you up.</p>
           </div>
         </div>

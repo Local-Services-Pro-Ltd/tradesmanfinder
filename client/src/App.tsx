@@ -16,6 +16,7 @@ import TradesmanProfile from "@/pages/tradesman";
 import PostAJob from "@/pages/post-a-job";
 import ForTradesmen from "@/pages/for-tradesmen";
 import FoundingPro from "@/pages/founding-pro";
+import FoundingProInterest from "@/pages/founding-pro-interest";
 import Unsubscribe from "@/pages/unsubscribe";
 import Partners from "@/pages/partners";
 import Join from "@/pages/join";
@@ -66,6 +67,7 @@ function AppRouter() {
       <Route path="/post-a-job" component={PostAJob} />
       <Route path="/for-tradesmen" component={ForTradesmen} />
       <Route path="/founding-pro" component={FoundingPro} />
+      <Route path="/founding-pro/interest" component={FoundingProInterest} />
       <Route path="/unsubscribe" component={Unsubscribe} />
       <Route path="/partners" component={Partners} />
       <Route path="/join" component={Join} />
