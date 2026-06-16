@@ -7,12 +7,26 @@ import { cn } from "@/lib/utils";
    Navy rounded-square badge with white "TF" lockup where the wrench-shaped
    crossbar of the T doubles as the top arm of the F (one shape, two jobs),
    plus an orange accent dot. Wordmark kept beside the mark.
-   Source PNG: client/public/logo.png (transparent, square). */
-export function Logo({ className, showText = true }: { className?: string; showText?: boolean }) {
+
+   `variant` switches the badge asset for contrast:
+     - "dark"  (default) — navy badge, white letters; for use on light pages
+     - "light"            — white badge, navy letters; for use on the navy footer or other dark surfaces
+
+   Source PNGs: client/public/logo.png, client/public/logo-light.png */
+export function Logo({
+  className,
+  showText = true,
+  variant = "dark",
+}: {
+  className?: string;
+  showText?: boolean;
+  variant?: "dark" | "light";
+}) {
+  const src = variant === "light" ? "/logo-light.png" : "/logo.png";
   return (
     <Link href="/" data-testid="link-logo" className={cn("flex items-center gap-2.5 group", className)}>
       <img
-        src="/logo.png"
+        src={src}
         width={36}
         height={36}
         alt="TradesmanFinder"

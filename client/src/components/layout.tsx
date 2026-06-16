@@ -127,7 +127,7 @@ function Footer() {
       <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6">
         <div className="grid gap-10 md:grid-cols-4">
           <div className="md:col-span-1">
-            <Logo className="[&_span:last-child]:text-white" />
+            <Logo variant="light" className="[&_span:last-child]:text-white" />
             <p className="mt-4 max-w-xs text-sm text-white/70">
               The trusted way to find vetted local tradesmen across the UK. Post a job free and compare quotes.
             </p>
