@@ -467,7 +467,7 @@ function joinPhrases(parts: string[]): string {
 function openerVariants(
   trade: TradePhrases,
   area: { name: string },
-  region: { area: string },
+  region: { area: string; coverage: string },
   jobsPhrase: string,
 ): string[] {
   return [
