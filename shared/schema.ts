@@ -344,6 +344,46 @@ export type InsertEmailLog = z.infer<typeof insertEmailLogSchema>;
 export type EmailLogEntry = typeof emailLog.$inferSelect;
 
 /* ──────────────────────────────────────────────
+   RESEND WEBHOOK LOG — audit trail of every Resend webhook event we processed
+
+   Mirror of payments_log for Resend. Append-only. Every webhook delivery
+   writes a row, deduplicated by svix_id (the svix-id header). The handler
+   uses this UNIQUE constraint as the idempotency primitive — Resend retries
+   on non-2xx with the same svix-id, so a duplicate delivery is a no-op.
+
+   Used for:
+     - debugging deliverability issues (full event trail per send)
+     - feeding suppression decisions (bounce/complaint → add to suppression)
+     - Founding Pro engagement reporting (delivered/opened/clicked counts)
+   ────────────────────────────────────────────── */
+export const resendWebhookLog = pgTable("resend_webhook_log", {
+  id: serial("id").primaryKey(),
+  // Svix dedupe key (from svix-id header). UNIQUE — retries are no-ops.
+  svixId: text("svix_id").notNull().unique(),
+  // Resend event identity
+  eventType: text("event_type").notNull(),
+  resendEmailId: text("resend_email_id"),
+  toAddress: text("to_address"),
+  // Bounce / complaint detail
+  bounceType: text("bounce_type"),
+  bounceSubtype: text("bounce_subtype"),
+  bounceMessage: text("bounce_message"),
+  // Click detail (link clicked)
+  clickLink: text("click_link"),
+  // Resolution against our email_log row
+  emailLogId: integer("email_log_id"),
+  action: text("action").notNull(),
+  // Raw event payload — stored as JSON text (matches paymentsLog convention)
+  rawPayload: text("raw_payload"),
+  // Resend's event timestamp (epoch ms), distinct from our receipt time below
+  resendCreatedAt: bigint("resend_created_at", { mode: "number" }),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+});
+export const insertResendWebhookLogSchema = createInsertSchema(resendWebhookLog).omit({ id: true, createdAt: true });
+export type InsertResendWebhookLog = z.infer<typeof insertResendWebhookLogSchema>;
+export type ResendWebhookLogEntry = typeof resendWebhookLog.$inferSelect;
+
+/* ──────────────────────────────────────────────
    PAYMENTS LOG — audit trail of every Stripe event we processed
 
    Append-only. Every webhook delivery + every checkout-session creation

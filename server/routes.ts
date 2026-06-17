@@ -32,6 +32,7 @@ import { createFeaturedCheckoutSession, createLeadPackCheckoutSession } from "./
 import { createBillingPortalSession } from "./stripe-portal";
 import { sweepPastDueFeatured } from "./featured-sweep";
 import { handleStripeWebhook } from "./stripe-webhook";
+import { handleResendWebhook } from "./resend-webhook";
 import { stripeIsConfigured } from "./stripe";
 import {
   generateToken, hashToken, generateSessionId,
@@ -874,6 +875,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // verify hook in server/index.ts).
   app.post("/api/stripe/webhook", (req, res) => {
     void handleStripeWebhook(req, res);
+  });
+
+  // ── Resend webhook ──
+  // POST /api/resend/webhook — receives signed events from Resend (Svix
+  // signing scheme). Verified against req.rawBody. Updates email_log status
+  // for delivered / opened / clicked / bounced / complained, and writes a
+  // resend_webhook_log audit row deduplicated by svix-id.
+  app.post("/api/resend/webhook", (req, res) => {
+    void handleResendWebhook(req, res);
   });
 
   // ── Partner enquiries (inbound from /partners marketing page) ──
