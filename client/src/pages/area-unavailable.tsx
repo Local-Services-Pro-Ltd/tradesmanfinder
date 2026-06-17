@@ -19,10 +19,19 @@ import { UnmatchedAreaWaitlist } from "@/components/unmatched-area-waitlist";
 const REQUESTED_AREA_OK = /^[A-Za-z0-9 \-]+$/;
 
 function readQueryParam(name: string): string {
-  // The app uses hash-routing with the query string stripped from the
-  // wouter path. The original hash still lives in window.location.hash,
-  // shaped like `#/area/unavailable?q=Streatham`.
+  // Wouter 3.x's useHashLocation.navigate splits the `?query` off the hash
+  // and pushes it onto `url.search` (the page-level query string), so a call
+  // like navigate("/area/unavailable?q=Deptford") lands the user at
+  //   https://host/?q=Deptford#/area/unavailable
+  // — NOT https://host/#/area/unavailable?q=Deptford as you might expect.
+  // (See node_modules/wouter/src/use-hash-location.js.)
+  //
+  // So we read `q` from window.location.search first. We still fall back to
+  // the hash for resilience — e.g. someone hand-types the URL with the
+  // query inside the hash, or a future wouter release reverses this.
   if (typeof window === "undefined") return "";
+  const searchVal = new URLSearchParams(window.location.search).get(name);
+  if (searchVal) return searchVal;
   const hash = window.location.hash;
   const qIdx = hash.indexOf("?");
   if (qIdx === -1) return "";
