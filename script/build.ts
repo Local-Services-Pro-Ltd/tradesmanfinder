@@ -24,6 +24,7 @@ const allowlist = [
   "passport-local",
   "postgres",
   "stripe",
+  "svix",
   "uuid",
   "ws",
   "xlsx",
