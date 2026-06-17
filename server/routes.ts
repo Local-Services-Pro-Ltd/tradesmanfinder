@@ -33,6 +33,12 @@ import { createBillingPortalSession } from "./stripe-portal";
 import { sweepPastDueFeatured } from "./featured-sweep";
 import { handleStripeWebhook } from "./stripe-webhook";
 import { handleResendWebhook } from "./resend-webhook";
+import {
+  homeownerInterestRequestSchema,
+  recordHomeownerInterest,
+  getVerifiedCountByArea,
+  DENSITY_THRESHOLD,
+} from "./homeowner-interest";
 import { stripeIsConfigured } from "./stripe";
 import {
   generateToken, hashToken, generateSessionId,
@@ -884,6 +890,54 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // resend_webhook_log audit row deduplicated by svix-id.
   app.post("/api/resend/webhook", (req, res) => {
     void handleResendWebhook(req, res);
+  });
+
+  // ── Homeowner interest (waitlist for sub-density boroughs) ──
+  // Rate-limited like other public forms (10/10min/IP). The handler
+  // upserts on (email, area, category) so repeat submissions from the
+  // same homeowner are no-ops, and only the first submission triggers
+  // a confirmation email.
+  app.post(
+    "/api/homeowner-interest",
+    publicFormGuard({ windowMs: 10 * 60 * 1000, max: 10 }),
+    async (req, res) => {
+      try {
+        const parsed = homeownerInterestRequestSchema.parse(req.body);
+        const result = await recordHomeownerInterest(parsed);
+        // Same 200 regardless of created/updated — don't leak whether
+        // the email was already on the list.
+        res.status(200).json({ ok: true });
+        void result; // keep result.id available for future analytics
+      } catch (e) {
+        if (e instanceof z.ZodError) {
+          return res.status(400).json({ message: "Validation failed", errors: e.errors });
+        }
+        throw e;
+      }
+    },
+  );
+
+  // GET /api/areas/:slug/density — returns verified-pro count and whether
+  // the area is above the gating threshold. Used by the area landing page
+  // to choose between the search experience and the waitlist signup.
+  app.get("/api/areas/:slug/density", async (req, res) => {
+    const slug = req.params.slug;
+    const area = (await storage.getAreas()).find((a) => a.slug === slug);
+    if (!area) return res.status(404).json({ message: "Area not found" });
+    const categoryIdParam = req.query.categoryId;
+    const categoryId =
+      typeof categoryIdParam === "string" && /^\d+$/.test(categoryIdParam)
+        ? Number(categoryIdParam)
+        : undefined;
+    const verifiedCount = await getVerifiedCountByArea(area.id, categoryId);
+    res.json({
+      areaId: area.id,
+      slug: area.slug,
+      name: area.name,
+      verifiedCount,
+      threshold: DENSITY_THRESHOLD,
+      isBelowThreshold: verifiedCount < DENSITY_THRESHOLD,
+    });
   });
 
   // ── Partner enquiries (inbound from /partners marketing page) ──

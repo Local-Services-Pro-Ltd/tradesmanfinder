@@ -592,6 +592,52 @@ export async function sendFoundingProInterest(opts: {
   });
 }
 
+/**
+ * Sent to a homeowner who joined the borough waitlist via
+ * /api/homeowner-interest. Confirms we'll email them when verified pros
+ * are available in their area. Only sent on a brand-new signup (not on
+ * idempotent re-submissions) — we never spam the same address twice.
+ */
+export async function sendHomeownerInterestConfirmation(opts: {
+  to: string;
+  areaName: string | null;
+  categoryName: string | null;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const tradeBit = opts.categoryName ? `${opts.categoryName.toLowerCase()} ` : "";
+  const areaBit = opts.areaName ?? "your area";
+
+  const subject = `We'll let you know when verified ${tradeBit}pros are ready in ${areaBit}`;
+
+  const bodyHtml = `
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">Thanks — you're on the list.</p>
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">We're still onboarding verified ${escapeHtml(tradeBit)}tradesmen in <strong>${escapeHtml(areaBit)}</strong>. Every pro we list is identity-checked, insured, and — where the trade requires it — holds the proper certifications (Gas Safe, NICEIC, and so on).</p>
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">The moment we have enough verified pros locally to give you a real choice, we'll email you. No spam, no list-resale.</p>
+    <p style="margin:18px 0 0 0;font-size:13px;line-height:1.55;color:#6b7280">If you didn't sign up, just ignore this — we won't email you again.</p>
+  `;
+
+  const text =
+    `Thanks — you're on the list.\n\n` +
+    `We're still onboarding verified ${tradeBit}tradesmen in ${areaBit}. ` +
+    `Every pro we list is identity-checked, insured, and — where the trade requires it — holds the proper certifications.\n\n` +
+    `The moment we have enough verified pros locally to give you a real choice, we'll email you. No spam, no list-resale.\n\n` +
+    `If you didn't sign up, just ignore this — we won't email you again.\n`;
+
+  const html = wrap({ title: subject, bodyHtml });
+
+  return send({
+    to: opts.to,
+    subject,
+    html,
+    text,
+    tag: "homeowner_interest_confirmation",
+    log: {
+      template: "homeowner_interest_confirmation",
+      tradesmanId: null,
+      partnerId: null,
+    },
+  });
+}
+
 export async function sendMagicLinkEmail(opts: {
   to: string;
   token: string;          // raw token (this is the ONLY place the raw token escapes the server)
