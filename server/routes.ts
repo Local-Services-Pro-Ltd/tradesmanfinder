@@ -39,6 +39,7 @@ import {
   getVerifiedCountByArea,
   DENSITY_THRESHOLD,
 } from "./homeowner-interest";
+import { resolveAreas, extractOutwardPostcode } from "./area-resolver";
 import { stripeIsConfigured } from "./stripe";
 import {
   generateToken, hashToken, generateSessionId,
@@ -210,6 +211,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // ── Areas ──
   app.get("/api/areas", async (_req, res) => {
     res.json(await storage.getAreas());
+  });
+  // Free-text resolver. Returns matching seeded areas ranked by quality, or
+  // an empty list (the caller then routes the user to the unmatched-area
+  // waitlist with `requestedArea` set to their typed string).
+  app.get("/api/areas/resolve", async (req, res) => {
+    const q = typeof req.query.q === "string" ? req.query.q : "";
+    if (q.trim().length < 2) return res.json({ matches: [], outward: null });
+    const all = await storage.getAreas();
+    const matches = resolveAreas(q, all);
+    const outward = extractOutwardPostcode(q);
+    res.json({
+      matches: matches.map((m) => ({ ...m.area, rule: m.rule, score: m.score })),
+      outward,
+    });
   });
   app.get("/api/areas/:slug", async (req, res) => {
     const a = await storage.getAreaBySlug(req.params.slug);

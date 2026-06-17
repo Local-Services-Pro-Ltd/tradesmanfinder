@@ -402,6 +402,10 @@ export const homeownerInterest = pgTable("homeowner_interest", {
   postcode: text("postcode"),
   areaId: integer("area_id"),
   categoryId: integer("category_id"),
+  // Free-text string the user typed when no seeded area matched their search
+  // (e.g. "Streatham", "SE13 6AA", "finsbury park"). Only set when areaId is
+  // NULL. Lets us prioritise which borough to seed next by demand signal.
+  requestedArea: text("requested_area"),
   source: text("source").notNull().default("area_landing"),
   notifiedAt: bigint("notified_at", { mode: "number" }),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
