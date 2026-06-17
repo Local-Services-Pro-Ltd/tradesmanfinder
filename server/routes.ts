@@ -995,7 +995,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/reviews", publicFormGuard(), async (req, res) => {
     try {
       const parsed = insertReviewSchema.parse(req.body);
-      const created = await storage.createReview({ ...parsed, status: "pending" });
+      // status defaults to 'pending' at the DB level (schema.ts:163);
+      // never trust submitter-supplied status — moderation-controlled only.
+      const created = await storage.createReview(parsed);
       // recompute rating from APPROVED reviews only (pending reviews are not public)
       const all = (await storage.getReviewsByTradesman(parsed.tradesmanId)).filter((r) => r.status === "approved");
       const avg = all.length ? all.reduce((s, r) => s + r.rating, 0) / all.length : 0;
