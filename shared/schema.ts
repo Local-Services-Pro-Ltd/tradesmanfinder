@@ -384,6 +384,39 @@ export type InsertResendWebhookLog = z.infer<typeof insertResendWebhookLogSchema
 export type ResendWebhookLogEntry = typeof resendWebhookLog.$inferSelect;
 
 /* ──────────────────────────────────────────────
+   HOMEOWNER INTEREST — waitlist for sub-density boroughs/categories.
+
+   When a borough or category has < N verified pros (default 3), the area
+   landing page hides search and surfaces a "notify me when ready" signup.
+   Rows here capture that intent so we can:
+     - Email the homeowner when supply crosses the threshold.
+     - Show prospective Founding Pros that demand already exists.
+     - Prioritise outreach into the highest-demand boroughs.
+
+   Idempotent via UNIQUE(email, COALESCE(area_id, -1), COALESCE(category_id, -1)).
+   Re-submission updates `updatedAt` and `source` but never duplicates.
+   ───────────────────────────────────────────── */
+export const homeownerInterest = pgTable("homeowner_interest", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull(),
+  postcode: text("postcode"),
+  areaId: integer("area_id"),
+  categoryId: integer("category_id"),
+  source: text("source").notNull().default("area_landing"),
+  notifiedAt: bigint("notified_at", { mode: "number" }),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+});
+export const insertHomeownerInterestSchema = createInsertSchema(homeownerInterest).omit({
+  id: true,
+  notifiedAt: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertHomeownerInterest = z.infer<typeof insertHomeownerInterestSchema>;
+export type HomeownerInterestEntry = typeof homeownerInterest.$inferSelect;
+
+/* ──────────────────────────────────────────────
    PAYMENTS LOG — audit trail of every Stripe event we processed
 
    Append-only. Every webhook delivery + every checkout-session creation
