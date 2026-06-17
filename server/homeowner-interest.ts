@@ -72,16 +72,42 @@ export async function getVerifiedCountByArea(
 /**
  * Inbound payload schema. Email + optional postcode/area/category + source.
  * Email is lowercased; postcode uppercased + trimmed.
+ *
+ * `requestedArea` is set ONLY when the user typed a borough/postcode/locality
+ * we couldn't resolve to a seeded `areas` row. Mutually exclusive with
+ * `areaId`: if both are provided the schema rejects, so we always know which
+ * code path produced the row. Sanity caps:
+ *   - length 2..80 (rules out one-letter typos and abuse)
+ *   - only letters/digits/spaces/hyphens after normalisation (rules out
+ *     emoji/script injection vectors)
  */
-export const homeownerInterestRequestSchema = z.object({
-  email: z.string().email().max(254),
-  postcode: z.string().trim().max(10).optional(),
-  areaId: z.number().int().positive().optional(),
-  categoryId: z.number().int().positive().optional(),
-  source: z
-    .enum(["area_landing", "category_landing", "footer", "manual"])
-    .default("area_landing"),
-});
+export const homeownerInterestRequestSchema = z
+  .object({
+    email: z.string().email().max(254),
+    postcode: z.string().trim().max(10).optional(),
+    areaId: z.number().int().positive().optional(),
+    categoryId: z.number().int().positive().optional(),
+    requestedArea: z
+      .string()
+      .trim()
+      .min(2)
+      .max(80)
+      .regex(/^[A-Za-z0-9 \-]+$/, "requestedArea must be letters, digits, spaces or hyphens")
+      .optional(),
+    source: z
+      .enum([
+        "area_landing",
+        "category_landing",
+        "footer",
+        "manual",
+        "unmatched_search",
+      ])
+      .default("area_landing"),
+  })
+  .refine((d) => !(d.areaId !== undefined && d.requestedArea !== undefined), {
+    message: "areaId and requestedArea are mutually exclusive",
+    path: ["requestedArea"],
+  });
 export type HomeownerInterestRequest = z.infer<typeof homeownerInterestRequestSchema>;
 
 export interface HomeownerInterestResult {
@@ -106,6 +132,10 @@ export async function recordHomeownerInterest(
   const now = Date.now();
   const email = input.email.toLowerCase().trim();
   const postcode = input.postcode ? input.postcode.toUpperCase().trim() : null;
+  // Normalise requested-area to lowercase so "Camden", "camden", "CAMDEN" all
+  // de-dupe to one waitlist row per email. Display-cased copy is the user's
+  // problem (they typed it); we want clean analytics.
+  const requestedArea = input.requestedArea ? input.requestedArea.trim().toLowerCase() : null;
 
   // Resolve display strings for the confirmation email
   const [areaRow] = input.areaId
@@ -120,17 +150,30 @@ export async function recordHomeownerInterest(
   // columns, not expressions). Do the upsert manually: look up by identity, then
   // update or insert. The race window is tiny and the DB-level UNIQUE will still
   // catch a true concurrent double-insert — we just propagate that error.
+  //
+  // For `requestedArea` signups (areaId IS NULL), identity is (email,
+  // requested_area) and we also enforce that via a partial unique index.
   const areaCondition = input.areaId !== undefined
     ? eq(homeownerInterest.areaId, input.areaId)
     : isNull(homeownerInterest.areaId);
   const categoryCondition = input.categoryId !== undefined
     ? eq(homeownerInterest.categoryId, input.categoryId)
     : isNull(homeownerInterest.categoryId);
+  const requestedAreaCondition = requestedArea !== null
+    ? eq(homeownerInterest.requestedArea, requestedArea)
+    : isNull(homeownerInterest.requestedArea);
 
   const [existing] = await db
     .select()
     .from(homeownerInterest)
-    .where(and(eq(homeownerInterest.email, email), areaCondition, categoryCondition))
+    .where(
+      and(
+        eq(homeownerInterest.email, email),
+        areaCondition,
+        categoryCondition,
+        requestedAreaCondition,
+      ),
+    )
     .limit(1);
 
   let rowId: number;
@@ -150,6 +193,7 @@ export async function recordHomeownerInterest(
       postcode,
       areaId: input.areaId ?? null,
       categoryId: input.categoryId ?? null,
+      requestedArea,
       source: input.source,
       createdAt: now,
       updatedAt: now,
@@ -164,10 +208,15 @@ export async function recordHomeownerInterest(
   const created = !existing;
 
   // Confirmation email — best-effort. Don't block the response.
+  // When the user typed an unmatched area, surface their string in the
+  // confirmation copy ("verified pros in Streatham") so the email feels
+  // tailored even when we have no internal record of that area.
   if (created) {
+    const areaNameForEmail =
+      areaRow?.name ?? (requestedArea ? toTitleCase(requestedArea) : null);
     void sendHomeownerInterestConfirmation({
       to: email,
-      areaName: areaRow?.name ?? null,
+      areaName: areaNameForEmail,
       categoryName: categoryRow?.name ?? null,
     }).catch((err: unknown) => {
       // eslint-disable-next-line no-console
@@ -176,4 +225,18 @@ export async function recordHomeownerInterest(
   }
 
   return { ok: true, created, id: rowId };
+}
+
+/**
+ * Title-case helper for the user-typed requested-area string when echoing
+ * it back in confirmation copy. Handles multi-word inputs like
+ * "finsbury park" → "Finsbury Park" and leaves postcodes alone.
+ */
+function toTitleCase(raw: string): string {
+  // Looks like a postcode? Uppercase the whole thing.
+  if (/^[a-z]{1,2}\d[a-z\d]?( \d[a-z]{2})?$/i.test(raw)) return raw.toUpperCase();
+  return raw
+    .split(/\s+/)
+    .map((w) => (w.length ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w))
+    .join(" ");
 }

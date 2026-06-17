@@ -10,6 +10,7 @@ import Home from "@/pages/home";
 import Categories from "@/pages/categories";
 import Category from "@/pages/category";
 import AreaPage from "@/pages/area";
+import AreaUnavailable from "@/pages/area-unavailable";
 import Hyperlocal from "@/pages/hyperlocal";
 import MicrositePage from "@/pages/microsite";
 import TradesmanProfile from "@/pages/tradesman";
@@ -62,6 +63,11 @@ function AppRouter() {
       <Route path="/categories" component={Categories} />
       <Route path="/category/:catSlug/in/:areaSlug" component={Hyperlocal} />
       <Route path="/category/:slug" component={Category} />
+      {/*
+        /area/unavailable comes BEFORE /area/:slug so it doesn't get
+        swallowed by the slug route — wouter matches in order.
+      */}
+      <Route path="/area/unavailable" component={AreaUnavailable} />
       <Route path="/area/:slug" component={AreaPage} />
       <Route path="/tradesman/:slug" component={TradesmanProfile} />
       <Route path="/post-a-job" component={PostAJob} />

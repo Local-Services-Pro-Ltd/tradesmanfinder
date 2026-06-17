@@ -114,6 +114,44 @@ describe("homeownerInterestRequestSchema", () => {
       homeownerInterestRequestSchema.parse({ email: "a@b.co", source: "billboard" as any }),
     ).toThrow();
   });
+
+  it("accepts the new 'unmatched_search' source", () => {
+    const r = homeownerInterestRequestSchema.parse({
+      email: "a@b.co",
+      requestedArea: "Streatham",
+      source: "unmatched_search",
+    });
+    expect(r.source).toBe("unmatched_search");
+    expect(r.requestedArea).toBe("Streatham");
+  });
+
+  it("rejects requestedArea shorter than 2 chars", () => {
+    expect(() =>
+      homeownerInterestRequestSchema.parse({ email: "a@b.co", requestedArea: "x" }),
+    ).toThrow();
+  });
+
+  it("rejects requestedArea containing emoji or script characters", () => {
+    expect(() =>
+      homeownerInterestRequestSchema.parse({ email: "a@b.co", requestedArea: "Cam😀den" }),
+    ).toThrow();
+    expect(() =>
+      homeownerInterestRequestSchema.parse({
+        email: "a@b.co",
+        requestedArea: "<script>alert(1)</script>",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects payload with BOTH areaId and requestedArea (mutually exclusive)", () => {
+    expect(() =>
+      homeownerInterestRequestSchema.parse({
+        email: "a@b.co",
+        areaId: 12,
+        requestedArea: "Streatham",
+      }),
+    ).toThrow();
+  });
 });
 
 describe("recordHomeownerInterest — create path", () => {
@@ -261,5 +299,85 @@ describe("recordHomeownerInterest — mailer failure is non-fatal", () => {
     // Flush the rejection — caught by the .catch() in the implementation.
     await new Promise((r) => setImmediate(r));
     // No assertion failure means the rejection was swallowed as intended.
+  });
+});
+
+describe("recordHomeownerInterest — unmatched-area (requestedArea) path", () => {
+  it("stores requestedArea lower-cased, areaId NULL, and emails a title-cased display name", async () => {
+    dbState.selectResults = [[]]; // no existing waitlist row (no area/category lookups)
+
+    const result = await recordHomeownerInterest({
+      email: "h@example.com",
+      requestedArea: "  Finsbury Park  " as any, // raw user input
+      source: "unmatched_search",
+    });
+
+    expect(result.created).toBe(true);
+    expect(dbInserts).toHaveLength(1);
+    expect(dbInserts[0].values).toMatchObject({
+      email: "h@example.com",
+      areaId: null,
+      categoryId: null,
+      requestedArea: "finsbury park",
+      source: "unmatched_search",
+    });
+
+    await new Promise((r) => setImmediate(r));
+    // areaName should be title-cased FROM the requestedArea, not null
+    expect(sendHomeownerInterestConfirmationMock).toHaveBeenCalledWith({
+      to: "h@example.com",
+      areaName: "Finsbury Park",
+      categoryName: null,
+    });
+  });
+
+  it("uppercases postcode-shaped requestedArea in confirmation email", async () => {
+    dbState.selectResults = [[]];
+
+    await recordHomeownerInterest({
+      email: "h@example.com",
+      requestedArea: "sw2",
+      source: "unmatched_search",
+    });
+
+    expect(dbInserts[0].values.requestedArea).toBe("sw2");
+    await new Promise((r) => setImmediate(r));
+    expect(sendHomeownerInterestConfirmationMock).toHaveBeenCalledWith({
+      to: "h@example.com",
+      areaName: "SW2",
+      categoryName: null,
+    });
+  });
+
+  it("de-dupes resubmission of same (email, requestedArea); does not re-email", async () => {
+    dbState.selectResults = [
+      [
+        {
+          id: 77,
+          email: "h@example.com",
+          postcode: null,
+          areaId: null,
+          categoryId: null,
+          requestedArea: "streatham",
+          source: "unmatched_search",
+          createdAt: 1_000,
+          updatedAt: 1_000,
+        },
+      ],
+    ];
+
+    const result = await recordHomeownerInterest({
+      email: "h@example.com",
+      requestedArea: "Streatham", // different casing
+      source: "unmatched_search",
+    });
+
+    expect(result.created).toBe(false);
+    expect(result.id).toBe(77);
+    expect(dbInserts).toHaveLength(0);
+    expect(dbUpdates).toHaveLength(1);
+
+    await new Promise((r) => setImmediate(r));
+    expect(sendHomeownerInterestConfirmationMock).not.toHaveBeenCalled();
   });
 });
