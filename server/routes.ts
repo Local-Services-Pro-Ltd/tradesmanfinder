@@ -2319,12 +2319,14 @@ res.json(updated);
     // is a separate admin action (TODO PR-C, if needed).
     if (decision.status === "approved" && updated) {
       // Each kind drives a distinct boolean on the tradesman row:
-      //   insurance      → insured
-      //   qualification  → licensed
-      //   companies_house→ verified  (the badge that was previously a lie)
+      //   insurance       → insured
+      //   qualification   → licensed
+      //   companies_house → verified         (the badge that was previously a lie)
+      //   gas_safe        → gasSafeVerified  (Gas Safe Register lookup; PR-D')
       let patch: Partial<Tradesman>;
       if (updated.kind === "insurance") patch = { insured: true };
       else if (updated.kind === "qualification") patch = { licensed: true };
+      else if (updated.kind === "gas_safe") patch = { gasSafeVerified: true };
       else patch = { verified: true };
       await storage.updateTradesman(updated.tradesmanId, patch);
     }

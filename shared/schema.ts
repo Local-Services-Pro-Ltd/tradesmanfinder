@@ -55,6 +55,10 @@ export const tradesmen = pgTable("tradesmen", {
   verified: boolean("verified").notNull().default(false),
   insured: boolean("insured").notNull().default(false),
   licensed: boolean("licensed").notNull().default(false),
+  // Gas Safe Register badge — flipped to true when an approved gas_safe
+  // verification row exists. Added 2026-06-18 (PR-D'). Independent of
+  // `verified` (Companies House) so pros earn each badge separately.
+  gasSafeVerified: boolean("gas_safe_verified").notNull().default(false),
   featured: boolean("featured").notNull().default(false),
   ratingAverage: real("rating_average").notNull().default(0),
   ratingCount: integer("rating_count").notNull().default(0),
@@ -275,8 +279,11 @@ export const tradesmanVerifications = pgTable("tradesman_verifications", {
   evidenceData: jsonb("evidence_data"), // trimmed /company/{number} response
   verifiedAt: bigint("verified_at", { mode: "number" }), // epoch ms when CH lookup succeeded
   source: text("source"), // 'pro_submission' | 'admin_backfill' | 'automated_recheck'
+  // Gas Safe evidence columns (kind='gas_safe'). Added 2026-06-18 (PR-D').
+  gasSafeNumber: text("gas_safe_number"),            // normalised digits-only registration number
+  gasSafeRegisterUrl: text("gas_safe_register_url"), // canonical signed Gas Safe deep-link
 });
-export const VERIFICATION_KINDS = ["insurance", "qualification", "companies_house"] as const;
+export const VERIFICATION_KINDS = ["insurance", "qualification", "companies_house", "gas_safe"] as const;
 // Subset that requires a file upload — used by the doc-upload route which
 // can't handle the API-lookup-backed 'companies_house' kind.
 export const FILE_VERIFICATION_KINDS = ["insurance", "qualification"] as const;
@@ -310,6 +317,9 @@ export const insertTradesmanVerificationSchema = createInsertSchema(tradesmanVer
     companyNumber: z.string().min(2).max(20).optional().nullable(),
     evidenceData: z.unknown().optional().nullable(),
     source: z.enum(VERIFICATION_SOURCES).optional().nullable(),
+    // Gas Safe fields — see superRefine below for kind-aware required/forbidden rules.
+    gasSafeNumber: z.string().min(2).max(20).optional().nullable(),
+    gasSafeRegisterUrl: z.string().url().max(2048).optional().nullable(),
   })
   .superRefine((data, ctx) => {
     if (data.kind === "companies_house") {
@@ -327,6 +337,35 @@ export const insertTradesmanVerificationSchema = createInsertSchema(tradesmanVer
           message: "file fields must be absent when kind='companies_house'",
         });
       }
+      if (data.gasSafeNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["gasSafeNumber"],
+          message: "gasSafeNumber must be absent when kind='companies_house'",
+        });
+      }
+    } else if (data.kind === "gas_safe") {
+      if (!data.gasSafeNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["gasSafeNumber"],
+          message: "gasSafeNumber is required when kind='gas_safe'",
+        });
+      }
+      if (data.filePath || data.fileMimeType || (data.fileSizeBytes !== undefined && data.fileSizeBytes !== null)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["filePath"],
+          message: "file fields must be absent when kind='gas_safe'",
+        });
+      }
+      if (data.companyNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["companyNumber"],
+          message: "companyNumber must be absent when kind='gas_safe'",
+        });
+      }
     } else {
       // 'insurance' | 'qualification' — file columns required by tv_evidence_shape
       if (!data.filePath || !data.fileMimeType || data.fileSizeBytes == null) {
@@ -341,6 +380,13 @@ export const insertTradesmanVerificationSchema = createInsertSchema(tradesmanVer
           code: z.ZodIssueCode.custom,
           path: ["companyNumber"],
           message: "companyNumber must be absent unless kind='companies_house'",
+        });
+      }
+      if (data.gasSafeNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["gasSafeNumber"],
+          message: "gasSafeNumber must be absent unless kind='gas_safe'",
         });
       }
     }

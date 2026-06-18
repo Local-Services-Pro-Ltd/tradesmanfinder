@@ -234,6 +234,26 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
     tradesmanId: number,
     companyNumber: string,
   ): Promise<TradesmanVerification | undefined>;
+  /** Insert a Gas Safe Register evidence row. Same shape contract as CH but
+   *  with gasSafeNumber/gasSafeRegisterUrl instead of companyNumber.
+   *  The DB CHECK constraint tv_evidence_shape enforces shape at the row level. */
+  createGasSafeVerification(input: {
+    tradesmanId: number;
+    gasSafeNumber: string;
+    gasSafeRegisterUrl?: string | null;
+    evidenceData: unknown;
+    source: VerificationSource;
+    /** Only set if the register lookup succeeded server-side; null leaves it pending. */
+    verifiedAt?: number | null;
+    /** If true, the row is created with status='approved' (used by admin backfill
+     *  and by the automated pro flow when the register lookup itself is the evidence). */
+    autoApprove?: boolean;
+  }): Promise<TradesmanVerification>;
+  /** Latest non-rejected Gas Safe evidence row for a (tradesman, gasSafeNumber) pair. */
+  getGasSafeVerificationByTradesmanAndNumber(
+    tradesmanId: number,
+    gasSafeNumber: string,
+  ): Promise<TradesmanVerification | undefined>;
 
   // ── homeowner sessions (PR D) ──
   createHomeownerSession(email: string, ip: string | null, ua: string | null): Promise<HomeownerSession>;
@@ -967,6 +987,59 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
           eq(tradesmanVerifications.tradesmanId, tradesmanId),
           eq(tradesmanVerifications.kind, "companies_house"),
           eq(tradesmanVerifications.companyNumber, companyNumber),
+          sql`${tradesmanVerifications.status} <> 'rejected'`,
+        ))
+        .orderBy(desc(tradesmanVerifications.submittedAt))
+        .limit(1),
+    );
+  }
+
+  async createGasSafeVerification(input: {
+    tradesmanId: number;
+    gasSafeNumber: string;
+    gasSafeRegisterUrl?: string | null;
+    evidenceData: unknown;
+    source: VerificationSource;
+    verifiedAt?: number | null;
+    autoApprove?: boolean;
+  }): Promise<TradesmanVerification> {
+    // Mirrors createCompaniesHouseVerification — different register, same
+    // contract. The DB CHECK constraint tv_evidence_shape and unique partial
+    // index uq_tv_tradesman_gas_safe_number provide the hard guarantees.
+    const ts = now();
+    const [row] = await db.insert(tradesmanVerifications).values({
+      tradesmanId: input.tradesmanId,
+      kind: "gas_safe",
+      filePath: null,
+      fileMimeType: null,
+      fileSizeBytes: null,
+      qualificationType: null,
+      insuranceCoverGbp: null,
+      expiryDate: null,
+      companyNumber: null,
+      gasSafeNumber: input.gasSafeNumber,
+      gasSafeRegisterUrl: input.gasSafeRegisterUrl ?? null,
+      evidenceData: input.evidenceData,
+      source: input.source,
+      verifiedAt: input.verifiedAt ?? null,
+      status: input.autoApprove ? "approved" : "pending",
+      submittedAt: ts,
+      reviewedAt: input.autoApprove ? ts : null,
+      reviewedBy: input.autoApprove ? "system:gas_safe" : null,
+    }).returning();
+    return row;
+  }
+
+  async getGasSafeVerificationByTradesmanAndNumber(
+    tradesmanId: number,
+    gasSafeNumber: string,
+  ): Promise<TradesmanVerification | undefined> {
+    return one(
+      db.select().from(tradesmanVerifications)
+        .where(and(
+          eq(tradesmanVerifications.tradesmanId, tradesmanId),
+          eq(tradesmanVerifications.kind, "gas_safe"),
+          eq(tradesmanVerifications.gasSafeNumber, gasSafeNumber),
           sql`${tradesmanVerifications.status} <> 'rejected'`,
         ))
         .orderBy(desc(tradesmanVerifications.submittedAt))
