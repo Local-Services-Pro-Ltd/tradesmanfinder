@@ -38,8 +38,10 @@ import {
   recordHomeownerInterest,
   getVerifiedCountByArea,
   DENSITY_THRESHOLD,
+  UnmatchedAreaInvalidError,
 } from "./homeowner-interest";
 import { resolveAreas, extractOutwardPostcode } from "./area-resolver";
+import { validateAreaStringCached } from "./area-validator";
 import { stripeIsConfigured } from "./stripe";
 import {
   generateToken, hashToken, generateSessionId,
@@ -226,6 +228,43 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       outward,
     });
   });
+  // Validate a free-text area string against a geocoder. Returns whether the
+  // string looks like a real-world place, plus a near-match suggestion when
+  // applicable. The client calls this (debounced) before showing the
+  // "We're not in <X> yet — tap to get notified" CTA so users can't get a
+  // straight-faced reply for fantasy/joke inputs like "Hogwarts" or
+  // "Banana Republic".
+  //
+  // We rate-limit lightly via the same public-form guard — a debounced
+  // client UI typically fires a couple of requests per session.
+  app.get(
+    "/api/areas/validate",
+    publicFormGuard({ windowMs: 10 * 60 * 1000, max: 60 }),
+    async (req, res) => {
+      const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+      if (q.length < 2 || q.length > 80) {
+        return res.json({ valid: false, reason: "too_short_or_long" });
+      }
+      // Same character allowlist as the schema — reject before we burn
+      // a Nominatim call on obvious junk.
+      if (!/^[A-Za-z0-9 \-]+$/.test(q)) {
+        return res.json({ valid: false, reason: "bad_chars" });
+      }
+      const result = await validateAreaStringCached(q);
+      if (result.kind === "accept") {
+        return res.json({
+          valid: true,
+          canonicalName: result.canonicalName,
+          displayName: result.displayName,
+        });
+      }
+      return res.json({
+        valid: false,
+        reason: result.reason,
+        suggestion: result.suggestion ?? null,
+      });
+    },
+  );
   app.get("/api/areas/:slug", async (req, res) => {
     const a = await storage.getAreaBySlug(req.params.slug);
     if (!a) return res.status(404).json({ message: "Area not found" });
@@ -926,6 +965,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       } catch (e) {
         if (e instanceof z.ZodError) {
           return res.status(400).json({ message: "Validation failed", errors: e.errors });
+        }
+        if (e instanceof UnmatchedAreaInvalidError) {
+          // 422 — the request is well-formed but the geocoder doesn't
+          // recognise the requestedArea as a real place. The client uses
+          // the suggestion (if present) to offer a one-click "did you mean?".
+          return res.status(422).json({
+            ok: false,
+            reason: e.suggestion ? "looks_like_typo" : "not_a_place",
+            message: e.message,
+            suggestion: e.suggestion ?? null,
+          });
         }
         throw e;
       }

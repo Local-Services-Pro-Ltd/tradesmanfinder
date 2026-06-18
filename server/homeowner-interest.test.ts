@@ -74,8 +74,17 @@ import {
   recordHomeownerInterest,
   homeownerInterestRequestSchema,
   DENSITY_THRESHOLD,
+  UnmatchedAreaInvalidError,
 } from "./homeowner-interest";
 import * as storageMock from "./storage";
+import { clearAreaValidationCache } from "./area-validator";
+
+// All unit tests below pass an accepting stub fetcher into the validator so
+// we don't make real Nominatim calls during CI. Tests that exercise the
+// reject path inject a custom stub.
+const acceptAll = async (q: string) => [
+  { name: q, display_name: q, category: "place", type: "suburb" } as const,
+];
 
 const dbInserts = (storageMock as unknown as { __inserts: Array<{ values: any }> }).__inserts;
 const dbUpdates = (storageMock as unknown as { __updates: Array<{ set: any }> }).__updates;
@@ -306,11 +315,14 @@ describe("recordHomeownerInterest — unmatched-area (requestedArea) path", () =
   it("stores requestedArea lower-cased, areaId NULL, and emails a title-cased display name", async () => {
     dbState.selectResults = [[]]; // no existing waitlist row (no area/category lookups)
 
-    const result = await recordHomeownerInterest({
-      email: "h@example.com",
-      requestedArea: "  Finsbury Park  " as any, // raw user input
-      source: "unmatched_search",
-    });
+    const result = await recordHomeownerInterest(
+      {
+        email: "h@example.com",
+        requestedArea: "  Finsbury Park  " as any, // raw user input
+        source: "unmatched_search",
+      },
+      { areaValidator: acceptAll },
+    );
 
     expect(result.created).toBe(true);
     expect(dbInserts).toHaveLength(1);
@@ -334,11 +346,14 @@ describe("recordHomeownerInterest — unmatched-area (requestedArea) path", () =
   it("uppercases postcode-shaped requestedArea in confirmation email", async () => {
     dbState.selectResults = [[]];
 
-    await recordHomeownerInterest({
-      email: "h@example.com",
-      requestedArea: "sw2",
-      source: "unmatched_search",
-    });
+    await recordHomeownerInterest(
+      {
+        email: "h@example.com",
+        requestedArea: "sw2",
+        source: "unmatched_search",
+      },
+      { areaValidator: acceptAll },
+    );
 
     expect(dbInserts[0].values.requestedArea).toBe("sw2");
     await new Promise((r) => setImmediate(r));
@@ -366,11 +381,14 @@ describe("recordHomeownerInterest — unmatched-area (requestedArea) path", () =
       ],
     ];
 
-    const result = await recordHomeownerInterest({
-      email: "h@example.com",
-      requestedArea: "Streatham", // different casing
-      source: "unmatched_search",
-    });
+    const result = await recordHomeownerInterest(
+      {
+        email: "h@example.com",
+        requestedArea: "Streatham", // different casing
+        source: "unmatched_search",
+      },
+      { areaValidator: acceptAll },
+    );
 
     expect(result.created).toBe(false);
     expect(result.id).toBe(77);
@@ -379,5 +397,92 @@ describe("recordHomeownerInterest — unmatched-area (requestedArea) path", () =
 
     await new Promise((r) => setImmediate(r));
     expect(sendHomeownerInterestConfirmationMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("recordHomeownerInterest — geocode gate", () => {
+  beforeEach(() => {
+    clearAreaValidationCache();
+  });
+
+  it("rejects a requestedArea that the geocoder doesn't recognise (Hogwarts)", async () => {
+    // The fetcher returns a result but it's tagged as a school, not a place.
+    const rejectAll = async () => [
+      {
+        name: "HOGWARTS",
+        display_name: "HOGWARTS, somewhere",
+        category: "amenity",
+        type: "prep_school",
+      } as const,
+    ];
+    await expect(
+      recordHomeownerInterest(
+        {
+          email: "h@example.com",
+          requestedArea: "Hogwarts",
+          source: "unmatched_search",
+        },
+        { areaValidator: rejectAll },
+      ),
+    ).rejects.toBeInstanceOf(UnmatchedAreaInvalidError);
+    expect(dbInserts).toHaveLength(0);
+  });
+
+  it("rejects a requestedArea Nominatim has no results for (asdfg)", async () => {
+    const emptyFetch = async () => [];
+    await expect(
+      recordHomeownerInterest(
+        {
+          email: "h@example.com",
+          requestedArea: "asdfg",
+          source: "unmatched_search",
+        },
+        { areaValidator: emptyFetch },
+      ),
+    ).rejects.toBeInstanceOf(UnmatchedAreaInvalidError);
+  });
+
+  it("returns a typo suggestion in the thrown error (Lewishm → Lewisham)", async () => {
+    const suggestFetcher = async () => [
+      {
+        name: "Lewisham",
+        display_name: "Lewisham, London, UK",
+        category: "place",
+        type: "town",
+      } as const,
+    ];
+    try {
+      await recordHomeownerInterest(
+        {
+          email: "h@example.com",
+          requestedArea: "Lewishm",
+          source: "unmatched_search",
+        },
+        { areaValidator: suggestFetcher },
+      );
+      throw new Error("expected UnmatchedAreaInvalidError");
+    } catch (e) {
+      expect(e).toBeInstanceOf(UnmatchedAreaInvalidError);
+      expect((e as UnmatchedAreaInvalidError).suggestion?.name).toBe("Lewisham");
+    }
+  });
+
+  it("accepts UK postcodes by shape without calling the geocoder", async () => {
+    dbState.selectResults = [[]];
+    let calls = 0;
+    const fetcher = async () => {
+      calls += 1;
+      return [];
+    };
+    const r = await recordHomeownerInterest(
+      {
+        email: "h@example.com",
+        requestedArea: "SE13",
+        source: "unmatched_search",
+      },
+      { areaValidator: fetcher },
+    );
+    expect(r.created).toBe(true);
+    expect(calls).toBe(0);
   });
 });
