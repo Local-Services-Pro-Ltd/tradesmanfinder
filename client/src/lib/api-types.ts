@@ -119,13 +119,16 @@ export interface VerificationPublicSummary {
 // Mirrors server tradesman_verifications row (admin queue + dashboard list).
 // filePath is included only when the admin is authenticated; the dashboard
 // receives objects with filePath omitted (see server/routes.ts).
+//
+// 'companies_house' rows have no file (file* fields are null) and instead
+// carry companyNumber + evidenceData (a trimmed snapshot of the CH response).
 export interface VerificationRecord {
   id: number;
   tradesmanId: number;
-  kind: "insurance" | "qualification";
-  filePath?: string;
-  fileMimeType: string;
-  fileSizeBytes: number;
+  kind: "insurance" | "qualification" | "companies_house";
+  filePath?: string | null;
+  fileMimeType: string | null;
+  fileSizeBytes: number | null;
   qualificationType: string | null;
   insuranceCoverGbp: number | null;
   expiryDate: string | null;
@@ -134,6 +137,46 @@ export interface VerificationRecord {
   reviewedAt: number | null;
   reviewedBy: string | null;
   reviewerNote: string | null;
+  // Companies House fields (kind='companies_house' only).
+  companyNumber?: string | null;
+  evidenceData?: CompaniesHouseEvidence | null;
+  verifiedAt?: number | null;
+  source?: "pro_submission" | "admin_backfill" | "automated_recheck" | null;
+}
+
+export interface CompaniesHouseEvidence {
+  company_number: string;
+  company_name: string;
+  company_status: string;
+  type: string;
+  date_of_creation?: string | null;
+  date_of_cessation?: string | null;
+  jurisdiction?: string | null;
+  registered_office_address?: {
+    address_line_1?: string;
+    address_line_2?: string;
+    locality?: string;
+    region?: string;
+    postal_code?: string;
+    country?: string;
+  } | null;
+  fetched_at?: string;
+}
+
+export interface CompaniesHouseSearchItem {
+  company_number: string;
+  title: string;
+  company_status: string;
+  company_type?: string;
+  address_snippet?: string;
+  date_of_creation?: string;
+}
+
+export interface CompaniesHouseSearchResult {
+  items: CompaniesHouseSearchItem[];
+  total_results: number;
+  page_number: number;
+  items_per_page: number;
 }
 
 export interface Job {

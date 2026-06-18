@@ -25,8 +25,20 @@ import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { VerificationRecord } from "@/lib/api-types";
 import {
-  ArrowLeft, ShieldCheck, FileBadge2, CheckCircle2, XCircle, ExternalLink, Inbox, Lock,
+  ArrowLeft, ShieldCheck, FileBadge2, Building2, CheckCircle2, XCircle, ExternalLink, Inbox, Lock,
 } from "lucide-react";
+
+function kindIcon(kind: VerificationRecord["kind"], className = "h-4 w-4 text-primary") {
+  if (kind === "insurance") return <ShieldCheck className={className} />;
+  if (kind === "qualification") return <FileBadge2 className={className} />;
+  return <Building2 className={className} />;
+}
+
+function kindLabel(kind: VerificationRecord["kind"]): string {
+  if (kind === "insurance") return "Insurance";
+  if (kind === "qualification") return "Qualification";
+  return "Companies House";
+}
 
 function getInitialKey(): string {
   const hash = window.location.hash;
@@ -116,6 +128,7 @@ export default function AdminVerifications() {
   const counts = useMemo(() => ({
     insurance: items.filter((v) => v.kind === "insurance").length,
     qualification: items.filter((v) => v.kind === "qualification").length,
+    companiesHouse: items.filter((v) => v.kind === "companies_house").length,
   }), [items]);
 
   // Key-gate
@@ -165,6 +178,8 @@ export default function AdminVerifications() {
             <span><ShieldCheck className="mr-1 inline h-3.5 w-3.5 text-primary" />Insurance: <strong>{counts.insurance}</strong></span>
             <span className="text-muted-foreground">·</span>
             <span><FileBadge2 className="mr-1 inline h-3.5 w-3.5 text-primary" />Qualification: <strong>{counts.qualification}</strong></span>
+            <span className="text-muted-foreground">·</span>
+            <span><Building2 className="mr-1 inline h-3.5 w-3.5 text-primary" />Companies House: <strong>{counts.companiesHouse}</strong></span>
           </div>
         </Card>
 
@@ -192,15 +207,18 @@ export default function AdminVerifications() {
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      {v.kind === "insurance"
-                        ? <ShieldCheck className="h-4 w-4 text-primary" />
-                        : <FileBadge2 className="h-4 w-4 text-primary" />}
-                      <span className="font-semibold capitalize text-foreground">{v.kind}</span>
+                      {kindIcon(v.kind)}
+                      <span className="font-semibold text-foreground">{kindLabel(v.kind)}</span>
                       <Badge variant="secondary">Tradesman #{v.tradesmanId}</Badge>
+                      {v.source && v.source !== "pro_submission" && (
+                        <Badge variant="outline" className="capitalize">{v.source.replace(/_/g, " ")}</Badge>
+                      )}
                     </div>
                     <div className="mt-1 flex flex-wrap gap-3 text-xs text-muted-foreground">
                       <span>Submitted {fmtDate(v.submittedAt)}</span>
-                      <span>{v.fileMimeType} · {fmtBytes(v.fileSizeBytes)}</span>
+                      {v.kind !== "companies_house" && v.fileMimeType && v.fileSizeBytes != null && (
+                        <span>{v.fileMimeType} · {fmtBytes(v.fileSizeBytes)}</span>
+                      )}
                       {v.expiryDate && <span>Expires {v.expiryDate}</span>}
                     </div>
                     {v.kind === "insurance" && (
@@ -209,12 +227,72 @@ export default function AdminVerifications() {
                     {v.kind === "qualification" && v.qualificationType && (
                       <p className="mt-1 text-sm text-foreground">Qualification: <strong>{v.qualificationType}</strong></p>
                     )}
+                    {v.kind === "companies_house" && (
+                      <div className="mt-2 rounded-md border border-border bg-muted/30 p-3 text-sm">
+                        {v.evidenceData ? (
+                          <>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-semibold text-foreground">{v.evidenceData.company_name}</span>
+                              <Badge
+                                variant={v.evidenceData.company_status === "active" ? "secondary" : "destructive"}
+                                className="capitalize"
+                              >
+                                {v.evidenceData.company_status}
+                              </Badge>
+                            </div>
+                            <div className="mt-1 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+                              <span><span className="text-foreground">Number:</span> {v.evidenceData.company_number}</span>
+                              {v.evidenceData.type && (
+                                <span className="capitalize">
+                                  <span className="text-foreground">Type:</span> {v.evidenceData.type.replace(/-/g, " ")}
+                                </span>
+                              )}
+                              {v.evidenceData.date_of_creation && (
+                                <span><span className="text-foreground">Incorporated:</span> {v.evidenceData.date_of_creation}</span>
+                              )}
+                              {v.evidenceData.date_of_cessation && (
+                                <span><span className="text-foreground">Ceased:</span> {v.evidenceData.date_of_cessation}</span>
+                              )}
+                              {v.evidenceData.jurisdiction && (
+                                <span className="capitalize">
+                                  <span className="text-foreground">Jurisdiction:</span> {v.evidenceData.jurisdiction.replace(/-/g, " ")}
+                                </span>
+                              )}
+                              {v.evidenceData.registered_office_address && (
+                                <span className="sm:col-span-2">
+                                  <span className="text-foreground">Address:</span>{" "}
+                                  {[
+                                    v.evidenceData.registered_office_address.address_line_1,
+                                    v.evidenceData.registered_office_address.address_line_2,
+                                    v.evidenceData.registered_office_address.locality,
+                                    v.evidenceData.registered_office_address.region,
+                                    v.evidenceData.registered_office_address.postal_code,
+                                    v.evidenceData.registered_office_address.country,
+                                  ].filter(Boolean).join(", ")}
+                                </span>
+                              )}
+                            </div>
+                            {v.evidenceData.fetched_at && (
+                              <p className="mt-2 text-[11px] text-muted-foreground">
+                                Fetched from Companies House at {fmtDate(new Date(v.evidenceData.fetched_at).getTime())}
+                              </p>
+                            )}
+                          </>
+                        ) : v.companyNumber ? (
+                          <p className="text-sm text-foreground">Company #{v.companyNumber}</p>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">No evidence captured.</p>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex flex-wrap gap-2">
-                    <Button variant="outline" size="sm" onClick={() => openFile(v.id)} data-testid={`button-open-${v.id}`}>
-                      <ExternalLink className="mr-1 h-4 w-4" />Open file
-                    </Button>
+                    {v.kind !== "companies_house" && (
+                      <Button variant="outline" size="sm" onClick={() => openFile(v.id)} data-testid={`button-open-${v.id}`}>
+                        <ExternalLink className="mr-1 h-4 w-4" />Open file
+                      </Button>
+                    )}
                     <Button
                       size="sm"
                       onClick={() => decide.mutate({ id: v.id, status: "approved" })}
@@ -273,7 +351,9 @@ export default function AdminVerifications() {
           Signed file URLs expire after 5 minutes. Approving an insurance submission flips
           <code className="mx-1 rounded bg-muted px-1 text-[11px]">tradesmen.insured</code>
           to true; approving a qualification submission flips
-          <code className="mx-1 rounded bg-muted px-1 text-[11px]">tradesmen.licensed</code>
+          <code className="mx-1 rounded bg-muted px-1 text-[11px]">tradesmen.licensed</code>;
+          approving a Companies House submission flips
+          <code className="mx-1 rounded bg-muted px-1 text-[11px]">tradesmen.verified</code>
           to true.
         </p>
       </div>

@@ -520,6 +520,7 @@ export default function Dashboard() {
               tradesmanId={tradesmanId!}
               insured={!!data.tradesman.insured}
               licensed={!!data.tradesman.licensed}
+              verified={!!data.tradesman.verified}
             />
           </TabsContent>
 
