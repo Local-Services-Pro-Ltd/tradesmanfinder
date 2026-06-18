@@ -49,6 +49,9 @@ export const tradesmen = pgTable("tradesmen", {
   postcode: text("postcode").notNull(),
   areaId: integer("area_id").notNull(),
   heroImageUrl: text("hero_image_url").notNull(),
+  // Optional brand video shown on the public profile (e.g. an autoplay-on-scroll
+  // hero clip). Nullable — most pros won't have one. Added 2026-06-18.
+  videoUrl: text("video_url"),
   gallery: text("gallery").notNull().default("[]"), // JSON array of urls
   categories: text("categories").notNull().default("[]"), // JSON array of category ids
   yearsExperience: integer("years_experience").notNull().default(0),
