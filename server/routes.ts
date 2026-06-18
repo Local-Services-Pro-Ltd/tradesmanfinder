@@ -16,6 +16,7 @@ import {
 } from "./verifications-storage";
 import { selectPlacements, debugPlacements } from "./placement-engine";
 import { resolveMicrositeByHost, MICROSITES } from "@shared/microsites";
+import { getRegisterImplication } from "@shared/register-implications";
 import { computeInvoice, computeStats } from "./invoice-generator";
 import { registerClickRoute } from "./click-tracking";
 import { registerOutcomeCaptureRoute } from "./outcome-capture";
@@ -2318,26 +2319,55 @@ res.json(updated);
     // rejected upload silently revokes a previously-approved badge. Revocation
     // is a separate admin action (TODO PR-C, if needed).
     if (decision.status === "approved" && updated) {
-      // Each kind drives a distinct boolean on the tradesman row:
-      //   insurance       → insured
-      //   qualification   → licensed
-      //   companies_house → verified         (the badge that was previously a lie)
-      //   gas_safe        → gasSafeVerified + insured + licensed
+      // Approval of a verification row lights up the matching badges on the
+      // tradesman row. There are two flavours:
       //
-      // Why gas_safe lights three badges, not one:
-      //   Gas Safe Register membership is legally conditional on (a) holding
-      //   current public liability insurance and (b) holding ACS gas
-      //   qualifications. Gas Safe themselves verify both at registration and
-      //   re-check annually. So a live register entry IS the evidence for the
-      //   insured and licensed badges — no separate document upload needed.
-      //   The badge tooltips on the public profile attribute the source
-      //   honestly ("Insured — verified via Gas Safe Register") so customers
-      //   can see where the trust signal came from.
-      let patch: Partial<Tradesman>;
-      if (updated.kind === "insurance") patch = { insured: true };
-      else if (updated.kind === "qualification") patch = { licensed: true };
-      else if (updated.kind === "gas_safe") patch = { gasSafeVerified: true, insured: true, licensed: true };
-      else patch = { verified: true };
+      //   1. File-backed kinds (insurance, qualification): each maps to a
+      //      single fixed boolean (insured / licensed). Pro uploaded a doc;
+      //      admin reviewed it; that doc is evidence for exactly one badge.
+      //
+      //   2. Register-backed kinds (companies_house, gas_safe, niceic, etc):
+      //      driven by the REGISTER_IMPLICATIONS lookup table in
+      //      shared/register-implications.ts. Each register declares which
+      //      generic badges (verified/insured/licensed) it implies AND an
+      //      optional scope badge ("Gas Work", "Electrical Work", etc).
+      //      Implications are derived from the register's own legal/scheme
+      //      preconditions — e.g. Gas Safe membership requires ACS quals +
+      //      PLI, so an approved gas_safe row lights all three.
+      //
+      // We don't un-flip on rejection of a later row — that would create a
+      // footgun where a rejected resubmission silently revokes a previously
+      // approved badge. Revocation is a separate admin action.
+      const patch: Partial<Tradesman> = {};
+      if (updated.kind === "insurance") {
+        patch.insured = true;
+      } else if (updated.kind === "qualification") {
+        patch.licensed = true;
+      } else {
+        const impl = getRegisterImplication(updated.kind);
+        if (impl) {
+          for (const badge of impl.impliesBadges) patch[badge] = true;
+          if (updated.kind === "gas_safe") patch.gasSafeVerified = true;
+          if (impl.scopeBadge) {
+            // Merge into the existing scope_badges JSON array on the tradesman
+            // row, dedup-preserving order. Fetch the row fresh so concurrent
+            // approvals on the same pro don't clobber each other's scope badges.
+            const tradesman = await storage.getTradesmanById(updated.tradesmanId);
+            let current: string[] = [];
+            try {
+              const parsed = JSON.parse(tradesman?.scopeBadges ?? "[]");
+              if (Array.isArray(parsed)) current = parsed.filter((s): s is string => typeof s === "string");
+            } catch { /* fall through with empty array */ }
+            if (!current.includes(impl.scopeBadge)) {
+              current.push(impl.scopeBadge);
+              patch.scopeBadges = JSON.stringify(current);
+            }
+          }
+        } else {
+          // Unknown register kind — conservatively light only `verified`.
+          patch.verified = true;
+        }
+      }
       await storage.updateTradesman(updated.tradesmanId, patch);
     }
 

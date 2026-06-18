@@ -62,6 +62,11 @@ export const tradesmen = pgTable("tradesmen", {
   // verification row exists. Added 2026-06-18 (PR-D'). Independent of
   // `verified` (Companies House) so pros earn each badge separately.
   gasSafeVerified: boolean("gas_safe_verified").notNull().default(false),
+  // Register-derived scope badges ("Gas Work", "Electrical Work",
+  // "Renewables", "Oil Heating", "TrustMark", "F-Gas Certified",
+  // "CIPHE Member"). JSON array of strings, deduplicated. Driven by the
+  // REGISTER_IMPLICATIONS table in shared/register-implications.ts.
+  scopeBadges: text("scope_badges").notNull().default("[]"),
   featured: boolean("featured").notNull().default(false),
   ratingAverage: real("rating_average").notNull().default(0),
   ratingCount: integer("rating_count").notNull().default(0),
