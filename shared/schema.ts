@@ -1,4 +1,4 @@
-import { pgTable, text, integer, real, bigint, boolean, serial } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, real, bigint, boolean, serial, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -254,10 +254,14 @@ export type TradesmanCard = typeof tradesmanCards.$inferSelect;
 export const tradesmanVerifications = pgTable("tradesman_verifications", {
   id: serial("id").primaryKey(),
   tradesmanId: integer("tradesman_id").notNull(),
-  kind: text("kind").notNull(), // 'insurance' | 'qualification'
-  filePath: text("file_path").notNull(), // path inside the private storage bucket
-  fileMimeType: text("file_mime_type").notNull(),
-  fileSizeBytes: integer("file_size_bytes").notNull(),
+  // 'insurance' | 'qualification' = file-backed; 'companies_house' = API-lookup-backed.
+  // The kind-aware tv_evidence_shape check constraint enforces shape:
+  // file columns required for the first two kinds; company_number+evidence_data
+  // required for the third.
+  kind: text("kind").notNull(),
+  filePath: text("file_path"), // nullable since 2026-06-18 — required only for file-backed kinds
+  fileMimeType: text("file_mime_type"),
+  fileSizeBytes: integer("file_size_bytes"),
   qualificationType: text("qualification_type"), // nullable; only set when kind='qualification'
   insuranceCoverGbp: integer("insurance_cover_gbp"), // nullable; only set when kind='insurance'
   expiryDate: text("expiry_date"), // ISO YYYY-MM-DD, nullable until known
@@ -266,11 +270,22 @@ export const tradesmanVerifications = pgTable("tradesman_verifications", {
   reviewedAt: bigint("reviewed_at", { mode: "number" }), // nullable until reviewed
   reviewedBy: text("reviewed_by"), // admin identifier ('admin' for now)
   reviewerNote: text("reviewer_note"), // optional message, required when status='rejected'
+  // Companies House evidence columns (kind='companies_house'). Added 2026-06-18.
+  companyNumber: text("company_number"), // normalised (uppercase, no whitespace)
+  evidenceData: jsonb("evidence_data"), // trimmed /company/{number} response
+  verifiedAt: bigint("verified_at", { mode: "number" }), // epoch ms when CH lookup succeeded
+  source: text("source"), // 'pro_submission' | 'admin_backfill' | 'automated_recheck'
 });
-export const VERIFICATION_KINDS = ["insurance", "qualification"] as const;
+export const VERIFICATION_KINDS = ["insurance", "qualification", "companies_house"] as const;
+// Subset that requires a file upload — used by the doc-upload route which
+// can't handle the API-lookup-backed 'companies_house' kind.
+export const FILE_VERIFICATION_KINDS = ["insurance", "qualification"] as const;
+export type FileVerificationKind = (typeof FILE_VERIFICATION_KINDS)[number];
 export const VERIFICATION_STATUSES = ["pending", "approved", "rejected"] as const;
+export const VERIFICATION_SOURCES = ["pro_submission", "admin_backfill", "automated_recheck"] as const;
 export type VerificationKind = (typeof VERIFICATION_KINDS)[number];
 export type VerificationStatus = (typeof VERIFICATION_STATUSES)[number];
+export type VerificationSource = (typeof VERIFICATION_SOURCES)[number];
 
 export const insertTradesmanVerificationSchema = createInsertSchema(tradesmanVerifications)
   .omit({
@@ -280,6 +295,7 @@ export const insertTradesmanVerificationSchema = createInsertSchema(tradesmanVer
     reviewedBy: true,
     reviewerNote: true,
     status: true,
+    verifiedAt: true,
   })
   .extend({
     kind: z.enum(VERIFICATION_KINDS),
@@ -290,6 +306,44 @@ export const insertTradesmanVerificationSchema = createInsertSchema(tradesmanVer
       .regex(/^\d{4}-\d{2}-\d{2}$/, "expiry_date must be YYYY-MM-DD")
       .optional()
       .nullable(),
+    // Companies House fields — see superRefine below for kind-aware required/forbidden rules.
+    companyNumber: z.string().min(2).max(20).optional().nullable(),
+    evidenceData: z.unknown().optional().nullable(),
+    source: z.enum(VERIFICATION_SOURCES).optional().nullable(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.kind === "companies_house") {
+      if (!data.companyNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["companyNumber"],
+          message: "companyNumber is required when kind='companies_house'",
+        });
+      }
+      if (data.filePath || data.fileMimeType || (data.fileSizeBytes !== undefined && data.fileSizeBytes !== null)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["filePath"],
+          message: "file fields must be absent when kind='companies_house'",
+        });
+      }
+    } else {
+      // 'insurance' | 'qualification' — file columns required by tv_evidence_shape
+      if (!data.filePath || !data.fileMimeType || data.fileSizeBytes == null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["filePath"],
+          message: "file fields are required for file-backed verification kinds",
+        });
+      }
+      if (data.companyNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["companyNumber"],
+          message: "companyNumber must be absent unless kind='companies_house'",
+        });
+      }
+    }
   });
 export type InsertTradesmanVerification = z.infer<typeof insertTradesmanVerificationSchema>;
 export type TradesmanVerification = typeof tradesmanVerifications.$inferSelect;

@@ -8,6 +8,7 @@ import {
   insertPartnerSchema, insertPartnerPlacementSchema,
   PARTNER_ENQUIRY_STATUSES, PARTNER_STATUSES, PARTNER_SURFACES, PARTNER_COMMERCIAL_MODELS, PARTNER_VERTICALS,
   VERIFICATION_KINDS,
+  FILE_VERIFICATION_KINDS,
 } from "@shared/schema";
 import {
   ALLOWED_MIME_TYPES, MAX_FILE_BYTES,
@@ -2125,7 +2126,9 @@ res.json(updated);
   // Zod schemas for the upload + decision request bodies. Kept inline because
   // they're route-local and reference VERIFICATION_KINDS already imported.
   const uploadVerificationBodySchema = z.object({
-    kind: z.enum(VERIFICATION_KINDS),
+    // File-upload route only — 'companies_house' uses a separate API-lookup
+    // endpoint that doesn't accept a file. Hence FILE_VERIFICATION_KINDS, not VERIFICATION_KINDS.
+    kind: z.enum(FILE_VERIFICATION_KINDS),
     fileBase64: z.string().min(1, "fileBase64 is required"),
     fileMimeType: z.string().min(1),
     fileName: z.string().max(255).optional(),
@@ -2254,6 +2257,13 @@ res.json(updated);
     if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid verification id" });
     const row = await storage.getTradesmanVerificationById(id);
     if (!row) return res.status(404).json({ message: "Verification not found" });
+    // CH-kind rows have no file — there's nothing to sign. Admin UI should
+    // render evidence_data directly for those instead of calling this endpoint.
+    if (!row.filePath || !row.fileMimeType) {
+      return res.status(409).json({
+        message: "This verification has no file evidence (likely a Companies House lookup). Use the evidence_data field instead.",
+      });
+    }
     const ttl = req.query.ttl ? Math.min(Math.max(Number(req.query.ttl) || 300, 30), 3600) : 300;
     try {
       const url = await signVerificationUrl(row.filePath, ttl);
