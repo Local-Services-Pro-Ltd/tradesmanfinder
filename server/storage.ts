@@ -32,7 +32,7 @@ import type {
   CreditTransaction, InsertCreditTransaction,
   TradesmanCredits,
   TradesmanCard, InsertTradesmanCard,
-  TradesmanVerification, InsertTradesmanVerification, VerificationKind, VerificationStatus,
+  TradesmanVerification, InsertTradesmanVerification, VerificationKind, VerificationStatus, VerificationSource,
   ModerationLogEntry,
   InsertPaymentsLog, PaymentsLogEntry,
   MagicLinkToken, InsertMagicLinkToken,
@@ -212,6 +212,27 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
     tradesmanId: number,
     kind: VerificationKind,
     nowYmd: string,
+  ): Promise<TradesmanVerification | undefined>;
+  /** Insert a Companies House evidence row. Distinct from createTradesmanVerification
+   *  because the shape differs: no file fields, requires companyNumber+evidenceData.
+   *  The DB CHECK constraint tv_evidence_shape enforces this at the row level. */
+  createCompaniesHouseVerification(input: {
+    tradesmanId: number;
+    companyNumber: string;
+    evidenceData: unknown;
+    source: VerificationSource;
+    /** Only set if the lookup succeeded server-side; null leaves it pending. */
+    verifiedAt?: number | null;
+    /** If true, the row is created with status='approved' (used by admin backfill
+     *  and by the automated pro flow when the CH lookup itself is the evidence). */
+    autoApprove?: boolean;
+  }): Promise<TradesmanVerification>;
+  /** Latest non-rejected CH evidence row for a (tradesman, companyNumber) pair.
+   *  Used to dedupe submissions — if the pro already has a pending/approved CH
+   *  row for the same company, we don't insert a duplicate. */
+  getCompaniesHouseVerificationByTradesmanAndCompany(
+    tradesmanId: number,
+    companyNumber: string,
   ): Promise<TradesmanVerification | undefined>;
 
   // ── homeowner sessions (PR D) ──
@@ -892,6 +913,61 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
           eq(tradesmanVerifications.kind, kind),
           eq(tradesmanVerifications.status, "approved"),
           sql`(${tradesmanVerifications.expiryDate} IS NULL OR ${tradesmanVerifications.expiryDate} >= ${nowYmd})`,
+        ))
+        .orderBy(desc(tradesmanVerifications.submittedAt))
+        .limit(1),
+    );
+  }
+
+  async createCompaniesHouseVerification(input: {
+    tradesmanId: number;
+    companyNumber: string;
+    evidenceData: unknown;
+    source: VerificationSource;
+    verifiedAt?: number | null;
+    autoApprove?: boolean;
+  }): Promise<TradesmanVerification> {
+    // We rely on the DB's tv_evidence_shape CHECK and unique partial index
+    // (uq_tv_tradesman_company_number) for the hard guarantees. The route layer
+    // pre-checks dedupe to return a friendlier 409 — this insert will still
+    // surface a constraint error if two requests race past the pre-check.
+    const ts = now();
+    const [row] = await db.insert(tradesmanVerifications).values({
+      tradesmanId: input.tradesmanId,
+      kind: "companies_house",
+      // File columns are NULL for CH evidence; the CHECK constraint allows this
+      // only when kind='companies_house'.
+      filePath: null,
+      fileMimeType: null,
+      fileSizeBytes: null,
+      qualificationType: null,
+      insuranceCoverGbp: null,
+      expiryDate: null,
+      companyNumber: input.companyNumber,
+      evidenceData: input.evidenceData,
+      source: input.source,
+      verifiedAt: input.verifiedAt ?? null,
+      status: input.autoApprove ? "approved" : "pending",
+      submittedAt: ts,
+      reviewedAt: input.autoApprove ? ts : null,
+      reviewedBy: input.autoApprove ? "system:companies_house" : null,
+    }).returning();
+    return row;
+  }
+
+  async getCompaniesHouseVerificationByTradesmanAndCompany(
+    tradesmanId: number,
+    companyNumber: string,
+  ): Promise<TradesmanVerification | undefined> {
+    // Return most-recent non-rejected row — a previously-rejected submission
+    // shouldn't block the pro from resubmitting after fixing the issue.
+    return one(
+      db.select().from(tradesmanVerifications)
+        .where(and(
+          eq(tradesmanVerifications.tradesmanId, tradesmanId),
+          eq(tradesmanVerifications.kind, "companies_house"),
+          eq(tradesmanVerifications.companyNumber, companyNumber),
+          sql`${tradesmanVerifications.status} <> 'rejected'`,
         ))
         .orderBy(desc(tradesmanVerifications.submittedAt))
         .limit(1),

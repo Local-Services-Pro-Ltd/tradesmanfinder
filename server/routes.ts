@@ -45,6 +45,17 @@ import { resolveAreas, extractOutwardPostcode } from "./area-resolver";
 import { validateAreaStringCached } from "./area-validator";
 import { stripeIsConfigured } from "./stripe";
 import {
+  searchCompany,
+  lookupCompanyByNumberCached,
+  normaliseCompanyNumber,
+  isPlausibleCompanyNumber,
+  CompaniesHouseConfigError,
+  CompaniesHouseAuthError,
+  CompaniesHouseNotFoundError,
+  CompaniesHouseRateLimitError,
+  CompaniesHouseNetworkError,
+} from "./companies-house";
+import {
   generateToken, hashToken, generateSessionId,
   normaliseEmail, isValidEmail, requestFingerprint,
   setSessionCookie, clearSessionCookie, readSessionCookie,
@@ -2307,14 +2318,237 @@ res.json(updated);
     // rejected upload silently revokes a previously-approved badge. Revocation
     // is a separate admin action (TODO PR-C, if needed).
     if (decision.status === "approved" && updated) {
-      const patch: Partial<Tradesman> =
-        updated.kind === "insurance" ? { insured: true } : { licensed: true };
+      // Each kind drives a distinct boolean on the tradesman row:
+      //   insurance      → insured
+      //   qualification  → licensed
+      //   companies_house→ verified  (the badge that was previously a lie)
+      let patch: Partial<Tradesman>;
+      if (updated.kind === "insurance") patch = { insured: true };
+      else if (updated.kind === "qualification") patch = { licensed: true };
+      else patch = { verified: true };
       await storage.updateTradesman(updated.tradesmanId, patch);
     }
 
     res.json(updated);
   });
 
+
+
+  /* ══════════════════════════════════════════════════════
+     COMPANIES HOUSE VERIFICATION ROUTES
+
+     Three endpoints behind requireAuth so we never burn CH API quota on
+     anonymous traffic, and so each call is attributable to a specific pro:
+
+       1. GET  /api/companies-house/search?q=<query>     — free-text suggest
+       2. GET  /api/companies-house/company/:number      — single lookup
+       3. POST /api/tradesmen/:id/verifications/companies-house
+          — self-service "I claim this company" submission. Looks up the
+            company server-side, snapshots a trimmed payload into
+            evidence_data, and inserts a tradesman_verifications row
+            with status='pending' for admin review.
+
+     Rate-limiting: per-IP windowed limit on each endpoint. The CH key has
+     a 600 req / 5min budget; these limits keep a single client from
+     burning it (and protect us from accidental loops in the pro UI).
+     ══════════════════════════════════════════════════════ */
+
+  // Translate the typed helper errors into HTTP responses. Centralised so all
+  // three routes share the same mapping — see server/companies-house.ts for
+  // the full taxonomy.
+  function mapCompaniesHouseError(e: unknown, res: any): boolean {
+    if (e instanceof CompaniesHouseConfigError) {
+      // Server misconfiguration — don't leak the message.
+      console.error("[companies-house] config error:", e.message);
+      res.status(503).json({ message: "Verification service is temporarily unavailable." });
+      return true;
+    }
+    if (e instanceof CompaniesHouseAuthError) {
+      // Our key, not the user's fault — 502.
+      console.error("[companies-house] auth error:", e.message);
+      res.status(502).json({ message: "Verification service rejected our credentials." });
+      return true;
+    }
+    if (e instanceof CompaniesHouseNotFoundError) {
+      res.status(404).json({ message: `Company ${e.companyNumber} not found on the UK register.` });
+      return true;
+    }
+    if (e instanceof CompaniesHouseRateLimitError) {
+      if (e.retryAfterSeconds != null) res.set("Retry-After", String(e.retryAfterSeconds));
+      res.status(429).json({
+        message: "Too many verification lookups right now. Please try again shortly.",
+        retryAfterSeconds: e.retryAfterSeconds,
+      });
+      return true;
+    }
+    if (e instanceof CompaniesHouseNetworkError) {
+      console.error("[companies-house] network error:", e.message);
+      res.status(502).json({ message: "Could not reach Companies House. Please try again." });
+      return true;
+    }
+    return false;
+  }
+
+  // 1. GET /api/companies-house/search?q=<query>&limit=<n>
+  app.get(
+    "/api/companies-house/search",
+    rateLimit({ windowMs: 60 * 1000, max: 30 }),
+    requireAuth,
+    async (req, res) => {
+      const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+      if (q.length < 2) {
+        // Match the helper's no-op contract — we don't 400 here because the
+        // type-ahead UI sends one character at a time as the user types.
+        return res.json({ items: [], total_results: 0, page_number: 1, items_per_page: 0 });
+      }
+      const limit = req.query.limit
+        ? Math.min(Math.max(Number(req.query.limit) || 10, 1), 20)
+        : 10;
+      try {
+        const result = await searchCompany(q, { itemsPerPage: limit });
+        res.json(result);
+      } catch (e) {
+        if (mapCompaniesHouseError(e, res)) return;
+        console.error("[companies-house] search unexpected:", e);
+        res.status(500).json({ message: "Search failed" });
+      }
+    },
+  );
+
+  // 2. GET /api/companies-house/company/:number
+  app.get(
+    "/api/companies-house/company/:number",
+    rateLimit({ windowMs: 60 * 1000, max: 30 }),
+    requireAuth,
+    async (req, res) => {
+      const raw = String(req.params.number ?? "");
+      const number = normaliseCompanyNumber(raw);
+      if (!isPlausibleCompanyNumber(number)) {
+        // Save a round-trip to CH for obviously-malformed numbers.
+        return res.status(400).json({
+          message: "Company number must be 8 digits or 2 letters + 6 digits (e.g. SC123456).",
+        });
+      }
+      try {
+        const record = await lookupCompanyByNumberCached(number);
+        res.json(record);
+      } catch (e) {
+        if (mapCompaniesHouseError(e, res)) return;
+        console.error("[companies-house] lookup unexpected:", e);
+        res.status(500).json({ message: "Lookup failed" });
+      }
+    },
+  );
+
+  // 3. POST /api/tradesmen/:id/verifications/companies-house
+  //    Pro-self submission. Server fetches the company record (don't trust the
+  //    client's copy of the payload), snapshots a trimmed subset into
+  //    evidence_data, and inserts a pending verification row for admin review.
+  const submitCompaniesHouseSchema = z.object({
+    companyNumber: z.string().min(2).max(20),
+  });
+  app.post(
+    "/api/tradesmen/:id/verifications/companies-house",
+    expressJson({ limit: "4kb" }),
+    rateLimit({ windowMs: 60 * 1000, max: 10 }),
+    requireAuth,
+    requireSelf("id"),
+    async (req, res) => {
+      const tradesmanId = Number(req.params.id);
+      if (!Number.isFinite(tradesmanId)) {
+        return res.status(400).json({ message: "Invalid tradesman id" });
+      }
+
+      const parsed = submitCompaniesHouseSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: "Invalid submission", errors: parsed.error.flatten() });
+      }
+      const number = normaliseCompanyNumber(parsed.data.companyNumber);
+      if (!isPlausibleCompanyNumber(number)) {
+        return res.status(400).json({
+          message: "Company number must be 8 digits or 2 letters + 6 digits (e.g. SC123456).",
+        });
+      }
+
+      // Dedupe pre-check — the unique partial index is the source of truth; this
+      // exists to return a clearer 409 than "unique constraint violated".
+      const existing = await storage.getCompaniesHouseVerificationByTradesmanAndCompany(
+        tradesmanId,
+        number,
+      );
+      if (existing) {
+        return res.status(409).json({
+          message: existing.status === "approved"
+            ? "You're already verified for this company."
+            : "You already have a pending verification for this company.",
+          existingId: existing.id,
+          status: existing.status,
+        });
+      }
+
+      let record;
+      try {
+        record = await lookupCompanyByNumberCached(number);
+      } catch (e) {
+        if (mapCompaniesHouseError(e, res)) return;
+        console.error("[companies-house] submit lookup unexpected:", e);
+        return res.status(500).json({ message: "Lookup failed" });
+      }
+
+      // Reject struck-off / dissolved companies at the API boundary — they
+      // shouldn't count as evidence. Admin can still override by inserting
+      // manually if needed.
+      const status = String(record.company_status || "").toLowerCase();
+      if (status === "dissolved" || status === "liquidation" || status === "removed") {
+        return res.status(422).json({
+          message: `Company ${record.company_number} is ${record.company_status}. We can only verify active companies.`,
+          companyStatus: record.company_status,
+        });
+      }
+
+      try {
+        const row = await storage.createCompaniesHouseVerification({
+          tradesmanId,
+          companyNumber: record.company_number,
+          evidenceData: {
+            // Snapshot only the fields we'll surface in admin review / public proof.
+            // Anything we don't display is a privacy/compliance liability — not stored.
+            company_number: record.company_number,
+            company_name: record.company_name,
+            company_status: record.company_status,
+            type: record.type,
+            date_of_creation: record.date_of_creation ?? null,
+            date_of_cessation: record.date_of_cessation ?? null,
+            jurisdiction: record.jurisdiction ?? null,
+            registered_office_address: record.registered_office_address ?? null,
+            fetched_at: new Date().toISOString(),
+          },
+          source: "pro_submission",
+          verifiedAt: Date.now(),
+          // Stays pending — admin still needs to confirm this pro actually
+          // controls this company (e.g. matches director name, business address).
+          autoApprove: false,
+        });
+        res.status(201).json({
+          id: row.id,
+          status: row.status,
+          companyNumber: row.companyNumber,
+          companyName: record.company_name,
+          submittedAt: row.submittedAt,
+        });
+      } catch (e: any) {
+        // Race: another tab inserted between our pre-check and this insert.
+        // The unique partial index turns this into a Postgres 23505.
+        if (e?.code === "23505") {
+          return res.status(409).json({
+            message: "A verification for this company was just created.",
+          });
+        }
+        console.error("[companies-house] insert failed:", e);
+        res.status(500).json({ message: "Could not save verification" });
+      }
+    },
+  );
 
   /* ══════════════════════════════════════════════════════
      HOMEOWNER ACCESS (PR D) — consent-gated verification proof viewing.
