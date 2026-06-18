@@ -2322,11 +2322,21 @@ res.json(updated);
       //   insurance       → insured
       //   qualification   → licensed
       //   companies_house → verified         (the badge that was previously a lie)
-      //   gas_safe        → gasSafeVerified  (Gas Safe Register lookup; PR-D')
+      //   gas_safe        → gasSafeVerified + insured + licensed
+      //
+      // Why gas_safe lights three badges, not one:
+      //   Gas Safe Register membership is legally conditional on (a) holding
+      //   current public liability insurance and (b) holding ACS gas
+      //   qualifications. Gas Safe themselves verify both at registration and
+      //   re-check annually. So a live register entry IS the evidence for the
+      //   insured and licensed badges — no separate document upload needed.
+      //   The badge tooltips on the public profile attribute the source
+      //   honestly ("Insured — verified via Gas Safe Register") so customers
+      //   can see where the trust signal came from.
       let patch: Partial<Tradesman>;
       if (updated.kind === "insurance") patch = { insured: true };
       else if (updated.kind === "qualification") patch = { licensed: true };
-      else if (updated.kind === "gas_safe") patch = { gasSafeVerified: true };
+      else if (updated.kind === "gas_safe") patch = { gasSafeVerified: true, insured: true, licensed: true };
       else patch = { verified: true };
       await storage.updateTradesman(updated.tradesmanId, patch);
     }
