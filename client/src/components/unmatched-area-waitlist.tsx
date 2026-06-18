@@ -41,6 +41,20 @@ export function UnmatchedAreaWaitlist({ requestedArea }: UnmatchedAreaWaitlistPr
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
+        // 422 = the server-side geocoder gate rejected the requested area.
+        // Surface a friendlier copy instead of the raw error string.
+        if (res.status === 422) {
+          if (body.reason === "looks_like_typo" && body.suggestion?.name) {
+            throw new Error(
+              `We couldn't find “${requestedArea}”. Did you mean ${body.suggestion.name}? ` +
+                `Head back and try that instead.`,
+            );
+          }
+          throw new Error(
+            `We couldn't find “${requestedArea}” as a real place. ` +
+              `Try a borough name or a UK postcode (e.g. SE13).`,
+          );
+        }
         throw new Error(body.message || "Sign-up failed. Please try again.");
       }
       return res.json();

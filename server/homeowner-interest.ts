@@ -29,6 +29,10 @@ import {
   type InsertHomeownerInterest,
 } from "@shared/schema";
 import { sendHomeownerInterestConfirmation } from "./mailer";
+import {
+  validateAreaStringCached,
+  type NominatimFetcher,
+} from "./area-validator";
 
 /**
  * Below this number of verified pros, the area landing page hides
@@ -117,6 +121,25 @@ export interface HomeownerInterestResult {
 }
 
 /**
+ * Thrown when `requestedArea` doesn't look like a real-world place. The
+ * route handler maps this to a 422 with the suggestion (if any) in the
+ * body so the client can offer a one-click "did you mean ...?" fix.
+ */
+export class UnmatchedAreaInvalidError extends Error {
+  readonly suggestion?: { name: string; displayName: string };
+  constructor(message: string, suggestion?: { name: string; displayName: string }) {
+    super(message);
+    this.name = "UnmatchedAreaInvalidError";
+    this.suggestion = suggestion;
+  }
+}
+
+/** Optional override hook for tests — lets us avoid network in unit tests. */
+export interface RecordHomeownerInterestOptions {
+  areaValidator?: NominatimFetcher;
+}
+
+/**
  * Idempotent upsert. INSERT ... ON CONFLICT (email, area_id, category_id)
  * DO UPDATE — re-submission from the same email for the same area/category
  * bumps updatedAt and refreshes source, but never duplicates. The COALESCE
@@ -128,6 +151,7 @@ export interface HomeownerInterestResult {
  */
 export async function recordHomeownerInterest(
   input: HomeownerInterestRequest,
+  options: RecordHomeownerInterestOptions = {},
 ): Promise<HomeownerInterestResult> {
   const now = Date.now();
   const email = input.email.toLowerCase().trim();
@@ -136,6 +160,24 @@ export async function recordHomeownerInterest(
   // de-dupe to one waitlist row per email. Display-cased copy is the user's
   // problem (they typed it); we want clean analytics.
   const requestedArea = input.requestedArea ? input.requestedArea.trim().toLowerCase() : null;
+
+  // Authoritative gate: if the user submitted a free-text `requestedArea`,
+  // confirm it's a real place via the geocoder before we store the row.
+  // The client may have already pre-checked but we never trust the client.
+  if (requestedArea !== null) {
+    const validation = await validateAreaStringCached(
+      input.requestedArea!,
+      options.areaValidator,
+    );
+    if (validation.kind === "reject") {
+      throw new UnmatchedAreaInvalidError(
+        validation.reason === "looks_like_typo"
+          ? "requested area looks like a near-match — confirm the suggested place"
+          : "requested area is not a recognised real-world place",
+        validation.suggestion,
+      );
+    }
+  }
 
   // Resolve display strings for the confirmation email
   const [areaRow] = input.areaId

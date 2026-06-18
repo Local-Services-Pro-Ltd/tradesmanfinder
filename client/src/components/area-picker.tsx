@@ -21,7 +21,7 @@
  * that endpoint exists for non-React callers (mini-sites, future
  * mobile app). Keeping the picker offline-friendly + zero-latency.
  */
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Command,
   CommandEmpty,
@@ -32,7 +32,7 @@ import {
 } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
-import { Bell, ChevronsUpDown, MapPin } from "lucide-react";
+import { Bell, ChevronsUpDown, Loader2, MapPin } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Area } from "@/lib/api-types";
 
@@ -87,12 +87,68 @@ function rankAreas(query: string, areas: Area[]): Area[] {
   return scored.slice(0, 8).map((s) => s.area);
 }
 
-// Same validator as the server-side schema. Keeps the "Notify me about <X>"
-// CTA from offering to submit garbage like "asdfg!@#".
+// Cheap shape check — keeps the "Notify me about <X>" CTA from offering to
+// submit garbage like "asdfg!@#". Real-world-place validation happens via
+// the server's /api/areas/validate endpoint (see useAreaValidation below).
 const REQUESTED_AREA_OK = /^[A-Za-z0-9 \-]+$/;
-function isUnmatchedSubmittable(q: string): boolean {
+function passesShape(q: string): boolean {
   const trimmed = q.trim();
   return trimmed.length >= 3 && trimmed.length <= 80 && REQUESTED_AREA_OK.test(trimmed);
+}
+
+type ValidationState =
+  | { kind: "unknown" }
+  | { kind: "checking" }
+  | { kind: "valid"; canonicalName: string }
+  | { kind: "typo"; suggestion: { name: string; displayName: string } }
+  | { kind: "invalid" };
+
+/**
+ * Debounced check against /api/areas/validate. Returns the current state
+ * for the latest query. We deliberately don't use react-query here: the
+ * cache-key surface is dead simple (q string), we want a short debounce,
+ * and we want to skip the network for inputs that fail the shape check.
+ */
+function useAreaValidation(query: string): ValidationState {
+  const [state, setState] = useState<ValidationState>({ kind: "unknown" });
+  // Track the latest query at request-fire time so an out-of-order response
+  // doesn't overwrite a fresh result. (User types fast → multiple in flight.)
+  const latestQueryRef = useRef("");
+
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (!passesShape(trimmed)) {
+      setState({ kind: "unknown" });
+      return;
+    }
+    latestQueryRef.current = trimmed;
+    setState({ kind: "checking" });
+    const handle = window.setTimeout(async () => {
+      try {
+        const res = await fetch(
+          `/api/areas/validate?q=${encodeURIComponent(trimmed)}`,
+        );
+        if (latestQueryRef.current !== trimmed) return; // stale
+        if (!res.ok) {
+          setState({ kind: "invalid" });
+          return;
+        }
+        const body = await res.json();
+        if (body.valid) {
+          setState({ kind: "valid", canonicalName: body.canonicalName ?? trimmed });
+        } else if (body.reason === "looks_like_typo" && body.suggestion) {
+          setState({ kind: "typo", suggestion: body.suggestion });
+        } else {
+          setState({ kind: "invalid" });
+        }
+      } catch {
+        if (latestQueryRef.current === trimmed) setState({ kind: "invalid" });
+      }
+    }, 350);
+    return () => window.clearTimeout(handle);
+  }, [query]);
+
+  return state;
 }
 
 export function AreaPicker({
@@ -112,8 +168,12 @@ export function AreaPicker({
   );
 
   const matches = useMemo(() => rankAreas(query, areas), [query, areas]);
-  const showUnmatchedCta = query.trim().length >= 2 && matches.length === 0;
-  const canSubmitUnmatched = isUnmatchedSubmittable(query);
+  // Only run the geocoder check when the local rank yields no seeded
+  // matches — no point burning a network call for "Lewisham" when we
+  // already cover Lewisham.
+  const noLocalMatch = matches.length === 0;
+  const validation = useAreaValidation(noLocalMatch ? query : "");
+  const showUnmatchedCta = query.trim().length >= 2 && noLocalMatch;
 
   const handleSelectArea = (area: Area) => {
     setOpen(false);
@@ -122,9 +182,9 @@ export function AreaPicker({
   };
 
   const handleSelectUnmatched = () => {
-    if (!canSubmitUnmatched) return;
-    setOpen(false);
     const requested = query.trim();
+    if (!passesShape(requested)) return;
+    setOpen(false);
     setQuery("");
     onSelect({ kind: "unmatched", requestedArea: requested });
   };
@@ -173,7 +233,22 @@ export function AreaPicker({
             */}
             {showUnmatchedCta && (
               <CommandEmpty>
-                {canSubmitUnmatched ? (
+                {!passesShape(query) ? (
+                  <p
+                    className="px-3 py-4 text-sm text-muted-foreground"
+                    data-testid="area-picker-empty-hint"
+                  >
+                    Try a borough name or a UK outward postcode (e.g. SE13).
+                  </p>
+                ) : validation.kind === "checking" || validation.kind === "unknown" ? (
+                  <p
+                    className="flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground"
+                    data-testid="area-picker-checking"
+                  >
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Checking “{query.trim()}”…
+                  </p>
+                ) : validation.kind === "valid" ? (
                   <button
                     type="button"
                     onClick={handleSelectUnmatched}
@@ -186,9 +261,28 @@ export function AreaPicker({
                       when we launch there.
                     </span>
                   </button>
+                ) : validation.kind === "typo" ? (
+                  <div className="px-3 py-3 text-sm" data-testid="area-picker-typo">
+                    <p className="text-muted-foreground">
+                      We couldn't find “{query.trim()}”. Did you mean:
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setQuery(validation.suggestion.name)}
+                      className="mt-2 inline-flex items-center gap-2 rounded-md border px-3 py-2 text-left text-sm hover:bg-accent"
+                      data-testid="area-picker-typo-suggestion"
+                    >
+                      <MapPin className="h-4 w-4 opacity-60" />
+                      <strong>{validation.suggestion.name}</strong>?
+                    </button>
+                  </div>
                 ) : (
-                  <p className="px-3 py-4 text-sm text-muted-foreground">
-                    Try a borough name or a UK outward postcode (e.g. SE13).
+                  <p
+                    className="px-3 py-4 text-sm text-muted-foreground"
+                    data-testid="area-picker-invalid"
+                  >
+                    We couldn't find “{query.trim()}” as a real place. Try a borough
+                    name or a UK postcode (e.g. SE13).
                   </p>
                 )}
               </CommandEmpty>
