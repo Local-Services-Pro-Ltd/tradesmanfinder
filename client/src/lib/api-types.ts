@@ -73,6 +73,9 @@ export interface Tradesman {
   verified: boolean;
   insured: boolean;
   licensed: boolean;
+  gasSafeVerified: boolean;
+  scopeBadges: string; // JSON string of string[]
+  videoUrl: string | null;
   featured: boolean;
   ratingAverage: number;
   ratingCount: number;
