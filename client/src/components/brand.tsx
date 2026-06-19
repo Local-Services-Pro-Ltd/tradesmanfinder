@@ -1,6 +1,6 @@
 import { Link } from "wouter";
 import * as Icons from "lucide-react";
-import { Star, ShieldCheck, BadgeCheck, Award, Clock } from "lucide-react";
+import { Star, ShieldCheck, BadgeCheck, Award, Clock, Flame } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /* ───────── Logo (TF monogram badge) ─────────
@@ -108,11 +108,13 @@ function formatIsoDate(iso: string | null): string | null {
 }
 
 export function VerificationChips({
-  verified, insured, licensed, verificationSummary, className,
+  verified, insured, licensed, gasSafeVerified, scopeBadges, verificationSummary, className,
 }: {
   verified?: boolean;
   insured?: boolean;
   licensed?: boolean;
+  gasSafeVerified?: boolean;
+  scopeBadges?: string; // JSON string of string[]
   verificationSummary?: VerificationSummary;
   className?: string;
 }) {
@@ -133,6 +135,13 @@ export function VerificationChips({
   const chips: { label: string; icon: typeof ShieldCheck; on?: boolean; title?: string; testId: string }[] = [
     { label: "Verified", icon: BadgeCheck, on: verified, testId: "verified" },
     {
+      label: "Gas Safe",
+      icon: Flame,
+      on: gasSafeVerified,
+      title: "Verified against the Gas Safe Register — the official UK list of legally registered gas engineers.",
+      testId: "gas-safe",
+    },
+    {
       label: ins?.coverGbp ? `Insured · ${formatGbpCover(ins.coverGbp)} PL` : "Insured",
       icon: ShieldCheck,
       on: insured,
@@ -147,18 +156,43 @@ export function VerificationChips({
       testId: "licensed",
     },
   ];
+  // Parse optional scope badges (e.g. "Gas Work", "Electrical Work").
+  // Why a second row: trust chips answer "are they trustworthy?";
+  // scope chips answer "what are they qualified to do?" — two different questions.
+  let parsedScopes: string[] = [];
+  if (scopeBadges) {
+    try {
+      const arr = JSON.parse(scopeBadges);
+      if (Array.isArray(arr)) parsedScopes = arr.filter((s) => typeof s === "string" && s.length > 0);
+    } catch { /* ignore malformed json */ }
+  }
   return (
-    <div className={cn("flex flex-wrap gap-1.5", className)}>
-      {chips.filter((c) => c.on).map((c) => (
-        <span
-          key={c.testId}
-          data-testid={`chip-${c.testId}`}
-          title={c.title}
-          className="inline-flex items-center gap-1 rounded-full bg-trust/10 px-2 py-0.5 text-xs font-medium text-trust"
-        >
-          <c.icon className="h-3 w-3" /> {c.label}
-        </span>
-      ))}
+    <div className={cn("flex flex-col gap-2", className)}>
+      <div className="flex flex-wrap gap-1.5">
+        {chips.filter((c) => c.on).map((c) => (
+          <span
+            key={c.testId}
+            data-testid={`chip-${c.testId}`}
+            title={c.title}
+            className="inline-flex items-center gap-1 rounded-full bg-trust/10 px-2 py-0.5 text-xs font-medium text-trust"
+          >
+            <c.icon className="h-3 w-3" /> {c.label}
+          </span>
+        ))}
+      </div>
+      {parsedScopes.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {parsedScopes.map((scope) => (
+            <span
+              key={scope}
+              data-testid={`chip-scope-${scope.toLowerCase().replace(/\s+/g, "-")}`}
+              className="inline-flex items-center gap-1 rounded-full bg-navy px-2 py-0.5 text-xs font-medium text-white"
+            >
+              {scope}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
