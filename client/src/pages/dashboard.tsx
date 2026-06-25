@@ -522,6 +522,7 @@ export default function Dashboard() {
               licensed={!!data.tradesman.licensed}
               verified={!!data.tradesman.verified}
               gasSafeVerified={!!data.tradesman.gasSafeVerified}
+              niceicVerified={!!data.tradesman.niceicVerified}
             />
           </TabsContent>
 

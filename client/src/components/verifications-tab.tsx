@@ -34,10 +34,27 @@ import type {
   CompaniesHouseSearchResult,
   CompaniesHouseEvidence,
   GasSafeEvidence,
+  GenericRegisterEvidence,
 } from "@/lib/api-types";
+import { asGenericRegisterEvidence } from "@/lib/api-types";
+import { REGISTER_CONFIGS, type RegisterConfig } from "@shared/register-configs";
+import type { GenericRegisterKind } from "@shared/schema";
 import {
   ShieldCheck, FileBadge2, Clock, CheckCircle2, XCircle, Upload, Info, Building2, Search, ArrowLeft, Flame, ExternalLink,
+  Zap, Sun, ShieldCheck as ShieldCheckIcon, Snowflake, Wrench,
 } from "lucide-react";
+
+// Map the platform-free iconName strings in REGISTER_CONFIGS to Lucide
+// components. Kept here (not in register-configs.ts) so that shared/ stays
+// importable from the server without dragging in a UI library.
+const REGISTER_ICONS: Record<RegisterConfig["iconName"], typeof Flame> = {
+  Zap,
+  Sun,
+  Flame,
+  ShieldCheck: ShieldCheckIcon,
+  Snowflake,
+  Wrench,
+};
 
 // Keep in sync with server/verifications-storage.ts (ALLOWED_MIME_TYPES, MAX_FILE_BYTES).
 const ALLOWED_MIME = ["application/pdf", "image/jpeg", "image/png", "image/webp", "image/heic"];
@@ -103,13 +120,21 @@ function kindLabel(kind: Verification["kind"]): string {
   if (kind === "insurance") return "Insurance";
   if (kind === "qualification") return "Qualification";
   if (kind === "gas_safe") return "Gas Safe Register";
-  return "Company verification";
+  if (kind === "companies_house") return "Company verification";
+  const cfg = REGISTER_CONFIGS[kind as GenericRegisterKind];
+  return cfg ? cfg.label : kind;
 }
 
 function KindIcon({ kind, className }: { kind: Verification["kind"]; className?: string }) {
   if (kind === "insurance") return <ShieldCheck className={className} />;
   if (kind === "qualification") return <FileBadge2 className={className} />;
   if (kind === "gas_safe") return <Flame className={className} />;
+  if (kind === "companies_house") return <Building2 className={className} />;
+  const cfg = REGISTER_CONFIGS[kind as GenericRegisterKind];
+  if (cfg) {
+    const Icon = REGISTER_ICONS[cfg.iconName];
+    return <Icon className={className} />;
+  }
   return <Building2 className={className} />;
 }
 
@@ -152,13 +177,21 @@ function HistoryItem({ v }: { v: Verification }) {
               · {v.evidenceData.business_name} (#{v.evidenceData.gas_safe_number})
             </span>
           )}
+          {(() => {
+            const ge = asGenericRegisterEvidence(v.evidenceData ?? null);
+            return ge ? (
+              <span className="text-muted-foreground">
+                · {ge.business_name} (#{ge.registration_number})
+              </span>
+            ) : null;
+          })()}
         </div>
         <StatusBadge status={v.status} />
       </div>
       <div className="mt-1 flex flex-wrap gap-3 text-xs text-muted-foreground">
         <span>Submitted {new Date(v.submittedAt).toLocaleDateString("en-GB", { dateStyle: "medium" })}</span>
         {v.expiryDate && <span>Valid until {new Date(v.expiryDate).toLocaleDateString("en-GB", { dateStyle: "medium" })}</span>}
-        {v.kind !== "companies_house" && v.kind !== "gas_safe" && v.fileSizeBytes != null && (
+        {(v.kind === "insurance" || v.kind === "qualification") && v.fileSizeBytes != null && (
           <span>{formatBytes(v.fileSizeBytes)}</span>
         )}
         {v.kind === "companies_house" && isCompaniesHouseEvidence(v.evidenceData) && v.evidenceData.company_status && (
@@ -167,6 +200,10 @@ function HistoryItem({ v }: { v: Verification }) {
         {v.kind === "gas_safe" && isGasSafeEvidence(v.evidenceData) && (
           <span>Postcode: {v.evidenceData.postcode}</span>
         )}
+        {(() => {
+          const ge = asGenericRegisterEvidence(v.evidenceData ?? null);
+          return ge?.postcode ? <span>Postcode: {ge.postcode}</span> : null;
+        })()}
       </div>
       {v.status === "rejected" && v.reviewerNote && (
         <div className="mt-2 rounded-md bg-destructive/5 p-2 text-xs text-destructive">
@@ -725,18 +762,174 @@ function GasSafeSubmissionForm({
   );
 }
 
+/**
+ * GenericRegisterSubmissionForm — single-step submission for one of the seven
+ * generic UK trade registers (NICEIC, NAPIT, MCS, OFTEC, TrustMark, F-Gas/REFCOM,
+ * CIPHE). The form's shape, labels, validation, and outbound deep-link all come
+ * from REGISTER_CONFIGS[kind] — so adding the remaining registers in PR-H…M is
+ * a one-line mount in VerificationsTab.
+ *
+ * Why no auto-verify: none of these registers expose a public API, and most
+ * sit behind a WAF that blocks datacenter IPs. The pro submits a claim; an
+ * admin opens the register_url deep-link in the review queue and confirms the
+ * match before approving. Status is always "pending" until then.
+ */
+function GenericRegisterSubmissionForm({
+  tradesmanId,
+  kind,
+  hasPending,
+}: {
+  tradesmanId: number;
+  kind: GenericRegisterKind;
+  hasPending: boolean;
+}) {
+  const cfg = REGISTER_CONFIGS[kind];
+  const Icon = REGISTER_ICONS[cfg.iconName];
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [registrationNumber, setRegistrationNumber] = useState("");
+  const [businessName, setBusinessName] = useState("");
+  const [postcode, setPostcode] = useState("");
+
+  // Client-side echo of the server validation so users see errors immediately.
+  // The server re-validates with the same REGISTER_CONFIGS entry, so this is
+  // belt-and-braces, not the trust boundary.
+  const normalised = cfg.normaliseNumber(registrationNumber);
+  const numberError = registrationNumber.length > 0 ? cfg.validateNumber(normalised) : null;
+  const numberOk = registrationNumber.length > 0 && numberError === null;
+  const businessOk = !cfg.collectsBusinessName || businessName.trim().length >= 2;
+  const postcodeOk = !cfg.collectsPostcode || postcode.trim().length >= 5;
+  const canSubmit = numberOk && businessOk && postcodeOk;
+
+  const submit = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest(
+        "POST",
+        `/api/tradesmen/${tradesmanId}/verifications/${kind}`,
+        {
+          registrationNumber: normalised,
+          businessName: businessName.trim(),
+          postcode: postcode.trim(),
+        },
+      );
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: "Submitted for review",
+        description: `We'll cross-check your ${cfg.label} record before approving.`,
+      });
+      setRegistrationNumber("");
+      setBusinessName("");
+      setPostcode("");
+      queryClient.invalidateQueries({ queryKey: ["/api/tradesmen", tradesmanId, "verifications"] });
+    },
+    onError: (e: any) => {
+      toast({
+        title: "Couldn't submit",
+        description: e?.message || "Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Stable per-kind input ids so a single VerificationsTab can mount multiple
+  // forms (NICEIC + NAPIT + …) without colliding label[for] / aria-describedby.
+  const idNum = `reg-${kind}-number`;
+  const idBiz = `reg-${kind}-business`;
+  const idPc  = `reg-${kind}-postcode`;
+
+  return (
+    <Card className="p-5" data-testid={`form-register-${kind}`}>
+      <div className="flex items-start gap-3">
+        <Icon className="mt-0.5 h-5 w-5 text-primary" />
+        <div className="min-w-0">
+          <h3 className="font-display text-base font-semibold text-foreground">{cfg.label}</h3>
+          <p className="mt-1 text-xs text-muted-foreground">{cfg.formDescription}</p>
+        </div>
+      </div>
+
+      {hasPending && (
+        <div className="mt-3 flex items-start gap-2 rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
+          <Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+          <span>You have a {cfg.label} submission under review. You can submit another to replace it.</span>
+        </div>
+      )}
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <div>
+          <Label htmlFor={idNum} className="text-sm">{cfg.numberLabel}</Label>
+          <Input
+            id={idNum}
+            value={registrationNumber}
+            onChange={(e) => setRegistrationNumber(e.target.value)}
+            placeholder={cfg.numberPlaceholder}
+            maxLength={40}
+            data-testid={`input-register-${kind}-number`}
+          />
+          {numberError && (
+            <p className="mt-1 text-xs text-destructive">{numberError}</p>
+          )}
+        </div>
+        {cfg.collectsPostcode && (
+          <div>
+            <Label htmlFor={idPc} className="text-sm">Business postcode</Label>
+            <Input
+              id={idPc}
+              value={postcode}
+              onChange={(e) => setPostcode(e.target.value.toUpperCase())}
+              placeholder="e.g. SW3 2DY"
+              maxLength={10}
+              data-testid={`input-register-${kind}-postcode`}
+            />
+          </div>
+        )}
+        {cfg.collectsBusinessName && (
+          <div className="sm:col-span-2">
+            <Label htmlFor={idBiz} className="text-sm">Business name (as on the register)</Label>
+            <Input
+              id={idBiz}
+              value={businessName}
+              onChange={(e) => setBusinessName(e.target.value)}
+              placeholder="e.g. Keystone London Ltd"
+              maxLength={160}
+              data-testid={`input-register-${kind}-business`}
+            />
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4">
+        <Button
+          onClick={() => submit.mutate()}
+          disabled={submit.isPending || !canSubmit}
+          data-testid={`button-register-${kind}-submit`}
+        >
+          <Upload className="mr-1 h-4 w-4" />
+          {submit.isPending ? "Submitting…" : "Submit for review"}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+
 export function VerificationsTab({
   tradesmanId,
   insured,
   licensed,
   verified,
   gasSafeVerified = false,
+  niceicVerified = false,
 }: {
   tradesmanId: number;
   insured: boolean;
   licensed: boolean;
   verified: boolean;
   gasSafeVerified?: boolean;
+  // PR-G: NICEIC flag passed through from /api/me. Following register PRs
+  // (PR-H…M) will widen this prop set to the rest of the seven kinds.
+  niceicVerified?: boolean;
 }) {
   const { data, isLoading } = useQuery<Verification[]>({
     queryKey: ["/api/tradesmen", tradesmanId, "verifications"],
@@ -763,6 +956,11 @@ export function VerificationsTab({
     () => list.some((v) => v.kind === "gas_safe" && v.status === "pending"),
     [list],
   );
+  // PR-G: NICEIC pending check. Each subsequent register PR adds one of these.
+  const hasPendingNiceic = useMemo(
+    () => list.some((v) => v.kind === "niceic" && v.status === "pending"),
+    [list],
+  );
 
   // Latest approved companies_house row → drives the status header subtitle.
   const approvedCompany = useMemo<CompaniesHouseEvidence | null>(() => {
@@ -778,6 +976,15 @@ export function VerificationsTab({
       .filter((v) => v.kind === "gas_safe" && v.status === "approved" && isGasSafeEvidence(v.evidenceData))
       .sort((a, b) => (b.verifiedAt ?? b.submittedAt) - (a.verifiedAt ?? a.submittedAt));
     return (approved[0]?.evidenceData as GasSafeEvidence | undefined) ?? null;
+  }, [list]);
+
+  // Latest approved NICEIC row → drives the NICEIC status header line.
+  // Generic register evidence shape is { registration_number, business_name, postcode, ... }.
+  const approvedNiceic = useMemo<GenericRegisterEvidence | null>(() => {
+    const approved = list
+      .filter((v) => v.kind === "niceic" && v.status === "approved")
+      .sort((a, b) => (b.verifiedAt ?? b.submittedAt) - (a.verifiedAt ?? a.submittedAt));
+    return asGenericRegisterEvidence(approved[0]?.evidenceData ?? null);
   }, [list]);
 
   return (
@@ -826,6 +1033,17 @@ export function VerificationsTab({
                 : "Not yet submitted"}
             </span>
           </div>
+          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-3 text-sm">
+            <Zap className={`h-4 w-4 ${niceicVerified ? "text-trust" : "text-muted-foreground"}`} />
+            <span className="font-medium text-foreground">NICEIC</span>
+            <span className="ml-auto text-xs text-muted-foreground" data-testid="niceic-status-summary">
+              {niceicVerified
+                ? approvedNiceic
+                  ? `#${approvedNiceic.registration_number}`
+                  : "On file"
+                : "Not yet submitted"}
+            </span>
+          </div>
         </div>
       </Card>
 
@@ -836,6 +1054,7 @@ export function VerificationsTab({
       </div>
       <CompaniesHouseSubmissionForm tradesmanId={tradesmanId} hasPending={hasPendingCompaniesHouse} />
       <GasSafeSubmissionForm tradesmanId={tradesmanId} hasPending={hasPendingGasSafe} />
+      <GenericRegisterSubmissionForm tradesmanId={tradesmanId} kind="niceic" hasPending={hasPendingNiceic} />
 
       {/* History */}
       <Card className="p-5">

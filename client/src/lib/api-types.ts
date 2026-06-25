@@ -74,6 +74,16 @@ export interface Tradesman {
   insured: boolean;
   licensed: boolean;
   gasSafeVerified: boolean;
+  // PR-F booleans — flipped by admin approval of the matching
+  // tradesman_verifications row. Default false; surfaced on the dashboard
+  // status header and (in later PRs) on the public profile chips.
+  niceicVerified: boolean;
+  napitVerified: boolean;
+  mcsVerified: boolean;
+  oftecVerified: boolean;
+  trustmarkVerified: boolean;
+  fgasVerified: boolean;
+  cipheVerified: boolean;
   scopeBadges: string; // JSON string of string[]
   videoUrl: string | null;
   featured: boolean;
