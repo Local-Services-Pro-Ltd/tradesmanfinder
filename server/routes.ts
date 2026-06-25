@@ -62,6 +62,7 @@ import {
   buildGasSafeRegisterUrl,
   normalisePostcode,
 } from "./gas-safe";
+import { registerGenericRegisterRoutes } from "./register-submission";
 import {
   generateToken, hashToken, generateSessionId,
   normaliseEmail, isValidEmail, requestFingerprint,
@@ -2353,7 +2354,16 @@ res.json(updated);
         const impl = getRegisterImplication(updated.kind);
         if (impl) {
           for (const badge of impl.impliesBadges) patch[badge] = true;
-          if (updated.kind === "gas_safe") patch.gasSafeVerified = true;
+          // Per-register public flag. Each is independent; never auto-revoked
+          // on a later rejection (same policy as the file-backed kinds).
+          if (updated.kind === "gas_safe")  patch.gasSafeVerified = true;
+          if (updated.kind === "niceic")    patch.niceicVerified = true;
+          if (updated.kind === "napit")     patch.napitVerified = true;
+          if (updated.kind === "mcs")       patch.mcsVerified = true;
+          if (updated.kind === "oftec")     patch.oftecVerified = true;
+          if (updated.kind === "trustmark") patch.trustmarkVerified = true;
+          if (updated.kind === "fgas")      patch.fgasVerified = true;
+          if (updated.kind === "ciphe")     patch.cipheVerified = true;
           if (impl.scopeBadge) {
             // Merge into the existing scope_badges JSON array on the tradesman
             // row, dedup-preserving order. Fetch the row fresh so concurrent
@@ -2712,7 +2722,20 @@ res.json(updated);
     },
   );
 
-  /* ══════════════════════════════════════════════════════
+  /* ═══════════════════════════════════════════════════════
+     GENERIC REGISTER SUBMISSION ROUTES (PR-F)
+
+     One route factory mounts the seven submit-for-admin-review register
+     kinds (NICEIC, NAPIT, MCS, OFTEC, TrustMark, F-Gas, CIPHE). Each
+     ends up at POST /api/tradesmen/:id/verifications/:kind with an
+     identical contract — see server/register-submission.ts.
+
+     Gas Safe predates this abstraction and keeps its bespoke route
+     above; CH is API-backed and lives elsewhere entirely.
+     ═══════════════════════════════════════════════════════ */
+  registerGenericRegisterRoutes(app, storage, { requireAuth, requireSelf });
+
+  /* ═══════════════════════════════════════════════════════
      HOMEOWNER ACCESS (PR D) — consent-gated verification proof viewing.
 
      Flow:
