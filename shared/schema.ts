@@ -62,6 +62,16 @@ export const tradesmen = pgTable("tradesmen", {
   // verification row exists. Added 2026-06-18 (PR-D'). Independent of
   // `verified` (Companies House) so pros earn each badge separately.
   gasSafeVerified: boolean("gas_safe_verified").notNull().default(false),
+  // Per-register public-facing flags. Added 2026-06-25 (PR-F). Each mirrors
+  // gas_safe_verified — flipped true on approval of the matching kind, never
+  // auto-revoked. Drives listing/profile badges without joining verifications.
+  niceicVerified:    boolean("niceic_verified").notNull().default(false),
+  napitVerified:     boolean("napit_verified").notNull().default(false),
+  mcsVerified:       boolean("mcs_verified").notNull().default(false),
+  oftecVerified:     boolean("oftec_verified").notNull().default(false),
+  trustmarkVerified: boolean("trustmark_verified").notNull().default(false),
+  fgasVerified:      boolean("fgas_verified").notNull().default(false),
+  cipheVerified:     boolean("ciphe_verified").notNull().default(false),
   // Register-derived scope badges ("Gas Work", "Electrical Work",
   // "Renewables", "Oil Heating", "TrustMark", "F-Gas Certified",
   // "CIPHE Member"). JSON array of strings, deduplicated. Driven by the
@@ -290,8 +300,26 @@ export const tradesmanVerifications = pgTable("tradesman_verifications", {
   // Gas Safe evidence columns (kind='gas_safe'). Added 2026-06-18 (PR-D').
   gasSafeNumber: text("gas_safe_number"),            // normalised digits-only registration number
   gasSafeRegisterUrl: text("gas_safe_register_url"), // canonical signed Gas Safe deep-link
+  // Generic register columns (PR-F, 2026-06-25). Used by all register-backed
+  // kinds OTHER than companies_house and gas_safe (which keep their bespoke
+  // columns for backward-compat). `registrationNumber` is normalised per
+  // register (case/whitespace rules vary); `registerUrl` is a canonical
+  // deep-link to the public register that admins click to confirm before
+  // approving. The tv_evidence_shape DB CHECK enforces these are present
+  // for any new register kind.
+  registrationNumber: text("registration_number"),
+  registerUrl:        text("register_url"),
 });
-export const VERIFICATION_KINDS = ["insurance", "qualification", "companies_house", "gas_safe"] as const;
+export const VERIFICATION_KINDS = [
+  "insurance", "qualification", "companies_house", "gas_safe",
+  "niceic", "napit", "mcs", "oftec", "trustmark", "fgas", "ciphe",
+] as const;
+// Subset that uses the generic registration_number column (all register-backed
+// kinds except CH and gas_safe, which have their own bespoke columns).
+export const GENERIC_REGISTER_KINDS = [
+  "niceic", "napit", "mcs", "oftec", "trustmark", "fgas", "ciphe",
+] as const;
+export type GenericRegisterKind = (typeof GENERIC_REGISTER_KINDS)[number];
 // Subset that requires a file upload — used by the doc-upload route which
 // can't handle the API-lookup-backed 'companies_house' kind.
 export const FILE_VERIFICATION_KINDS = ["insurance", "qualification"] as const;
@@ -328,6 +356,10 @@ export const insertTradesmanVerificationSchema = createInsertSchema(tradesmanVer
     // Gas Safe fields — see superRefine below for kind-aware required/forbidden rules.
     gasSafeNumber: z.string().min(2).max(20).optional().nullable(),
     gasSafeRegisterUrl: z.string().url().max(2048).optional().nullable(),
+    // Generic register fields (PR-F). Required by superRefine for any kind in
+    // GENERIC_REGISTER_KINDS; forbidden otherwise.
+    registrationNumber: z.string().min(1).max(40).optional().nullable(),
+    registerUrl: z.string().url().max(2048).optional().nullable(),
   })
   .superRefine((data, ctx) => {
     if (data.kind === "companies_house") {
@@ -374,6 +406,37 @@ export const insertTradesmanVerificationSchema = createInsertSchema(tradesmanVer
           message: "companyNumber must be absent when kind='gas_safe'",
         });
       }
+    } else if ((GENERIC_REGISTER_KINDS as readonly string[]).includes(data.kind)) {
+      // Generic register kinds (NICEIC/NAPIT/MCS/OFTEC/TrustMark/F-Gas/CIPHE)
+      // require registration_number + evidence_data; file/CH/Gas-Safe cols must be absent.
+      if (!data.registrationNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["registrationNumber"],
+          message: `registrationNumber is required when kind='${data.kind}'`,
+        });
+      }
+      if (data.filePath || data.fileMimeType || (data.fileSizeBytes !== undefined && data.fileSizeBytes !== null)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["filePath"],
+          message: `file fields must be absent when kind='${data.kind}'`,
+        });
+      }
+      if (data.companyNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["companyNumber"],
+          message: `companyNumber must be absent when kind='${data.kind}'`,
+        });
+      }
+      if (data.gasSafeNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["gasSafeNumber"],
+          message: `gasSafeNumber must be absent when kind='${data.kind}'`,
+        });
+      }
     } else {
       // 'insurance' | 'qualification' — file columns required by tv_evidence_shape
       if (!data.filePath || !data.fileMimeType || data.fileSizeBytes == null) {
@@ -395,6 +458,13 @@ export const insertTradesmanVerificationSchema = createInsertSchema(tradesmanVer
           code: z.ZodIssueCode.custom,
           path: ["gasSafeNumber"],
           message: "gasSafeNumber must be absent unless kind='gas_safe'",
+        });
+      }
+      if (data.registrationNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["registrationNumber"],
+          message: "registrationNumber must be absent for file-backed verification kinds",
         });
       }
     }

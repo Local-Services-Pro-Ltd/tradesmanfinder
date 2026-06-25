@@ -33,6 +33,7 @@ import type {
   TradesmanCredits,
   TradesmanCard, InsertTradesmanCard,
   TradesmanVerification, InsertTradesmanVerification, VerificationKind, VerificationStatus, VerificationSource,
+  GenericRegisterKind,
   ModerationLogEntry,
   InsertPaymentsLog, PaymentsLogEntry,
   MagicLinkToken, InsertMagicLinkToken,
@@ -253,6 +254,30 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
   getGasSafeVerificationByTradesmanAndNumber(
     tradesmanId: number,
     gasSafeNumber: string,
+  ): Promise<TradesmanVerification | undefined>;
+
+  /** PR-F generic register submission. Replaces N bespoke methods (one per
+   *  register kind) with a single call that takes the kind discriminator.
+   *  Writes to the generic `registration_number` + `register_url` columns
+   *  (not the bespoke `gas_safe_number`). The DB CHECK constraint enforces
+   *  shape at the row level. Status is 'pending' unless autoApprove=true. */
+  createGenericRegisterVerification(input: {
+    tradesmanId: number;
+    kind: GenericRegisterKind;
+    registrationNumber: string;
+    registerUrl?: string | null;
+    evidenceData: unknown;
+    source: VerificationSource;
+    /** Only set if the register lookup succeeded server-side; null leaves pending. */
+    verifiedAt?: number | null;
+    /** Used by admin backfill flows. Pro-self-submission never auto-approves. */
+    autoApprove?: boolean;
+  }): Promise<TradesmanVerification>;
+  /** Latest non-rejected generic-register evidence row for a (tradesman, kind, registrationNumber). */
+  getGenericRegisterVerificationByTradesmanAndNumber(
+    tradesmanId: number,
+    kind: GenericRegisterKind,
+    registrationNumber: string,
   ): Promise<TradesmanVerification | undefined>;
 
   // ── homeowner sessions (PR D) ──
@@ -1040,6 +1065,63 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
           eq(tradesmanVerifications.tradesmanId, tradesmanId),
           eq(tradesmanVerifications.kind, "gas_safe"),
           eq(tradesmanVerifications.gasSafeNumber, gasSafeNumber),
+          sql`${tradesmanVerifications.status} <> 'rejected'`,
+        ))
+        .orderBy(desc(tradesmanVerifications.submittedAt))
+        .limit(1),
+    );
+  }
+
+  // PR-F: generic register submission (NICEIC, NAPIT, MCS, OFTEC, TrustMark,
+  // F-Gas, CIPHE). One implementation parameterised by `kind`; replaces
+  // what would otherwise be seven near-identical create*Verification methods.
+  async createGenericRegisterVerification(input: {
+    tradesmanId: number;
+    kind: GenericRegisterKind;
+    registrationNumber: string;
+    registerUrl?: string | null;
+    evidenceData: unknown;
+    source: VerificationSource;
+    verifiedAt?: number | null;
+    autoApprove?: boolean;
+  }): Promise<TradesmanVerification> {
+    const ts = now();
+    const [row] = await db.insert(tradesmanVerifications).values({
+      tradesmanId: input.tradesmanId,
+      kind: input.kind,
+      filePath: null,
+      fileMimeType: null,
+      fileSizeBytes: null,
+      qualificationType: null,
+      insuranceCoverGbp: null,
+      expiryDate: null,
+      companyNumber: null,
+      gasSafeNumber: null,
+      gasSafeRegisterUrl: null,
+      registrationNumber: input.registrationNumber,
+      registerUrl: input.registerUrl ?? null,
+      evidenceData: input.evidenceData,
+      source: input.source,
+      verifiedAt: input.verifiedAt ?? null,
+      status: input.autoApprove ? "approved" : "pending",
+      submittedAt: ts,
+      reviewedAt: input.autoApprove ? ts : null,
+      reviewedBy: input.autoApprove ? `system:${input.kind}` : null,
+    }).returning();
+    return row;
+  }
+
+  async getGenericRegisterVerificationByTradesmanAndNumber(
+    tradesmanId: number,
+    kind: GenericRegisterKind,
+    registrationNumber: string,
+  ): Promise<TradesmanVerification | undefined> {
+    return one(
+      db.select().from(tradesmanVerifications)
+        .where(and(
+          eq(tradesmanVerifications.tradesmanId, tradesmanId),
+          eq(tradesmanVerifications.kind, kind),
+          eq(tradesmanVerifications.registrationNumber, registrationNumber),
           sql`${tradesmanVerifications.status} <> 'rejected'`,
         ))
         .orderBy(desc(tradesmanVerifications.submittedAt))

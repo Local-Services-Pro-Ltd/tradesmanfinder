@@ -128,7 +128,11 @@ export interface VerificationPublicSummary {
 export interface VerificationRecord {
   id: number;
   tradesmanId: number;
-  kind: "insurance" | "qualification" | "companies_house" | "gas_safe";
+  kind:
+    | "insurance" | "qualification" | "companies_house" | "gas_safe"
+    // Generic register kinds (PR-F). All use the shared registration_number /
+    // register_url columns and the GenericRegisterEvidence shape below.
+    | "niceic" | "napit" | "mcs" | "oftec" | "trustmark" | "fgas" | "ciphe";
   filePath?: string | null;
   fileMimeType: string | null;
   fileSizeBytes: number | null;
@@ -145,10 +149,15 @@ export interface VerificationRecord {
   // Gas Safe fields (kind='gas_safe' only).
   gasSafeNumber?: string | null;
   gasSafeRegisterUrl?: string | null;
+  // Generic register fields (PR-F). Populated for kinds in
+  // {niceic, napit, mcs, oftec, trustmark, fgas, ciphe}.
+  registrationNumber?: string | null;
+  registerUrl?: string | null;
   // evidenceData shape varies by kind — CompaniesHouseEvidence for
-  // companies_house rows, GasSafeEvidence for gas_safe rows. Callers
-  // discriminate on `kind` before reading the snapshot.
-  evidenceData?: CompaniesHouseEvidence | GasSafeEvidence | null;
+  // companies_house rows, GasSafeEvidence for gas_safe rows,
+  // GenericRegisterEvidence for the seven generic register kinds.
+  // Callers discriminate on `kind` before reading the snapshot.
+  evidenceData?: CompaniesHouseEvidence | GasSafeEvidence | GenericRegisterEvidence | null;
   verifiedAt?: number | null;
   source?: "pro_submission" | "admin_backfill" | "automated_recheck" | null;
 }
@@ -159,6 +168,19 @@ export interface VerificationRecord {
 // access via WAF). The admin clicks gasSafeRegisterUrl to confirm.
 export interface GasSafeEvidence {
   gas_safe_number: string;
+  business_name: string;
+  postcode: string;
+  submitted_at: string;
+  verification_method: "pro_self_submission_pending_admin_review";
+}
+
+// Generic register evidence (PR-F) — shared shape for the seven
+// submit-for-admin-review register kinds. Same fields as GasSafeEvidence
+// but keyed on the generic registration_number rather than gas_safe_number.
+// The admin uses business_name + postcode to confirm a match on the
+// public register before approving.
+export interface GenericRegisterEvidence {
+  registration_number: string;
   business_name: string;
   postcode: string;
   submitted_at: string;
@@ -188,17 +210,24 @@ export interface CompaniesHouseEvidence {
 // discriminate on the verification row's `kind` first; these helpers
 // give back a typed snapshot or null when the row has no evidence.
 export function asCompaniesHouseEvidence(
-  evidence: CompaniesHouseEvidence | GasSafeEvidence | null | undefined
+  evidence: CompaniesHouseEvidence | GasSafeEvidence | GenericRegisterEvidence | null | undefined
 ): CompaniesHouseEvidence | null {
   if (!evidence) return null;
   return "company_number" in evidence ? (evidence as CompaniesHouseEvidence) : null;
 }
 
 export function asGasSafeEvidence(
-  evidence: CompaniesHouseEvidence | GasSafeEvidence | null | undefined
+  evidence: CompaniesHouseEvidence | GasSafeEvidence | GenericRegisterEvidence | null | undefined
 ): GasSafeEvidence | null {
   if (!evidence) return null;
   return "gas_safe_number" in evidence ? (evidence as GasSafeEvidence) : null;
+}
+
+export function asGenericRegisterEvidence(
+  evidence: CompaniesHouseEvidence | GasSafeEvidence | GenericRegisterEvidence | null | undefined
+): GenericRegisterEvidence | null {
+  if (!evidence) return null;
+  return "registration_number" in evidence ? (evidence as GenericRegisterEvidence) : null;
 }
 
 export interface CompaniesHouseSearchItem {
