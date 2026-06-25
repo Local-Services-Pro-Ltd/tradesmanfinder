@@ -38,7 +38,7 @@ import type {
 } from "@/lib/api-types";
 import { asGenericRegisterEvidence } from "@/lib/api-types";
 import { REGISTER_CONFIGS, type RegisterConfig } from "@shared/register-configs";
-import type { GenericRegisterKind } from "@shared/schema";
+import { GENERIC_REGISTER_KINDS, type GenericRegisterKind } from "@shared/schema";
 import {
   ShieldCheck, FileBadge2, Clock, CheckCircle2, XCircle, Upload, Info, Building2, Search, ArrowLeft, Flame, ExternalLink,
   Zap, Sun, ShieldCheck as ShieldCheckIcon, Snowflake, Wrench,
@@ -921,16 +921,38 @@ export function VerificationsTab({
   verified,
   gasSafeVerified = false,
   niceicVerified = false,
+  napitVerified = false,
+  mcsVerified = false,
+  oftecVerified = false,
+  trustmarkVerified = false,
+  fgasVerified = false,
+  cipheVerified = false,
 }: {
   tradesmanId: number;
   insured: boolean;
   licensed: boolean;
   verified: boolean;
   gasSafeVerified?: boolean;
-  // PR-G: NICEIC flag passed through from /api/me. Following register PRs
-  // (PR-H…M) will widen this prop set to the rest of the seven kinds.
+  // PR-H: full set of generic-register booleans, populated from /api/me.
+  // Each maps 1:1 to a kind in GENERIC_REGISTER_KINDS / REGISTER_CONFIGS.
   niceicVerified?: boolean;
+  napitVerified?: boolean;
+  mcsVerified?: boolean;
+  oftecVerified?: boolean;
+  trustmarkVerified?: boolean;
+  fgasVerified?: boolean;
+  cipheVerified?: boolean;
 }) {
+  // Per-kind verified flag lookup — drives the status row strip below.
+  const verifiedByKind: Record<GenericRegisterKind, boolean> = {
+    niceic: niceicVerified,
+    napit: napitVerified,
+    mcs: mcsVerified,
+    oftec: oftecVerified,
+    trustmark: trustmarkVerified,
+    fgas: fgasVerified,
+    ciphe: cipheVerified,
+  };
   const { data, isLoading } = useQuery<Verification[]>({
     queryKey: ["/api/tradesmen", tradesmanId, "verifications"],
     queryFn: async () => {
@@ -956,11 +978,41 @@ export function VerificationsTab({
     () => list.some((v) => v.kind === "gas_safe" && v.status === "pending"),
     [list],
   );
-  // PR-G: NICEIC pending check. Each subsequent register PR adds one of these.
-  const hasPendingNiceic = useMemo(
-    () => list.some((v) => v.kind === "niceic" && v.status === "pending"),
-    [list],
-  );
+
+  // PR-H: pending + latest-approved lookups for all seven generic register
+  // kinds, derived in one pass through `list`. Avoids 14 separate useMemos.
+  type RegisterAggregate = {
+    pending: boolean;
+    approved: GenericRegisterEvidence | null;
+    approvedAt: number;
+  };
+  const registerAggregates = useMemo<Record<GenericRegisterKind, RegisterAggregate>>(() => {
+    const acc: Record<GenericRegisterKind, RegisterAggregate> = {
+      niceic:    { pending: false, approved: null, approvedAt: 0 },
+      napit:     { pending: false, approved: null, approvedAt: 0 },
+      mcs:       { pending: false, approved: null, approvedAt: 0 },
+      oftec:     { pending: false, approved: null, approvedAt: 0 },
+      trustmark: { pending: false, approved: null, approvedAt: 0 },
+      fgas:      { pending: false, approved: null, approvedAt: 0 },
+      ciphe:     { pending: false, approved: null, approvedAt: 0 },
+    };
+    for (const v of list) {
+      const slot = acc[v.kind as GenericRegisterKind];
+      if (!slot) continue; // not one of the seven generic kinds
+      if (v.status === "pending") slot.pending = true;
+      if (v.status === "approved") {
+        const ts = v.verifiedAt ?? v.submittedAt;
+        if (ts >= slot.approvedAt) {
+          const ev = asGenericRegisterEvidence(v.evidenceData ?? null);
+          if (ev) {
+            slot.approved = ev;
+            slot.approvedAt = ts;
+          }
+        }
+      }
+    }
+    return acc;
+  }, [list]);
 
   // Latest approved companies_house row → drives the status header subtitle.
   const approvedCompany = useMemo<CompaniesHouseEvidence | null>(() => {
@@ -976,15 +1028,6 @@ export function VerificationsTab({
       .filter((v) => v.kind === "gas_safe" && v.status === "approved" && isGasSafeEvidence(v.evidenceData))
       .sort((a, b) => (b.verifiedAt ?? b.submittedAt) - (a.verifiedAt ?? a.submittedAt));
     return (approved[0]?.evidenceData as GasSafeEvidence | undefined) ?? null;
-  }, [list]);
-
-  // Latest approved NICEIC row → drives the NICEIC status header line.
-  // Generic register evidence shape is { registration_number, business_name, postcode, ... }.
-  const approvedNiceic = useMemo<GenericRegisterEvidence | null>(() => {
-    const approved = list
-      .filter((v) => v.kind === "niceic" && v.status === "approved")
-      .sort((a, b) => (b.verifiedAt ?? b.submittedAt) - (a.verifiedAt ?? a.submittedAt));
-    return asGenericRegisterEvidence(approved[0]?.evidenceData ?? null);
   }, [list]);
 
   return (
@@ -1033,17 +1076,31 @@ export function VerificationsTab({
                 : "Not yet submitted"}
             </span>
           </div>
-          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-3 text-sm">
-            <Zap className={`h-4 w-4 ${niceicVerified ? "text-trust" : "text-muted-foreground"}`} />
-            <span className="font-medium text-foreground">NICEIC</span>
-            <span className="ml-auto text-xs text-muted-foreground" data-testid="niceic-status-summary">
-              {niceicVerified
-                ? approvedNiceic
-                  ? `#${approvedNiceic.registration_number}`
-                  : "On file"
-                : "Not yet submitted"}
-            </span>
-          </div>
+          {GENERIC_REGISTER_KINDS.map((kind) => {
+            const cfg = REGISTER_CONFIGS[kind];
+            const Icon = REGISTER_ICONS[cfg.iconName];
+            const isVerified = verifiedByKind[kind];
+            const approved = registerAggregates[kind].approved;
+            return (
+              <div
+                key={kind}
+                className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-3 text-sm"
+              >
+                <Icon className={`h-4 w-4 ${isVerified ? "text-trust" : "text-muted-foreground"}`} />
+                <span className="font-medium text-foreground">{cfg.label}</span>
+                <span
+                  className="ml-auto text-xs text-muted-foreground"
+                  data-testid={`${kind}-status-summary`}
+                >
+                  {isVerified
+                    ? approved
+                      ? `#${approved.registration_number}`
+                      : "On file"
+                    : "Not yet submitted"}
+                </span>
+              </div>
+            );
+          })}
         </div>
       </Card>
 
@@ -1054,7 +1111,14 @@ export function VerificationsTab({
       </div>
       <CompaniesHouseSubmissionForm tradesmanId={tradesmanId} hasPending={hasPendingCompaniesHouse} />
       <GasSafeSubmissionForm tradesmanId={tradesmanId} hasPending={hasPendingGasSafe} />
-      <GenericRegisterSubmissionForm tradesmanId={tradesmanId} kind="niceic" hasPending={hasPendingNiceic} />
+      {GENERIC_REGISTER_KINDS.map((kind) => (
+        <GenericRegisterSubmissionForm
+          key={kind}
+          tradesmanId={tradesmanId}
+          kind={kind}
+          hasPending={registerAggregates[kind].pending}
+        />
+      ))}
 
       {/* History */}
       <Card className="p-5">
