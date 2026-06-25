@@ -57,6 +57,12 @@ import {
   CompaniesHouseNetworkError,
 } from "./companies-house";
 import {
+  normaliseGasSafeNumber,
+  isPlausibleGasSafeNumber,
+  buildGasSafeRegisterUrl,
+  normalisePostcode,
+} from "./gas-safe";
+import {
   generateToken, hashToken, generateSessionId,
   normaliseEmail, isValidEmail, requestFingerprint,
   setSessionCookie, clearSessionCookie, readSessionCookie,
@@ -2587,6 +2593,120 @@ res.json(updated);
           });
         }
         console.error("[companies-house] insert failed:", e);
+        res.status(500).json({ message: "Could not save verification" });
+      }
+    },
+  );
+
+  /* ══════════════════════════════════════════════════════
+     GAS SAFE REGISTER VERIFICATION ROUTE (PR-E)
+
+     POST /api/tradesmen/:id/verifications/gas-safe
+
+     The Gas Safe Register has no public API and the consumer web search is
+     gated by Imperva WAF (datacenter IPs blocked) + ASP.NET CSRF/ViewState
+     tokens. We CANNOT verify a registration number server-side.
+
+     Flow:
+       - Pro submits { gasSafeNumber, businessName, postcode } (the latter
+         two are evidence the admin uses to confirm the pro actually controls
+         this registration — not used for any automated check).
+       - We validate the number format, dedupe against existing non-rejected
+         rows for the same (tradesman, number), and insert a 'pending' row.
+       - The row carries a canonical Gas Safe Register deep-link in
+         gas_safe_register_url so the admin can click straight through to
+         visually confirm. The trimmed user-entered evidence lives in
+         evidence_data.
+       - Admin approves via the existing admin/verifications queue (same
+         path as PR-D'). On approval the gas_safe_verified flag is lit by
+         the existing register-implications post-approval handler.
+     ══════════════════════════════════════════════════════ */
+  const submitGasSafeSchema = z.object({
+    gasSafeNumber: z.string().min(2).max(20),
+    businessName: z.string().trim().min(2).max(200),
+    postcode: z.string().trim().min(5).max(10),
+  });
+  app.post(
+    "/api/tradesmen/:id/verifications/gas-safe",
+    expressJson({ limit: "4kb" }),
+    rateLimit({ windowMs: 60 * 1000, max: 10 }),
+    requireAuth,
+    requireSelf("id"),
+    async (req, res) => {
+      const tradesmanId = Number(req.params.id);
+      if (!Number.isFinite(tradesmanId)) {
+        return res.status(400).json({ message: "Invalid tradesman id" });
+      }
+
+      const parsed = submitGasSafeSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({
+          message: "Invalid submission",
+          errors: parsed.error.flatten(),
+        });
+      }
+      const number = normaliseGasSafeNumber(parsed.data.gasSafeNumber);
+      if (!isPlausibleGasSafeNumber(number)) {
+        return res.status(400).json({
+          message: "Gas Safe registration number must be 4–8 digits.",
+        });
+      }
+
+      const businessName = parsed.data.businessName.trim().slice(0, 200);
+      const postcode = normalisePostcode(parsed.data.postcode);
+
+      // Dedupe pre-check — unique partial index uq_tv_tradesman_gas_safe_number
+      // is the hard guarantee; this returns a clearer 409.
+      const existing = await storage.getGasSafeVerificationByTradesmanAndNumber(
+        tradesmanId,
+        number,
+      );
+      if (existing) {
+        return res.status(409).json({
+          message: existing.status === "approved"
+            ? "You're already verified for this Gas Safe number."
+            : "You already have a pending verification for this Gas Safe number.",
+          existingId: existing.id,
+          status: existing.status,
+        });
+      }
+
+      try {
+        const row = await storage.createGasSafeVerification({
+          tradesmanId,
+          gasSafeNumber: number,
+          gasSafeRegisterUrl: buildGasSafeRegisterUrl(number),
+          evidenceData: {
+            // What the pro told us — NOT verified by us, surfaced verbatim to
+            // the admin reviewer. The admin uses these to confirm a match
+            // against the Gas Safe Register website.
+            gas_safe_number: number,
+            business_name: businessName,
+            postcode,
+            submitted_at: new Date().toISOString(),
+            // Explicit marker so any downstream consumer of evidence_data
+            // knows this snapshot was NOT register-confirmed.
+            verification_method: "pro_self_submission_pending_admin_review",
+          },
+          source: "pro_submission",
+          verifiedAt: null,
+          // Cannot auto-approve — server cannot reach Gas Safe Register.
+          autoApprove: false,
+        });
+        res.status(201).json({
+          id: row.id,
+          status: row.status,
+          gasSafeNumber: row.gasSafeNumber,
+          gasSafeRegisterUrl: row.gasSafeRegisterUrl,
+          submittedAt: row.submittedAt,
+        });
+      } catch (e: any) {
+        if (e?.code === "23505") {
+          return res.status(409).json({
+            message: "A verification for this Gas Safe number was just created.",
+          });
+        }
+        console.error("[gas-safe] insert failed:", e);
         res.status(500).json({ message: "Could not save verification" });
       }
     },

@@ -24,19 +24,22 @@ import { Textarea } from "@/components/ui/textarea";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { VerificationRecord } from "@/lib/api-types";
+import { asCompaniesHouseEvidence, asGasSafeEvidence } from "@/lib/api-types";
 import {
-  ArrowLeft, ShieldCheck, FileBadge2, Building2, CheckCircle2, XCircle, ExternalLink, Inbox, Lock,
+  ArrowLeft, ShieldCheck, FileBadge2, Building2, CheckCircle2, XCircle, ExternalLink, Inbox, Lock, Flame,
 } from "lucide-react";
 
 function kindIcon(kind: VerificationRecord["kind"], className = "h-4 w-4 text-primary") {
   if (kind === "insurance") return <ShieldCheck className={className} />;
   if (kind === "qualification") return <FileBadge2 className={className} />;
+  if (kind === "gas_safe") return <Flame className={className} />;
   return <Building2 className={className} />;
 }
 
 function kindLabel(kind: VerificationRecord["kind"]): string {
   if (kind === "insurance") return "Insurance";
   if (kind === "qualification") return "Qualification";
+  if (kind === "gas_safe") return "Gas Safe";
   return "Companies House";
 }
 
@@ -227,68 +230,125 @@ export default function AdminVerifications() {
                     {v.kind === "qualification" && v.qualificationType && (
                       <p className="mt-1 text-sm text-foreground">Qualification: <strong>{v.qualificationType}</strong></p>
                     )}
-                    {v.kind === "companies_house" && (
-                      <div className="mt-2 rounded-md border border-border bg-muted/30 p-3 text-sm">
-                        {v.evidenceData ? (
-                          <>
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="font-semibold text-foreground">{v.evidenceData.company_name}</span>
-                              <Badge
-                                variant={v.evidenceData.company_status === "active" ? "secondary" : "destructive"}
-                                className="capitalize"
-                              >
-                                {v.evidenceData.company_status}
-                              </Badge>
-                            </div>
-                            <div className="mt-1 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
-                              <span><span className="text-foreground">Number:</span> {v.evidenceData.company_number}</span>
-                              {v.evidenceData.type && (
-                                <span className="capitalize">
-                                  <span className="text-foreground">Type:</span> {v.evidenceData.type.replace(/-/g, " ")}
-                                </span>
+                    {v.kind === "companies_house" && (() => {
+                      // Narrow the union to CompaniesHouseEvidence before reading CH-specific
+                      // fields. Gas Safe rows never reach here (different `v.kind`).
+                      const ch = asCompaniesHouseEvidence(v.evidenceData);
+                      return (
+                        <div className="mt-2 rounded-md border border-border bg-muted/30 p-3 text-sm">
+                          {ch ? (
+                            <>
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-foreground">{ch.company_name}</span>
+                                <Badge
+                                  variant={ch.company_status === "active" ? "secondary" : "destructive"}
+                                  className="capitalize"
+                                >
+                                  {ch.company_status}
+                                </Badge>
+                              </div>
+                              <div className="mt-1 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+                                <span><span className="text-foreground">Number:</span> {ch.company_number}</span>
+                                {ch.type && (
+                                  <span className="capitalize">
+                                    <span className="text-foreground">Type:</span> {ch.type.replace(/-/g, " ")}
+                                  </span>
+                                )}
+                                {ch.date_of_creation && (
+                                  <span><span className="text-foreground">Incorporated:</span> {ch.date_of_creation}</span>
+                                )}
+                                {ch.date_of_cessation && (
+                                  <span><span className="text-foreground">Ceased:</span> {ch.date_of_cessation}</span>
+                                )}
+                                {ch.jurisdiction && (
+                                  <span className="capitalize">
+                                    <span className="text-foreground">Jurisdiction:</span> {ch.jurisdiction.replace(/-/g, " ")}
+                                  </span>
+                                )}
+                                {ch.registered_office_address && (
+                                  <span className="sm:col-span-2">
+                                    <span className="text-foreground">Address:</span>{" "}
+                                    {[
+                                      ch.registered_office_address.address_line_1,
+                                      ch.registered_office_address.address_line_2,
+                                      ch.registered_office_address.locality,
+                                      ch.registered_office_address.region,
+                                      ch.registered_office_address.postal_code,
+                                      ch.registered_office_address.country,
+                                    ].filter(Boolean).join(", ")}
+                                  </span>
+                                )}
+                              </div>
+                              {ch.fetched_at && (
+                                <p className="mt-2 text-[11px] text-muted-foreground">
+                                  Fetched from Companies House at {fmtDate(new Date(ch.fetched_at).getTime())}
+                                </p>
                               )}
-                              {v.evidenceData.date_of_creation && (
-                                <span><span className="text-foreground">Incorporated:</span> {v.evidenceData.date_of_creation}</span>
-                              )}
-                              {v.evidenceData.date_of_cessation && (
-                                <span><span className="text-foreground">Ceased:</span> {v.evidenceData.date_of_cessation}</span>
-                              )}
-                              {v.evidenceData.jurisdiction && (
-                                <span className="capitalize">
-                                  <span className="text-foreground">Jurisdiction:</span> {v.evidenceData.jurisdiction.replace(/-/g, " ")}
-                                </span>
-                              )}
-                              {v.evidenceData.registered_office_address && (
+                            </>
+                          ) : v.companyNumber ? (
+                            <p className="text-sm text-foreground">Company #{v.companyNumber}</p>
+                          ) : (
+                            <p className="text-sm text-muted-foreground">No evidence captured.</p>
+                          )}
+                        </div>
+                      );
+                    })()}
+                    {v.kind === "gas_safe" && (() => {
+                      // Gas Safe rows are submit-for-admin-review. The server never auto-verifies
+                      // because the Gas Safe Register has no public API and is gated by Imperva
+                      // WAF (blocks datacenter IPs). The admin clicks gasSafeRegisterUrl, confirms
+                      // the registration number on gassaferegister.co.uk, then approves here.
+                      const gs = asGasSafeEvidence(v.evidenceData);
+                      const registerUrl =
+                        v.gasSafeRegisterUrl ||
+                        (v.gasSafeNumber
+                          ? `https://www.gassaferegister.co.uk/find-an-engineer-or-check-the-register/check-the-register/?RegistrationNumber=${encodeURIComponent(v.gasSafeNumber)}`
+                          : null);
+                      return (
+                        <div className="mt-2 rounded-md border border-border bg-muted/30 p-3 text-sm">
+                          {gs ? (
+                            <>
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-foreground">{gs.business_name}</span>
+                                <Badge variant="outline" className="capitalize">Pending check</Badge>
+                              </div>
+                              <div className="mt-1 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+                                <span><span className="text-foreground">Reg #:</span> {gs.gas_safe_number}</span>
+                                <span><span className="text-foreground">Postcode:</span> {gs.postcode}</span>
                                 <span className="sm:col-span-2">
-                                  <span className="text-foreground">Address:</span>{" "}
-                                  {[
-                                    v.evidenceData.registered_office_address.address_line_1,
-                                    v.evidenceData.registered_office_address.address_line_2,
-                                    v.evidenceData.registered_office_address.locality,
-                                    v.evidenceData.registered_office_address.region,
-                                    v.evidenceData.registered_office_address.postal_code,
-                                    v.evidenceData.registered_office_address.country,
-                                  ].filter(Boolean).join(", ")}
+                                  <span className="text-foreground">Submitted at:</span> {fmtDate(new Date(gs.submitted_at).getTime())}
                                 </span>
-                              )}
-                            </div>
-                            {v.evidenceData.fetched_at && (
+                              </div>
                               <p className="mt-2 text-[11px] text-muted-foreground">
-                                Fetched from Companies House at {fmtDate(new Date(v.evidenceData.fetched_at).getTime())}
+                                Self-submitted by the tradesman — confirm on the Gas Safe Register before approving.
                               </p>
-                            )}
-                          </>
-                        ) : v.companyNumber ? (
-                          <p className="text-sm text-foreground">Company #{v.companyNumber}</p>
-                        ) : (
-                          <p className="text-sm text-muted-foreground">No evidence captured.</p>
-                        )}
-                      </div>
-                    )}
+                            </>
+                          ) : v.gasSafeNumber ? (
+                            <p className="text-sm text-foreground">Reg #{v.gasSafeNumber}</p>
+                          ) : (
+                            <p className="text-sm text-muted-foreground">No evidence captured.</p>
+                          )}
+                          {registerUrl && (
+                            <div className="mt-2">
+                              <Button asChild variant="outline" size="sm">
+                                <a
+                                  href={registerUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  data-testid={`link-gas-safe-register-${v.id}`}
+                                >
+                                  <ExternalLink className="mr-1 h-4 w-4" />Open Gas Safe Register
+                                </a>
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   <div className="flex flex-wrap gap-2">
-                    {v.kind !== "companies_house" && (
+                    {v.kind !== "companies_house" && v.kind !== "gas_safe" && (
                       <Button variant="outline" size="sm" onClick={() => openFile(v.id)} data-testid={`button-open-${v.id}`}>
                         <ExternalLink className="mr-1 h-4 w-4" />Open file
                       </Button>

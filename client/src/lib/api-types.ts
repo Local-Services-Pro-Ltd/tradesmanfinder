@@ -128,7 +128,7 @@ export interface VerificationPublicSummary {
 export interface VerificationRecord {
   id: number;
   tradesmanId: number;
-  kind: "insurance" | "qualification" | "companies_house";
+  kind: "insurance" | "qualification" | "companies_house" | "gas_safe";
   filePath?: string | null;
   fileMimeType: string | null;
   fileSizeBytes: number | null;
@@ -142,9 +142,27 @@ export interface VerificationRecord {
   reviewerNote: string | null;
   // Companies House fields (kind='companies_house' only).
   companyNumber?: string | null;
-  evidenceData?: CompaniesHouseEvidence | null;
+  // Gas Safe fields (kind='gas_safe' only).
+  gasSafeNumber?: string | null;
+  gasSafeRegisterUrl?: string | null;
+  // evidenceData shape varies by kind — CompaniesHouseEvidence for
+  // companies_house rows, GasSafeEvidence for gas_safe rows. Callers
+  // discriminate on `kind` before reading the snapshot.
+  evidenceData?: CompaniesHouseEvidence | GasSafeEvidence | null;
   verifiedAt?: number | null;
   source?: "pro_submission" | "admin_backfill" | "automated_recheck" | null;
+}
+
+// Pro-submitted Gas Safe evidence — surfaced verbatim to admin reviewer.
+// Critically: this is NOT verified against the Gas Safe Register at
+// submission time (the register has no public API and blocks server-side
+// access via WAF). The admin clicks gasSafeRegisterUrl to confirm.
+export interface GasSafeEvidence {
+  gas_safe_number: string;
+  business_name: string;
+  postcode: string;
+  submitted_at: string;
+  verification_method: "pro_self_submission_pending_admin_review";
 }
 
 export interface CompaniesHouseEvidence {
@@ -164,6 +182,23 @@ export interface CompaniesHouseEvidence {
     country?: string;
   } | null;
   fetched_at?: string;
+}
+
+// Type guards for narrowing the evidenceData union. Callers should
+// discriminate on the verification row's `kind` first; these helpers
+// give back a typed snapshot or null when the row has no evidence.
+export function asCompaniesHouseEvidence(
+  evidence: CompaniesHouseEvidence | GasSafeEvidence | null | undefined
+): CompaniesHouseEvidence | null {
+  if (!evidence) return null;
+  return "company_number" in evidence ? (evidence as CompaniesHouseEvidence) : null;
+}
+
+export function asGasSafeEvidence(
+  evidence: CompaniesHouseEvidence | GasSafeEvidence | null | undefined
+): GasSafeEvidence | null {
+  if (!evidence) return null;
+  return "gas_safe_number" in evidence ? (evidence as GasSafeEvidence) : null;
 }
 
 export interface CompaniesHouseSearchItem {
