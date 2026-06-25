@@ -33,9 +33,10 @@ import type {
   CompaniesHouseSearchItem,
   CompaniesHouseSearchResult,
   CompaniesHouseEvidence,
+  GasSafeEvidence,
 } from "@/lib/api-types";
 import {
-  ShieldCheck, FileBadge2, Clock, CheckCircle2, XCircle, Upload, Info, Building2, Search, ArrowLeft,
+  ShieldCheck, FileBadge2, Clock, CheckCircle2, XCircle, Upload, Info, Building2, Search, ArrowLeft, Flame, ExternalLink,
 } from "lucide-react";
 
 // Keep in sync with server/verifications-storage.ts (ALLOWED_MIME_TYPES, MAX_FILE_BYTES).
@@ -101,13 +102,29 @@ function formatBytes(n: number) {
 function kindLabel(kind: Verification["kind"]): string {
   if (kind === "insurance") return "Insurance";
   if (kind === "qualification") return "Qualification";
+  if (kind === "gas_safe") return "Gas Safe Register";
   return "Company verification";
 }
 
 function KindIcon({ kind, className }: { kind: Verification["kind"]; className?: string }) {
   if (kind === "insurance") return <ShieldCheck className={className} />;
   if (kind === "qualification") return <FileBadge2 className={className} />;
+  if (kind === "gas_safe") return <Flame className={className} />;
   return <Building2 className={className} />;
+}
+
+// Type guard — evidenceData on a gas_safe row is GasSafeEvidence shape.
+// Doesn't need to be exhaustive; only used for narrowing inside JSX.
+function isGasSafeEvidence(
+  ev: VerificationRecord["evidenceData"],
+): ev is GasSafeEvidence {
+  return !!ev && typeof ev === "object" && "gas_safe_number" in (ev as any);
+}
+
+function isCompaniesHouseEvidence(
+  ev: VerificationRecord["evidenceData"],
+): ev is CompaniesHouseEvidence {
+  return !!ev && typeof ev === "object" && "company_number" in (ev as any);
 }
 
 function HistoryItem({ v }: { v: Verification }) {
@@ -125,9 +142,14 @@ function HistoryItem({ v }: { v: Verification }) {
               · £{(v.insuranceCoverGbp / 1_000_000).toLocaleString("en-GB", { maximumFractionDigits: 1 })}m PL
             </span>
           )}
-          {v.kind === "companies_house" && v.evidenceData && (
+          {v.kind === "companies_house" && isCompaniesHouseEvidence(v.evidenceData) && (
             <span className="text-muted-foreground">
               · {v.evidenceData.company_name} ({v.evidenceData.company_number})
+            </span>
+          )}
+          {v.kind === "gas_safe" && isGasSafeEvidence(v.evidenceData) && (
+            <span className="text-muted-foreground">
+              · {v.evidenceData.business_name} (#{v.evidenceData.gas_safe_number})
             </span>
           )}
         </div>
@@ -136,11 +158,14 @@ function HistoryItem({ v }: { v: Verification }) {
       <div className="mt-1 flex flex-wrap gap-3 text-xs text-muted-foreground">
         <span>Submitted {new Date(v.submittedAt).toLocaleDateString("en-GB", { dateStyle: "medium" })}</span>
         {v.expiryDate && <span>Valid until {new Date(v.expiryDate).toLocaleDateString("en-GB", { dateStyle: "medium" })}</span>}
-        {v.kind !== "companies_house" && v.fileSizeBytes != null && (
+        {v.kind !== "companies_house" && v.kind !== "gas_safe" && v.fileSizeBytes != null && (
           <span>{formatBytes(v.fileSizeBytes)}</span>
         )}
-        {v.kind === "companies_house" && v.evidenceData?.company_status && (
+        {v.kind === "companies_house" && isCompaniesHouseEvidence(v.evidenceData) && v.evidenceData.company_status && (
           <span className="capitalize">Status: {v.evidenceData.company_status}</span>
+        )}
+        {v.kind === "gas_safe" && isGasSafeEvidence(v.evidenceData) && (
+          <span>Postcode: {v.evidenceData.postcode}</span>
         )}
       </div>
       {v.status === "rejected" && v.reviewerNote && (
@@ -554,16 +579,164 @@ function CompaniesHouseSubmissionForm({
   );
 }
 
+/**
+ * GasSafeSubmissionForm — single-step submission of a Gas Safe registration
+ * number + business name + postcode.
+ *
+ * Why no auto-verify: the Gas Safe Register has no public API and blocks
+ * datacenter IPs at the WAF layer (see server/gas-safe.ts). The pro
+ * submits their claim; an admin clicks the gasSafeRegisterUrl deep-link
+ * and confirms the match against the live register before approving.
+ *
+ * The form intentionally collects business_name + postcode (not just the
+ * number) so the admin has corroborating data to spot fraudulent claims
+ * before approving — e.g. number 967295 returns 'Keystone' at SW3 2DY;
+ * if the pro entered a different business, the admin rejects.
+ */
+function GasSafeSubmissionForm({
+  tradesmanId, hasPending,
+}: {
+  tradesmanId: number;
+  hasPending: boolean;
+}) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [gasSafeNumber, setGasSafeNumber] = useState("");
+  const [businessName, setBusinessName] = useState("");
+  const [postcode, setPostcode] = useState("");
+
+  const numberOk = /^\d{4,8}$/.test(gasSafeNumber.trim());
+  const businessOk = businessName.trim().length >= 2;
+  const postcodeOk = postcode.trim().length >= 5;
+  const canSubmit = numberOk && businessOk && postcodeOk;
+
+  const submit = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest(
+        "POST",
+        `/api/tradesmen/${tradesmanId}/verifications/gas-safe`,
+        {
+          gasSafeNumber: gasSafeNumber.trim(),
+          businessName: businessName.trim(),
+          postcode: postcode.trim(),
+        },
+      );
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: "Submitted for review",
+        description: "We'll cross-check your registration against the Gas Safe Register and confirm shortly.",
+      });
+      setGasSafeNumber("");
+      setBusinessName("");
+      setPostcode("");
+      queryClient.invalidateQueries({ queryKey: ["/api/tradesmen", tradesmanId, "verifications"] });
+    },
+    onError: (e: any) => {
+      toast({
+        title: "Couldn't submit",
+        description: e?.message || "Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  return (
+    <Card className="p-5">
+      <div className="flex items-start gap-3">
+        <Flame className="mt-0.5 h-5 w-5 text-primary" />
+        <div className="min-w-0">
+          <h3 className="font-display text-base font-semibold text-foreground">Gas Safe Register</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Required for any gas work in the UK. Enter your registration number,
+            business name, and postcode — we cross-check against the public Gas
+            Safe Register before approving.{" "}
+            <a
+              href="https://www.gassaferegister.co.uk/find-an-engineer-or-check-the-register/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-0.5 underline"
+            >
+              View the register <ExternalLink className="h-3 w-3" />
+            </a>
+          </p>
+        </div>
+      </div>
+
+      {hasPending && (
+        <div className="mt-3 flex items-start gap-2 rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
+          <Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+          <span>You have a Gas Safe submission under review. You can submit another to replace it.</span>
+        </div>
+      )}
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <div>
+          <Label htmlFor="gs-number" className="text-sm">Gas Safe registration number</Label>
+          <Input
+            id="gs-number"
+            value={gasSafeNumber}
+            onChange={(e) => setGasSafeNumber(e.target.value.replace(/[^0-9]/g, ""))}
+            placeholder="e.g. 967295"
+            inputMode="numeric"
+            maxLength={8}
+            data-testid="input-gs-number"
+          />
+          {!numberOk && gasSafeNumber.length > 0 && (
+            <p className="mt-1 text-xs text-destructive">Must be 4–8 digits.</p>
+          )}
+        </div>
+        <div>
+          <Label htmlFor="gs-postcode" className="text-sm">Business postcode</Label>
+          <Input
+            id="gs-postcode"
+            value={postcode}
+            onChange={(e) => setPostcode(e.target.value.toUpperCase())}
+            placeholder="e.g. SW3 2DY"
+            maxLength={10}
+            data-testid="input-gs-postcode"
+          />
+        </div>
+        <div className="sm:col-span-2">
+          <Label htmlFor="gs-business" className="text-sm">Business name (as on the register)</Label>
+          <Input
+            id="gs-business"
+            value={businessName}
+            onChange={(e) => setBusinessName(e.target.value)}
+            placeholder="e.g. Keystone London Ltd"
+            maxLength={160}
+            data-testid="input-gs-business"
+          />
+        </div>
+      </div>
+
+      <div className="mt-4">
+        <Button
+          onClick={() => submit.mutate()}
+          disabled={submit.isPending || !canSubmit}
+          data-testid="button-gs-submit"
+        >
+          <Upload className="mr-1 h-4 w-4" />
+          {submit.isPending ? "Submitting…" : "Submit for review"}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
 export function VerificationsTab({
   tradesmanId,
   insured,
   licensed,
   verified,
+  gasSafeVerified = false,
 }: {
   tradesmanId: number;
   insured: boolean;
   licensed: boolean;
   verified: boolean;
+  gasSafeVerified?: boolean;
 }) {
   const { data, isLoading } = useQuery<Verification[]>({
     queryKey: ["/api/tradesmen", tradesmanId, "verifications"],
@@ -586,13 +759,25 @@ export function VerificationsTab({
     () => list.some((v) => v.kind === "companies_house" && v.status === "pending"),
     [list],
   );
+  const hasPendingGasSafe = useMemo(
+    () => list.some((v) => v.kind === "gas_safe" && v.status === "pending"),
+    [list],
+  );
 
   // Latest approved companies_house row → drives the status header subtitle.
   const approvedCompany = useMemo<CompaniesHouseEvidence | null>(() => {
     const approved = list
-      .filter((v) => v.kind === "companies_house" && v.status === "approved" && v.evidenceData)
+      .filter((v) => v.kind === "companies_house" && v.status === "approved" && isCompaniesHouseEvidence(v.evidenceData))
       .sort((a, b) => (b.verifiedAt ?? b.submittedAt) - (a.verifiedAt ?? a.submittedAt));
-    return approved[0]?.evidenceData ?? null;
+    return (approved[0]?.evidenceData as CompaniesHouseEvidence | undefined) ?? null;
+  }, [list]);
+
+  // Latest approved gas_safe row → drives the Gas Safe status header line.
+  const approvedGasSafe = useMemo<GasSafeEvidence | null>(() => {
+    const approved = list
+      .filter((v) => v.kind === "gas_safe" && v.status === "approved" && isGasSafeEvidence(v.evidenceData))
+      .sort((a, b) => (b.verifiedAt ?? b.submittedAt) - (a.verifiedAt ?? a.submittedAt));
+    return (approved[0]?.evidenceData as GasSafeEvidence | undefined) ?? null;
   }, [list]);
 
   return (
@@ -604,7 +789,7 @@ export function VerificationsTab({
           We display badges on your public profile only when something is on file and our team has approved it.
           We never claim to "vet" or guarantee your work — the badges describe what we hold.
         </p>
-        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
           <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-3 text-sm">
             <ShieldCheck className={`h-4 w-4 ${insured ? "text-trust" : "text-muted-foreground"}`} />
             <span className="font-medium text-foreground">Insurance</span>
@@ -630,6 +815,17 @@ export function VerificationsTab({
                 : "Not yet submitted"}
             </span>
           </div>
+          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-3 text-sm">
+            <Flame className={`h-4 w-4 ${gasSafeVerified ? "text-trust" : "text-muted-foreground"}`} />
+            <span className="font-medium text-foreground">Gas Safe</span>
+            <span className="ml-auto text-xs text-muted-foreground" data-testid="gs-status-summary">
+              {gasSafeVerified
+                ? approvedGasSafe
+                  ? `#${approvedGasSafe.gas_safe_number}`
+                  : "On file"
+                : "Not yet submitted"}
+            </span>
+          </div>
         </div>
       </Card>
 
@@ -639,6 +835,7 @@ export function VerificationsTab({
         <UploadForm kind="qualification" tradesmanId={tradesmanId} hasPending={hasPendingQualification} />
       </div>
       <CompaniesHouseSubmissionForm tradesmanId={tradesmanId} hasPending={hasPendingCompaniesHouse} />
+      <GasSafeSubmissionForm tradesmanId={tradesmanId} hasPending={hasPendingGasSafe} />
 
       {/* History */}
       <Card className="p-5">

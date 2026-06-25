@@ -521,6 +521,7 @@ export default function Dashboard() {
               insured={!!data.tradesman.insured}
               licensed={!!data.tradesman.licensed}
               verified={!!data.tradesman.verified}
+              gasSafeVerified={!!data.tradesman.gasSafeVerified}
             />
           </TabsContent>
 
