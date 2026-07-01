@@ -24,15 +24,31 @@ import { Textarea } from "@/components/ui/textarea";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { VerificationRecord } from "@/lib/api-types";
-import { asCompaniesHouseEvidence, asGasSafeEvidence } from "@/lib/api-types";
+import { asCompaniesHouseEvidence, asGasSafeEvidence, asGenericRegisterEvidence } from "@/lib/api-types";
+import { getRegisterConfig, isGenericRegisterKind } from "@shared/register-configs";
 import {
   ArrowLeft, ShieldCheck, FileBadge2, Building2, CheckCircle2, XCircle, ExternalLink, Inbox, Lock, Flame,
+  Zap, Sun, Snowflake, Wrench,
 } from "lucide-react";
+
+// Map iconName strings from shared/register-configs.ts to concrete lucide
+// components. Kept here (client-only) so the shared module stays platform-free.
+const REGISTER_ICONS: Record<string, typeof ShieldCheck> = {
+  Zap, Sun, Flame, ShieldCheck, Snowflake, Wrench,
+};
 
 function kindIcon(kind: VerificationRecord["kind"], className = "h-4 w-4 text-primary") {
   if (kind === "insurance") return <ShieldCheck className={className} />;
   if (kind === "qualification") return <FileBadge2 className={className} />;
   if (kind === "gas_safe") return <Flame className={className} />;
+  if (kind === "companies_house") return <Building2 className={className} />;
+  // Generic registers (niceic, napit, mcs, oftec, trustmark, fgas, ciphe) —
+  // icon comes from register-configs so admin and pro-side stay in sync.
+  const cfg = getRegisterConfig(kind);
+  if (cfg) {
+    const Icon = REGISTER_ICONS[cfg.iconName] ?? ShieldCheck;
+    return <Icon className={className} />;
+  }
   return <Building2 className={className} />;
 }
 
@@ -40,7 +56,8 @@ function kindLabel(kind: VerificationRecord["kind"]): string {
   if (kind === "insurance") return "Insurance";
   if (kind === "qualification") return "Qualification";
   if (kind === "gas_safe") return "Gas Safe";
-  return "Companies House";
+  if (kind === "companies_house") return "Companies House";
+  return getRegisterConfig(kind)?.label ?? kind;
 }
 
 function getInitialKey(): string {
@@ -132,6 +149,8 @@ export default function AdminVerifications() {
     insurance: items.filter((v) => v.kind === "insurance").length,
     qualification: items.filter((v) => v.kind === "qualification").length,
     companiesHouse: items.filter((v) => v.kind === "companies_house").length,
+    gasSafe: items.filter((v) => v.kind === "gas_safe").length,
+    registers: items.filter((v) => isGenericRegisterKind(v.kind)).length,
   }), [items]);
 
   // Key-gate
@@ -183,6 +202,10 @@ export default function AdminVerifications() {
             <span><FileBadge2 className="mr-1 inline h-3.5 w-3.5 text-primary" />Qualification: <strong>{counts.qualification}</strong></span>
             <span className="text-muted-foreground">·</span>
             <span><Building2 className="mr-1 inline h-3.5 w-3.5 text-primary" />Companies House: <strong>{counts.companiesHouse}</strong></span>
+            <span className="text-muted-foreground">·</span>
+            <span><Flame className="mr-1 inline h-3.5 w-3.5 text-primary" />Gas Safe: <strong>{counts.gasSafe}</strong></span>
+            <span className="text-muted-foreground">·</span>
+            <span><ShieldCheck className="mr-1 inline h-3.5 w-3.5 text-primary" />Other registers: <strong>{counts.registers}</strong></span>
           </div>
         </Card>
 
@@ -293,6 +316,58 @@ export default function AdminVerifications() {
                         </div>
                       );
                     })()}
+                    {isGenericRegisterKind(v.kind) && (() => {
+                      // Generic registers (NICEIC/NAPIT/MCS/OFTEC/TrustMark/F-Gas/CIPHE):
+                      // pro self-submitted the number + business name + postcode; admin
+                      // clicks through to the public register to confirm before approving.
+                      // Same posture as gas_safe — no automated lookup.
+                      const gr = asGenericRegisterEvidence(v.evidenceData);
+                      const cfg = getRegisterConfig(v.kind);
+                      const number = gr?.registration_number || v.registrationNumber || null;
+                      const registerUrl =
+                        v.registerUrl ||
+                        (cfg && number ? cfg.buildRegisterUrl(cfg.normaliseNumber(number)) : null);
+                      return (
+                        <div className="mt-2 rounded-md border border-border bg-muted/30 p-3 text-sm">
+                          {gr ? (
+                            <>
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-foreground">{gr.business_name}</span>
+                                <Badge variant="outline" className="capitalize">Pending check</Badge>
+                              </div>
+                              <div className="mt-1 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+                                <span><span className="text-foreground">{cfg?.numberLabel ?? "Number"}:</span> {gr.registration_number}</span>
+                                <span><span className="text-foreground">Postcode:</span> {gr.postcode}</span>
+                                <span className="sm:col-span-2">
+                                  <span className="text-foreground">Submitted at:</span> {fmtDate(new Date(gr.submitted_at).getTime())}
+                                </span>
+                              </div>
+                              <p className="mt-2 text-[11px] text-muted-foreground">
+                                Self-submitted by the tradesman — confirm on the {cfg?.label ?? "public"} register before approving.
+                              </p>
+                            </>
+                          ) : number ? (
+                            <p className="text-sm text-foreground">{cfg?.numberLabel ?? "Number"}: {number}</p>
+                          ) : (
+                            <p className="text-sm text-muted-foreground">No evidence captured.</p>
+                          )}
+                          {registerUrl && (
+                            <div className="mt-2">
+                              <Button asChild variant="outline" size="sm">
+                                <a
+                                  href={registerUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  data-testid={`link-register-${v.id}`}
+                                >
+                                  <ExternalLink className="mr-1 h-4 w-4" />Open {cfg?.label ?? "register"}
+                                </a>
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                     {v.kind === "gas_safe" && (() => {
                       // Gas Safe rows are submit-for-admin-review. The server never auto-verifies
                       // because the Gas Safe Register has no public API and is gated by Imperva
@@ -348,7 +423,7 @@ export default function AdminVerifications() {
                   </div>
 
                   <div className="flex flex-wrap gap-2">
-                    {v.kind !== "companies_house" && v.kind !== "gas_safe" && (
+                    {(v.kind === "insurance" || v.kind === "qualification") && (
                       <Button variant="outline" size="sm" onClick={() => openFile(v.id)} data-testid={`button-open-${v.id}`}>
                         <ExternalLink className="mr-1 h-4 w-4" />Open file
                       </Button>
@@ -408,13 +483,14 @@ export default function AdminVerifications() {
         </div>
 
         <p className="mt-6 text-xs text-muted-foreground">
-          Signed file URLs expire after 5 minutes. Approving an insurance submission flips
-          <code className="mx-1 rounded bg-muted px-1 text-[11px]">tradesmen.insured</code>
-          to true; approving a qualification submission flips
-          <code className="mx-1 rounded bg-muted px-1 text-[11px]">tradesmen.licensed</code>;
-          approving a Companies House submission flips
-          <code className="mx-1 rounded bg-muted px-1 text-[11px]">tradesmen.verified</code>
-          to true.
+          Signed file URLs expire after 5 minutes. Approving insurance/qualification flips
+          <code className="mx-1 rounded bg-muted px-1 text-[11px]">tradesmen.insured</code>/
+          <code className="mx-1 rounded bg-muted px-1 text-[11px]">tradesmen.licensed</code>.
+          Approving a register row (Companies House / Gas Safe / NICEIC / NAPIT / MCS / OFTEC /
+          TrustMark / F-Gas / CIPHE) lights the matching per-register badge and applies the
+          register’s implied badges + scope from
+          <code className="mx-1 rounded bg-muted px-1 text-[11px]">shared/register-implications.ts</code>.
+          Rejections never revoke previously-approved badges.
         </p>
       </div>
     </Layout>
