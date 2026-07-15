@@ -780,6 +780,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.status(404).json({ message: "Tradesman not found" });
       return;
     }
+    // Pre-list rows (from Companies House) don't have an email until the pro
+    // claims their profile. Checkout requires a verified email address.
+    if (!tradesman.email) {
+      res.status(400).json({ message: "Claim your profile before purchasing." });
+      return;
+    }
     try {
       const result = await createLeadPackCheckoutSession({
         tradesmanId,
@@ -819,6 +825,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const tradesman = await storage.getTradesmanById(tradesmanId);
     if (!tradesman) {
       res.status(404).json({ message: "Tradesman not found" });
+      return;
+    }
+    if (!tradesman.email) {
+      res.status(400).json({ message: "Claim your profile before purchasing." });
       return;
     }
     try {
@@ -2896,7 +2906,9 @@ res.json(updated);
 
       // Notify tradesman (fire-and-forget)
       const tradesman = await storage.getTradesmanById(tradesmanId);
-      if (tradesman) {
+      // Skip notification if the tradesman is pre-list (no email yet).
+      // The access request is still stored so it fires on claim.
+      if (tradesman && tradesman.email) {
         const PUBLIC_URL_ENV = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
         const dashboardUrl = `${PUBLIC_URL_ENV}/dashboard#verification-requests`;
         try {

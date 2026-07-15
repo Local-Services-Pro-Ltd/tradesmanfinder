@@ -1,4 +1,4 @@
-import { pgTable, text, integer, real, bigint, boolean, serial, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, real, bigint, boolean, serial, jsonb, timestamp, date } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -43,12 +43,15 @@ export const tradesmen = pgTable("tradesmen", {
   slug: text("slug").notNull().unique(),
   businessName: text("business_name").notNull(),
   ownerName: text("owner_name").notNull(),
-  email: text("email").notNull(),
-  phone: text("phone").notNull(),
-  bio: text("bio").notNull(),
+  // Contact + area + hero_image are nullable in prod: pre-list rows sourced
+  // from Companies House arrive without an email/phone/bio, and area/hero_image
+  // are filled in at claim time. Corrected 2026-07-15 (issue #136).
+  email: text("email"),
+  phone: text("phone"),
+  bio: text("bio"),
   postcode: text("postcode").notNull(),
-  areaId: integer("area_id").notNull(),
-  heroImageUrl: text("hero_image_url").notNull(),
+  areaId: integer("area_id").references(() => areas.id),
+  heroImageUrl: text("hero_image_url"),
   // Optional brand video shown on the public profile (e.g. an autoplay-on-scroll
   // hero clip). Nullable — most pros won't have one. Added 2026-06-18.
   videoUrl: text("video_url"),
@@ -102,6 +105,30 @@ export const tradesmen = pgTable("tradesmen", {
   stripeSubscriptionId: text("stripe_subscription_id"),
   subscriptionStatus: text("subscription_status"),
   featuredUntil: bigint("featured_until", { mode: "number" }),
+  /* ── Pre-list + claim flow columns (added to prod via prelist_v2
+     migrations, missing from Drizzle until issue #136). All nullable because
+     they populate at different points in the pro lifecycle:
+     - listing_source is 'ch_public_data' for pre-list rows, NULL for organic.
+     - claim_status defaults to 'unclaimed' and progresses through
+       'pending' → 'claimed' | 'opted_out' | 'deleted' (Postgres CHECK enforces this).
+     - email_verified_at is set once the claim-token magic link is used.
+     - founding_pro is set true when a claim wins one of 10 founder slots
+       per area (issue #145). founding_pro_slot integer is added in issue #137. */
+  emailVerifiedAt: timestamp("email_verified_at", { withTimezone: true, mode: "date" }),
+  claimStatus: text("claim_status").default("unclaimed"),
+  listingSource: text("listing_source"),
+  listingCreatedAt: timestamp("listing_created_at", { withTimezone: true, mode: "date" }).defaultNow(),
+  claimedAt: timestamp("claimed_at", { withTimezone: true, mode: "date" }),
+  optedOutAt: timestamp("opted_out_at", { withTimezone: true, mode: "date" }),
+  foundingPro: boolean("founding_pro").notNull().default(false),
+  /* Companies House enrichment — populated on pre-list seed from the CH
+     public-search fallback (proxy issue tracked separately). */
+  chCompanyNumber: text("ch_company_number"),
+  chIncorporationDate: date("ch_incorporation_date"),
+  chSicCodes: text("ch_sic_codes").array(),
+  registeredAddress: text("registered_address"),
+  directorName: text("director_name"),
+  isLtdCompany: boolean("is_ltd_company").default(true),
 });
 
 export const insertTradesmanSchema = createInsertSchema(tradesmen).omit({
@@ -922,3 +949,89 @@ export const ACCESS_REQUEST_STATUSES = [
   "pending", "granted", "denied", "revoked",
 ] as const;
 export type AccessRequestStatus = (typeof ACCESS_REQUEST_STATUSES)[number];
+
+/* ──────────────────────────────────────────────
+   PRO CLAIMS (issue #136)
+
+   One row per claim attempt. Created when the pre-list outreach cron
+   emails a tradesman with a magic-link claim URL; completed when the
+   tradesman opens the link and submits the claim form.
+
+   claim_token is stored plaintext because it lives only in an outbound
+   email URL and is single-use — the URL itself IS the credential.
+   IP + user_agent captured for anti-abuse audit only.
+   ────────────────────────────────────────────── */
+export const proClaims = pgTable("pro_claims", {
+  id: serial("id").primaryKey(),
+  tradesmanId: integer("tradesman_id").references(() => tradesmen.id, { onDelete: "cascade" }),
+  claimToken: text("claim_token").unique(),
+  claimCreatedAt: timestamp("claim_created_at", { withTimezone: true, mode: "date" }).defaultNow(),
+  claimCompletedAt: timestamp("claim_completed_at", { withTimezone: true, mode: "date" }),
+  claimIp: text("claim_ip"), // stored as inet in prod; Drizzle sees as text
+  claimUserAgent: text("claim_user_agent"),
+});
+export const insertProClaimSchema = createInsertSchema(proClaims).omit({
+  id: true, claimCreatedAt: true,
+});
+export type InsertProClaim = z.infer<typeof insertProClaimSchema>;
+export type ProClaim = typeof proClaims.$inferSelect;
+
+/* ──────────────────────────────────────────────
+   SUPPRESSION LIST (issue #136, referenced by #144)
+
+   Per-recipient suppression. Every outbound send MUST check this list
+   first (issue #144). Sources are enumerated by CHECK constraint in
+   prod — SUPPRESSION_SOURCES below mirrors that list for type-safety
+   at the application layer.
+   ────────────────────────────────────────────── */
+export const SUPPRESSION_SOURCES = [
+  "unsubscribe_link",
+  "reply_delete",
+  "bounce",
+  "complaint",
+  "manual",
+] as const;
+export type SuppressionSource = (typeof SUPPRESSION_SOURCES)[number];
+
+export const suppressionList = pgTable("suppression_list", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull().unique(), // lowercased at write time
+  addedAt: timestamp("added_at", { withTimezone: true, mode: "date" }).defaultNow(),
+  reason: text("reason"),
+  source: text("source"), // CHECK enforced by SUPPRESSION_SOURCES in Postgres
+});
+export const insertSuppressionEntrySchema = createInsertSchema(suppressionList).omit({
+  id: true, addedAt: true,
+});
+export type InsertSuppressionEntry = z.infer<typeof insertSuppressionEntrySchema>;
+export type SuppressionEntry = typeof suppressionList.$inferSelect;
+
+/* ──────────────────────────────────────────────
+   OUTREACH CAMPAIGNS (issue #136)
+
+   Aggregate counters per outreach batch. Individual sends are tracked
+   via emailLog + magicLinkTokens; this table captures the campaign
+   headline metrics for the admin dashboard. Populated by the outreach
+   cron (decision on host tracked in issue #146).
+   ────────────────────────────────────────────── */
+export const outreachCampaigns = pgTable("outreach_campaigns", {
+  id: serial("id").primaryKey(),
+  name: text("name"),
+  templateKey: text("template_key"), // e.g. "prelist_v3_founder"
+  sentCount: integer("sent_count").default(0),
+  openedCount: integer("opened_count").default(0),
+  claimedCount: integer("claimed_count").default(0),
+  deletedCount: integer("deleted_count").default(0),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).defaultNow(),
+});
+export const insertOutreachCampaignSchema = createInsertSchema(outreachCampaigns).omit({
+  id: true, createdAt: true,
+});
+export type InsertOutreachCampaign = z.infer<typeof insertOutreachCampaignSchema>;
+export type OutreachCampaign = typeof outreachCampaigns.$inferSelect;
+
+/* Claim status enum mirroring prod CHECK constraint on tradesmen.claim_status. */
+export const CLAIM_STATUSES = [
+  "unclaimed", "pending", "claimed", "opted_out", "deleted",
+] as const;
+export type ClaimStatus = (typeof CLAIM_STATUSES)[number];
