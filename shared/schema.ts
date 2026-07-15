@@ -1,4 +1,4 @@
-import { pgTable, text, integer, real, bigint, boolean, serial } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, real, bigint, boolean, serial, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -49,12 +49,34 @@ export const tradesmen = pgTable("tradesmen", {
   postcode: text("postcode").notNull(),
   areaId: integer("area_id").notNull(),
   heroImageUrl: text("hero_image_url").notNull(),
+  // Optional brand video shown on the public profile (e.g. an autoplay-on-scroll
+  // hero clip). Nullable — most pros won't have one. Added 2026-06-18.
+  videoUrl: text("video_url"),
   gallery: text("gallery").notNull().default("[]"), // JSON array of urls
   categories: text("categories").notNull().default("[]"), // JSON array of category ids
   yearsExperience: integer("years_experience").notNull().default(0),
   verified: boolean("verified").notNull().default(false),
   insured: boolean("insured").notNull().default(false),
   licensed: boolean("licensed").notNull().default(false),
+  // Gas Safe Register badge — flipped to true when an approved gas_safe
+  // verification row exists. Added 2026-06-18 (PR-D'). Independent of
+  // `verified` (Companies House) so pros earn each badge separately.
+  gasSafeVerified: boolean("gas_safe_verified").notNull().default(false),
+  // Per-register public-facing flags. Added 2026-06-25 (PR-F). Each mirrors
+  // gas_safe_verified — flipped true on approval of the matching kind, never
+  // auto-revoked. Drives listing/profile badges without joining verifications.
+  niceicVerified:    boolean("niceic_verified").notNull().default(false),
+  napitVerified:     boolean("napit_verified").notNull().default(false),
+  mcsVerified:       boolean("mcs_verified").notNull().default(false),
+  oftecVerified:     boolean("oftec_verified").notNull().default(false),
+  trustmarkVerified: boolean("trustmark_verified").notNull().default(false),
+  fgasVerified:      boolean("fgas_verified").notNull().default(false),
+  cipheVerified:     boolean("ciphe_verified").notNull().default(false),
+  // Register-derived scope badges ("Gas Work", "Electrical Work",
+  // "Renewables", "Oil Heating", "TrustMark", "F-Gas Certified",
+  // "CIPHE Member"). JSON array of strings, deduplicated. Driven by the
+  // REGISTER_IMPLICATIONS table in shared/register-implications.ts.
+  scopeBadges: text("scope_badges").notNull().default("[]"),
   featured: boolean("featured").notNull().default(false),
   ratingAverage: real("rating_average").notNull().default(0),
   ratingCount: integer("rating_count").notNull().default(0),
@@ -254,10 +276,14 @@ export type TradesmanCard = typeof tradesmanCards.$inferSelect;
 export const tradesmanVerifications = pgTable("tradesman_verifications", {
   id: serial("id").primaryKey(),
   tradesmanId: integer("tradesman_id").notNull(),
-  kind: text("kind").notNull(), // 'insurance' | 'qualification'
-  filePath: text("file_path").notNull(), // path inside the private storage bucket
-  fileMimeType: text("file_mime_type").notNull(),
-  fileSizeBytes: integer("file_size_bytes").notNull(),
+  // 'insurance' | 'qualification' = file-backed; 'companies_house' = API-lookup-backed.
+  // The kind-aware tv_evidence_shape check constraint enforces shape:
+  // file columns required for the first two kinds; company_number+evidence_data
+  // required for the third.
+  kind: text("kind").notNull(),
+  filePath: text("file_path"), // nullable since 2026-06-18 — required only for file-backed kinds
+  fileMimeType: text("file_mime_type"),
+  fileSizeBytes: integer("file_size_bytes"),
   qualificationType: text("qualification_type"), // nullable; only set when kind='qualification'
   insuranceCoverGbp: integer("insurance_cover_gbp"), // nullable; only set when kind='insurance'
   expiryDate: text("expiry_date"), // ISO YYYY-MM-DD, nullable until known
@@ -266,11 +292,43 @@ export const tradesmanVerifications = pgTable("tradesman_verifications", {
   reviewedAt: bigint("reviewed_at", { mode: "number" }), // nullable until reviewed
   reviewedBy: text("reviewed_by"), // admin identifier ('admin' for now)
   reviewerNote: text("reviewer_note"), // optional message, required when status='rejected'
+  // Companies House evidence columns (kind='companies_house'). Added 2026-06-18.
+  companyNumber: text("company_number"), // normalised (uppercase, no whitespace)
+  evidenceData: jsonb("evidence_data"), // trimmed /company/{number} response
+  verifiedAt: bigint("verified_at", { mode: "number" }), // epoch ms when CH lookup succeeded
+  source: text("source"), // 'pro_submission' | 'admin_backfill' | 'automated_recheck'
+  // Gas Safe evidence columns (kind='gas_safe'). Added 2026-06-18 (PR-D').
+  gasSafeNumber: text("gas_safe_number"),            // normalised digits-only registration number
+  gasSafeRegisterUrl: text("gas_safe_register_url"), // canonical signed Gas Safe deep-link
+  // Generic register columns (PR-F, 2026-06-25). Used by all register-backed
+  // kinds OTHER than companies_house and gas_safe (which keep their bespoke
+  // columns for backward-compat). `registrationNumber` is normalised per
+  // register (case/whitespace rules vary); `registerUrl` is a canonical
+  // deep-link to the public register that admins click to confirm before
+  // approving. The tv_evidence_shape DB CHECK enforces these are present
+  // for any new register kind.
+  registrationNumber: text("registration_number"),
+  registerUrl:        text("register_url"),
 });
-export const VERIFICATION_KINDS = ["insurance", "qualification"] as const;
+export const VERIFICATION_KINDS = [
+  "insurance", "qualification", "companies_house", "gas_safe",
+  "niceic", "napit", "mcs", "oftec", "trustmark", "fgas", "ciphe",
+] as const;
+// Subset that uses the generic registration_number column (all register-backed
+// kinds except CH and gas_safe, which have their own bespoke columns).
+export const GENERIC_REGISTER_KINDS = [
+  "niceic", "napit", "mcs", "oftec", "trustmark", "fgas", "ciphe",
+] as const;
+export type GenericRegisterKind = (typeof GENERIC_REGISTER_KINDS)[number];
+// Subset that requires a file upload — used by the doc-upload route which
+// can't handle the API-lookup-backed 'companies_house' kind.
+export const FILE_VERIFICATION_KINDS = ["insurance", "qualification"] as const;
+export type FileVerificationKind = (typeof FILE_VERIFICATION_KINDS)[number];
 export const VERIFICATION_STATUSES = ["pending", "approved", "rejected"] as const;
+export const VERIFICATION_SOURCES = ["pro_submission", "admin_backfill", "automated_recheck"] as const;
 export type VerificationKind = (typeof VERIFICATION_KINDS)[number];
 export type VerificationStatus = (typeof VERIFICATION_STATUSES)[number];
+export type VerificationSource = (typeof VERIFICATION_SOURCES)[number];
 
 export const insertTradesmanVerificationSchema = createInsertSchema(tradesmanVerifications)
   .omit({
@@ -280,6 +338,7 @@ export const insertTradesmanVerificationSchema = createInsertSchema(tradesmanVer
     reviewedBy: true,
     reviewerNote: true,
     status: true,
+    verifiedAt: true,
   })
   .extend({
     kind: z.enum(VERIFICATION_KINDS),
@@ -290,6 +349,125 @@ export const insertTradesmanVerificationSchema = createInsertSchema(tradesmanVer
       .regex(/^\d{4}-\d{2}-\d{2}$/, "expiry_date must be YYYY-MM-DD")
       .optional()
       .nullable(),
+    // Companies House fields — see superRefine below for kind-aware required/forbidden rules.
+    companyNumber: z.string().min(2).max(20).optional().nullable(),
+    evidenceData: z.unknown().optional().nullable(),
+    source: z.enum(VERIFICATION_SOURCES).optional().nullable(),
+    // Gas Safe fields — see superRefine below for kind-aware required/forbidden rules.
+    gasSafeNumber: z.string().min(2).max(20).optional().nullable(),
+    gasSafeRegisterUrl: z.string().url().max(2048).optional().nullable(),
+    // Generic register fields (PR-F). Required by superRefine for any kind in
+    // GENERIC_REGISTER_KINDS; forbidden otherwise.
+    registrationNumber: z.string().min(1).max(40).optional().nullable(),
+    registerUrl: z.string().url().max(2048).optional().nullable(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.kind === "companies_house") {
+      if (!data.companyNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["companyNumber"],
+          message: "companyNumber is required when kind='companies_house'",
+        });
+      }
+      if (data.filePath || data.fileMimeType || (data.fileSizeBytes !== undefined && data.fileSizeBytes !== null)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["filePath"],
+          message: "file fields must be absent when kind='companies_house'",
+        });
+      }
+      if (data.gasSafeNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["gasSafeNumber"],
+          message: "gasSafeNumber must be absent when kind='companies_house'",
+        });
+      }
+    } else if (data.kind === "gas_safe") {
+      if (!data.gasSafeNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["gasSafeNumber"],
+          message: "gasSafeNumber is required when kind='gas_safe'",
+        });
+      }
+      if (data.filePath || data.fileMimeType || (data.fileSizeBytes !== undefined && data.fileSizeBytes !== null)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["filePath"],
+          message: "file fields must be absent when kind='gas_safe'",
+        });
+      }
+      if (data.companyNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["companyNumber"],
+          message: "companyNumber must be absent when kind='gas_safe'",
+        });
+      }
+    } else if ((GENERIC_REGISTER_KINDS as readonly string[]).includes(data.kind)) {
+      // Generic register kinds (NICEIC/NAPIT/MCS/OFTEC/TrustMark/F-Gas/CIPHE)
+      // require registration_number + evidence_data; file/CH/Gas-Safe cols must be absent.
+      if (!data.registrationNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["registrationNumber"],
+          message: `registrationNumber is required when kind='${data.kind}'`,
+        });
+      }
+      if (data.filePath || data.fileMimeType || (data.fileSizeBytes !== undefined && data.fileSizeBytes !== null)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["filePath"],
+          message: `file fields must be absent when kind='${data.kind}'`,
+        });
+      }
+      if (data.companyNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["companyNumber"],
+          message: `companyNumber must be absent when kind='${data.kind}'`,
+        });
+      }
+      if (data.gasSafeNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["gasSafeNumber"],
+          message: `gasSafeNumber must be absent when kind='${data.kind}'`,
+        });
+      }
+    } else {
+      // 'insurance' | 'qualification' — file columns required by tv_evidence_shape
+      if (!data.filePath || !data.fileMimeType || data.fileSizeBytes == null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["filePath"],
+          message: "file fields are required for file-backed verification kinds",
+        });
+      }
+      if (data.companyNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["companyNumber"],
+          message: "companyNumber must be absent unless kind='companies_house'",
+        });
+      }
+      if (data.gasSafeNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["gasSafeNumber"],
+          message: "gasSafeNumber must be absent unless kind='gas_safe'",
+        });
+      }
+      if (data.registrationNumber) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["registrationNumber"],
+          message: "registrationNumber must be absent for file-backed verification kinds",
+        });
+      }
+    }
   });
 export type InsertTradesmanVerification = z.infer<typeof insertTradesmanVerificationSchema>;
 export type TradesmanVerification = typeof tradesmanVerifications.$inferSelect;
@@ -342,6 +520,83 @@ export const emailLog = pgTable("email_log", {
 export const insertEmailLogSchema = createInsertSchema(emailLog).omit({ id: true });
 export type InsertEmailLog = z.infer<typeof insertEmailLogSchema>;
 export type EmailLogEntry = typeof emailLog.$inferSelect;
+
+/* ──────────────────────────────────────────────
+   RESEND WEBHOOK LOG — audit trail of every Resend webhook event we processed
+
+   Mirror of payments_log for Resend. Append-only. Every webhook delivery
+   writes a row, deduplicated by svix_id (the svix-id header). The handler
+   uses this UNIQUE constraint as the idempotency primitive — Resend retries
+   on non-2xx with the same svix-id, so a duplicate delivery is a no-op.
+
+   Used for:
+     - debugging deliverability issues (full event trail per send)
+     - feeding suppression decisions (bounce/complaint → add to suppression)
+     - Founding Pro engagement reporting (delivered/opened/clicked counts)
+   ────────────────────────────────────────────── */
+export const resendWebhookLog = pgTable("resend_webhook_log", {
+  id: serial("id").primaryKey(),
+  // Svix dedupe key (from svix-id header). UNIQUE — retries are no-ops.
+  svixId: text("svix_id").notNull().unique(),
+  // Resend event identity
+  eventType: text("event_type").notNull(),
+  resendEmailId: text("resend_email_id"),
+  toAddress: text("to_address"),
+  // Bounce / complaint detail
+  bounceType: text("bounce_type"),
+  bounceSubtype: text("bounce_subtype"),
+  bounceMessage: text("bounce_message"),
+  // Click detail (link clicked)
+  clickLink: text("click_link"),
+  // Resolution against our email_log row
+  emailLogId: integer("email_log_id"),
+  action: text("action").notNull(),
+  // Raw event payload — stored as JSON text (matches paymentsLog convention)
+  rawPayload: text("raw_payload"),
+  // Resend's event timestamp (epoch ms), distinct from our receipt time below
+  resendCreatedAt: bigint("resend_created_at", { mode: "number" }),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+});
+export const insertResendWebhookLogSchema = createInsertSchema(resendWebhookLog).omit({ id: true, createdAt: true });
+export type InsertResendWebhookLog = z.infer<typeof insertResendWebhookLogSchema>;
+export type ResendWebhookLogEntry = typeof resendWebhookLog.$inferSelect;
+
+/* ──────────────────────────────────────────────
+   HOMEOWNER INTEREST — waitlist for sub-density boroughs/categories.
+
+   When a borough or category has < N verified pros (default 3), the area
+   landing page hides search and surfaces a "notify me when ready" signup.
+   Rows here capture that intent so we can:
+     - Email the homeowner when supply crosses the threshold.
+     - Show prospective Founding Pros that demand already exists.
+     - Prioritise outreach into the highest-demand boroughs.
+
+   Idempotent via UNIQUE(email, COALESCE(area_id, -1), COALESCE(category_id, -1)).
+   Re-submission updates `updatedAt` and `source` but never duplicates.
+   ───────────────────────────────────────────── */
+export const homeownerInterest = pgTable("homeowner_interest", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull(),
+  postcode: text("postcode"),
+  areaId: integer("area_id"),
+  categoryId: integer("category_id"),
+  // Free-text string the user typed when no seeded area matched their search
+  // (e.g. "Streatham", "SE13 6AA", "finsbury park"). Only set when areaId is
+  // NULL. Lets us prioritise which borough to seed next by demand signal.
+  requestedArea: text("requested_area"),
+  source: text("source").notNull().default("area_landing"),
+  notifiedAt: bigint("notified_at", { mode: "number" }),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+});
+export const insertHomeownerInterestSchema = createInsertSchema(homeownerInterest).omit({
+  id: true,
+  notifiedAt: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertHomeownerInterest = z.infer<typeof insertHomeownerInterestSchema>;
+export type HomeownerInterestEntry = typeof homeownerInterest.$inferSelect;
 
 /* ──────────────────────────────────────────────
    PAYMENTS LOG — audit trail of every Stripe event we processed

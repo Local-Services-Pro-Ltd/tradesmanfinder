@@ -45,6 +45,7 @@ Set every variable from `.env.example` in *Vercel Project → Settings → Envir
 | `STRIPE_SECRET_KEY` | `sk_live_…` | `sk_test_…` | `sk_test_…` |
 | `STRIPE_WEBHOOK_SECRET` | live endpoint | test endpoint | test endpoint |
 | `RESEND_API_KEY` | live | live or test mode key | test mode key |
+| `RESEND_WEBHOOK_SECRET` | live endpoint (`whsec_…`) | live or test endpoint | optional locally |
 | `ADMIN_KEY` | strong random | strong random | anything |
 | `APP_BASE_URL` | `https://tradesmanfinder.com` | preview URL | `http://localhost:5000` |
 

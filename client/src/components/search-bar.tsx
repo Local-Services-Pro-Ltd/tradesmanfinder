@@ -5,22 +5,53 @@ import { Button } from "@/components/ui/button";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import { AreaPicker, type AreaPickerSelection } from "@/components/area-picker";
 import type { Category, Area } from "@/lib/api-types";
 import { Search } from "lucide-react";
 
+/**
+ * Search bar — trade picker (fixed list of seeded categories) + area picker
+ * (searchable, with unmatched-area waitlist fallback).
+ *
+ * Routing rules:
+ *   - trade + seeded area  → /category/<cat>/in/<slug>
+ *   - trade only           → /category/<cat>
+ *   - seeded area only     → /area/<slug>
+ *   - unmatched area       → /area/unavailable?q=<typed>
+ *                            (waitlist page — captures demand signal)
+ *   - nothing              → /categories
+ */
 export function SearchBar({ compact = false }: { compact?: boolean }) {
   const [, navigate] = useLocation();
   const { data: categories } = useQuery<Category[]>({ queryKey: ["/api/categories"] });
   const { data: areas } = useQuery<Area[]>({ queryKey: ["/api/areas"] });
   const [cat, setCat] = useState<string>("");
-  const [area, setArea] = useState<string>("");
+  // The picker state can either be a seeded area (we store its id) or an
+  // unmatched typed string (we store the raw string). Exactly one is set.
+  const [pickedAreaId, setPickedAreaId] = useState<number | undefined>(undefined);
+  const [pickedRequested, setPickedRequested] = useState<string>("");
+
+  const handleAreaSelection = (sel: AreaPickerSelection) => {
+    if (sel.kind === "area") {
+      setPickedAreaId(sel.area.id);
+      setPickedRequested("");
+    } else {
+      setPickedAreaId(undefined);
+      setPickedRequested(sel.requestedArea);
+      // For unmatched selections, navigate immediately — the user has
+      // already declared intent ("notify me about X") by tapping the CTA.
+      // Holding them at the search bar for another click is pure friction.
+      navigate(`/area/unavailable?q=${encodeURIComponent(sel.requestedArea)}`);
+    }
+  };
 
   const go = () => {
     const catObj = categories?.find((c) => String(c.id) === cat);
-    const areaObj = areas?.find((a) => String(a.id) === area);
+    const areaObj = areas?.find((a) => a.id === pickedAreaId);
     if (catObj && areaObj) navigate(`/category/${catObj.slug}/in/${areaObj.slug}`);
     else if (catObj) navigate(`/category/${catObj.slug}`);
     else if (areaObj) navigate(`/area/${areaObj.slug}`);
+    else if (pickedRequested) navigate(`/area/unavailable?q=${encodeURIComponent(pickedRequested)}`);
     else navigate("/categories");
   };
 
@@ -39,16 +70,11 @@ export function SearchBar({ compact = false }: { compact?: boolean }) {
 
       <div className="hidden h-8 w-px bg-border sm:block" />
 
-      <Select value={area} onValueChange={setArea}>
-        <SelectTrigger className="h-12 flex-1 border-0 bg-transparent text-base focus:ring-0" data-testid="select-area">
-          <SelectValue placeholder="Postcode or area" />
-        </SelectTrigger>
-        <SelectContent className="max-h-[300px]">
-          {(areas || []).map((a) => (
-            <SelectItem key={a.id} value={String(a.id)} data-testid={`option-area-${a.slug}`}>{a.name} — {a.region}</SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <AreaPicker
+        areas={areas || []}
+        selectedAreaId={pickedAreaId}
+        onSelect={handleAreaSelection}
+      />
 
       <Button size="lg" className="h-12 shrink-0 gap-2" onClick={go} data-testid="button-search">
         <Search className="h-4 w-4" /> Search

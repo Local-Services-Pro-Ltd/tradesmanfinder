@@ -186,7 +186,7 @@ export default function TradesmanProfile() {
                 <span className="flex items-center gap-1 text-sm text-muted-foreground"><Calendar className="h-4 w-4" /> {tradesman.yearsExperience} yrs experience</span>
               </div>
 
-              <div className="mt-4"><VerificationChips verified={tradesman.verified} insured={tradesman.insured} licensed={tradesman.licensed} verificationSummary={tradesman.verificationSummary} /></div>
+              <div className="mt-4"><VerificationChips verified={tradesman.verified} insured={tradesman.insured} licensed={tradesman.licensed} gasSafeVerified={tradesman.gasSafeVerified} scopeBadges={tradesman.scopeBadges} verificationSummary={tradesman.verificationSummary} /></div>
 
               {/* Homeowner verification access block (PR E) */}
               <VerificationAccessBlock tradesman={tradesman} />

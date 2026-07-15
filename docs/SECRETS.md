@@ -20,6 +20,7 @@ The canonical list of every env var the app reads, where it's stored, who can ro
 | `DATABASE_URL` | yes | server boot | Server throws at startup (`server/storage.ts:47`); 100% downtime | Steve (Supabase) |
 | `ADMIN_KEY` | yes | `/api/admin/*` | Admin endpoints unauthorised — non-admin surfaces unaffected | Steve |
 | `RESEND_API_KEY` | recommended | `server/mailer.ts`, outcome emails | Email sends throw caught errors; jobs still match but pros don't get notified | Steve (Resend) |
+| `RESEND_WEBHOOK_SECRET` | recommended | `server/resend-webhook.ts` (Svix signature verify) | Handler returns 500 on every event; delivery status never updates in `email_log`. Set when adding the endpoint in the Resend dashboard. | Steve (Resend) |
 | `EMAIL_FROM` | required when Resend is used | `mailer.ts` | Resend rejects send with "domain not verified" | Steve |
 | `SUPPORT_EMAIL` | optional | email footers | Falls back to `EMAIL_FROM` | Steve |
 | `PARTNER_NOTIFICATION_EMAIL` | optional | partner outreach replies | Replies bounce; outbound unaffected | Steve |

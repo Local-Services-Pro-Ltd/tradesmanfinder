@@ -1,24 +1,39 @@
 import { Link } from "wouter";
 import * as Icons from "lucide-react";
-import { Star, ShieldCheck, BadgeCheck, Award, Clock } from "lucide-react";
+import { Star, ShieldCheck, BadgeCheck, Award, Clock, Flame } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-/* ───────── Logo (custom SVG word-mark) ─────────
-   Geometric trade-tool inspired mark: a stylised plumb-bob / location pin
-   formed from a triangle + bob, evoking "finding" + "trade tools". */
-export function Logo({ className, showText = true }: { className?: string; showText?: boolean }) {
+/* ───────── Logo (TF monogram badge) ─────────
+   Navy rounded-square badge with white "TF" lockup where the wrench-shaped
+   crossbar of the T doubles as the top arm of the F (one shape, two jobs),
+   plus an orange accent dot. Wordmark kept beside the mark.
+
+   `variant` switches the badge asset for contrast:
+     - "dark"  (default) — navy badge, white letters; for use on light pages
+     - "light"            — white badge, navy letters; for use on the navy footer or other dark surfaces
+
+   Source PNGs: client/public/logo.png, client/public/logo-light.png */
+export function Logo({
+  className,
+  showText = true,
+  variant = "dark",
+}: {
+  className?: string;
+  showText?: boolean;
+  variant?: "dark" | "light";
+}) {
+  const src = variant === "light" ? "/logo-light.png" : "/logo.png";
   return (
     <Link href="/" data-testid="link-logo" className={cn("flex items-center gap-2.5 group", className)}>
-      <span className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-navy text-primary-foreground shadow-sm">
-        <svg width="24" height="24" viewBox="0 0 32 32" fill="none" aria-label="TradesmanFinder mark">
-          {/* roof / level triangle */}
-          <path d="M16 3L28 11V13L16 7L4 13V11L16 3Z" fill="hsl(31 81% 51%)" />
-          {/* plumb line */}
-          <line x1="16" y1="9" x2="16" y2="22" stroke="hsl(31 81% 51%)" strokeWidth="2" strokeLinecap="round" />
-          {/* plumb bob */}
-          <path d="M16 21L19 25L16 29L13 25L16 21Z" fill="currentColor" stroke="hsl(31 81% 51%)" strokeWidth="1.2" />
-        </svg>
-      </span>
+      <img
+        src={src}
+        width={36}
+        height={36}
+        alt="TradesmanFinder"
+        className="h-9 w-9 shrink-0"
+        loading="eager"
+        decoding="async"
+      />
       {showText && (
         <span className="font-display font-bold text-lg leading-none tracking-tight text-foreground">
           Tradesman<span className="text-primary">Finder</span>
@@ -93,11 +108,13 @@ function formatIsoDate(iso: string | null): string | null {
 }
 
 export function VerificationChips({
-  verified, insured, licensed, verificationSummary, className,
+  verified, insured, licensed, gasSafeVerified, scopeBadges, verificationSummary, className,
 }: {
   verified?: boolean;
   insured?: boolean;
   licensed?: boolean;
+  gasSafeVerified?: boolean;
+  scopeBadges?: string; // JSON string of string[]
   verificationSummary?: VerificationSummary;
   className?: string;
 }) {
@@ -118,6 +135,13 @@ export function VerificationChips({
   const chips: { label: string; icon: typeof ShieldCheck; on?: boolean; title?: string; testId: string }[] = [
     { label: "Verified", icon: BadgeCheck, on: verified, testId: "verified" },
     {
+      label: "Gas Safe",
+      icon: Flame,
+      on: gasSafeVerified,
+      title: "Verified against the Gas Safe Register — the official UK list of legally registered gas engineers.",
+      testId: "gas-safe",
+    },
+    {
       label: ins?.coverGbp ? `Insured · ${formatGbpCover(ins.coverGbp)} PL` : "Insured",
       icon: ShieldCheck,
       on: insured,
@@ -132,18 +156,43 @@ export function VerificationChips({
       testId: "licensed",
     },
   ];
+  // Parse optional scope badges (e.g. "Gas Work", "Electrical Work").
+  // Why a second row: trust chips answer "are they trustworthy?";
+  // scope chips answer "what are they qualified to do?" — two different questions.
+  let parsedScopes: string[] = [];
+  if (scopeBadges) {
+    try {
+      const arr = JSON.parse(scopeBadges);
+      if (Array.isArray(arr)) parsedScopes = arr.filter((s) => typeof s === "string" && s.length > 0);
+    } catch { /* ignore malformed json */ }
+  }
   return (
-    <div className={cn("flex flex-wrap gap-1.5", className)}>
-      {chips.filter((c) => c.on).map((c) => (
-        <span
-          key={c.testId}
-          data-testid={`chip-${c.testId}`}
-          title={c.title}
-          className="inline-flex items-center gap-1 rounded-full bg-trust/10 px-2 py-0.5 text-xs font-medium text-trust"
-        >
-          <c.icon className="h-3 w-3" /> {c.label}
-        </span>
-      ))}
+    <div className={cn("flex flex-col gap-2", className)}>
+      <div className="flex flex-wrap gap-1.5">
+        {chips.filter((c) => c.on).map((c) => (
+          <span
+            key={c.testId}
+            data-testid={`chip-${c.testId}`}
+            title={c.title}
+            className="inline-flex items-center gap-1 rounded-full bg-trust/10 px-2 py-0.5 text-xs font-medium text-trust"
+          >
+            <c.icon className="h-3 w-3" /> {c.label}
+          </span>
+        ))}
+      </div>
+      {parsedScopes.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {parsedScopes.map((scope) => (
+            <span
+              key={scope}
+              data-testid={`chip-scope-${scope.toLowerCase().replace(/\s+/g, "-")}`}
+              className="inline-flex items-center gap-1 rounded-full bg-navy px-2 py-0.5 text-xs font-medium text-white"
+            >
+              {scope}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

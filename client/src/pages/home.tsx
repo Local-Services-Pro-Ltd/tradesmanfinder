@@ -42,7 +42,19 @@ export default function Home() {
   const { data: stats } = useQuery<Stats>({ queryKey: ["/api/stats"] });
   const { data: reviews } = useQuery<Review[]>({ queryKey: ["/api/reviews"] });
 
-  const featured = (tradesmen || []).filter((t) => t.featured).slice(0, 8);
+  // Sort featured pros so paid/recent features (with a featured_until set)
+  // rank above unscheduled seed/demo rows, then by id ascending.
+  // Why: real paying Featured Pros must always outrank seed data on the
+  // homepage — otherwise a brand-new paying customer can be invisible.
+  const featured = (tradesmen || [])
+    .filter((t) => t.featured)
+    .sort((a, b) => {
+      const aUntil = a.featuredUntil ?? -1;
+      const bUntil = b.featuredUntil ?? -1;
+      if (aUntil !== bUntil) return bUntil - aUntil;
+      return a.id - b.id;
+    })
+    .slice(0, 8);
   const topCats = (categories || []).slice(0, 10);
   const countByCat = (catId: number) =>
     (tradesmen || []).filter((t) => { try { return (JSON.parse(t.categories) as number[]).includes(catId); } catch { return false; } }).length;

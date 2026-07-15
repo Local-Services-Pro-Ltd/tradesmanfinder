@@ -73,6 +73,19 @@ export interface Tradesman {
   verified: boolean;
   insured: boolean;
   licensed: boolean;
+  gasSafeVerified: boolean;
+  // PR-F booleans — flipped by admin approval of the matching
+  // tradesman_verifications row. Default false; surfaced on the dashboard
+  // status header and (in later PRs) on the public profile chips.
+  niceicVerified: boolean;
+  napitVerified: boolean;
+  mcsVerified: boolean;
+  oftecVerified: boolean;
+  trustmarkVerified: boolean;
+  fgasVerified: boolean;
+  cipheVerified: boolean;
+  scopeBadges: string; // JSON string of string[]
+  videoUrl: string | null;
   featured: boolean;
   ratingAverage: number;
   ratingCount: number;
@@ -119,13 +132,20 @@ export interface VerificationPublicSummary {
 // Mirrors server tradesman_verifications row (admin queue + dashboard list).
 // filePath is included only when the admin is authenticated; the dashboard
 // receives objects with filePath omitted (see server/routes.ts).
+//
+// 'companies_house' rows have no file (file* fields are null) and instead
+// carry companyNumber + evidenceData (a trimmed snapshot of the CH response).
 export interface VerificationRecord {
   id: number;
   tradesmanId: number;
-  kind: "insurance" | "qualification";
-  filePath?: string;
-  fileMimeType: string;
-  fileSizeBytes: number;
+  kind:
+    | "insurance" | "qualification" | "companies_house" | "gas_safe"
+    // Generic register kinds (PR-F). All use the shared registration_number /
+    // register_url columns and the GenericRegisterEvidence shape below.
+    | "niceic" | "napit" | "mcs" | "oftec" | "trustmark" | "fgas" | "ciphe";
+  filePath?: string | null;
+  fileMimeType: string | null;
+  fileSizeBytes: number | null;
   qualificationType: string | null;
   insuranceCoverGbp: number | null;
   expiryDate: string | null;
@@ -134,6 +154,106 @@ export interface VerificationRecord {
   reviewedAt: number | null;
   reviewedBy: string | null;
   reviewerNote: string | null;
+  // Companies House fields (kind='companies_house' only).
+  companyNumber?: string | null;
+  // Gas Safe fields (kind='gas_safe' only).
+  gasSafeNumber?: string | null;
+  gasSafeRegisterUrl?: string | null;
+  // Generic register fields (PR-F). Populated for kinds in
+  // {niceic, napit, mcs, oftec, trustmark, fgas, ciphe}.
+  registrationNumber?: string | null;
+  registerUrl?: string | null;
+  // evidenceData shape varies by kind — CompaniesHouseEvidence for
+  // companies_house rows, GasSafeEvidence for gas_safe rows,
+  // GenericRegisterEvidence for the seven generic register kinds.
+  // Callers discriminate on `kind` before reading the snapshot.
+  evidenceData?: CompaniesHouseEvidence | GasSafeEvidence | GenericRegisterEvidence | null;
+  verifiedAt?: number | null;
+  source?: "pro_submission" | "admin_backfill" | "automated_recheck" | null;
+}
+
+// Pro-submitted Gas Safe evidence — surfaced verbatim to admin reviewer.
+// Critically: this is NOT verified against the Gas Safe Register at
+// submission time (the register has no public API and blocks server-side
+// access via WAF). The admin clicks gasSafeRegisterUrl to confirm.
+export interface GasSafeEvidence {
+  gas_safe_number: string;
+  business_name: string;
+  postcode: string;
+  submitted_at: string;
+  verification_method: "pro_self_submission_pending_admin_review";
+}
+
+// Generic register evidence (PR-F) — shared shape for the seven
+// submit-for-admin-review register kinds. Same fields as GasSafeEvidence
+// but keyed on the generic registration_number rather than gas_safe_number.
+// The admin uses business_name + postcode to confirm a match on the
+// public register before approving.
+export interface GenericRegisterEvidence {
+  registration_number: string;
+  business_name: string;
+  postcode: string;
+  submitted_at: string;
+  verification_method: "pro_self_submission_pending_admin_review";
+}
+
+export interface CompaniesHouseEvidence {
+  company_number: string;
+  company_name: string;
+  company_status: string;
+  type: string;
+  date_of_creation?: string | null;
+  date_of_cessation?: string | null;
+  jurisdiction?: string | null;
+  registered_office_address?: {
+    address_line_1?: string;
+    address_line_2?: string;
+    locality?: string;
+    region?: string;
+    postal_code?: string;
+    country?: string;
+  } | null;
+  fetched_at?: string;
+}
+
+// Type guards for narrowing the evidenceData union. Callers should
+// discriminate on the verification row's `kind` first; these helpers
+// give back a typed snapshot or null when the row has no evidence.
+export function asCompaniesHouseEvidence(
+  evidence: CompaniesHouseEvidence | GasSafeEvidence | GenericRegisterEvidence | null | undefined
+): CompaniesHouseEvidence | null {
+  if (!evidence) return null;
+  return "company_number" in evidence ? (evidence as CompaniesHouseEvidence) : null;
+}
+
+export function asGasSafeEvidence(
+  evidence: CompaniesHouseEvidence | GasSafeEvidence | GenericRegisterEvidence | null | undefined
+): GasSafeEvidence | null {
+  if (!evidence) return null;
+  return "gas_safe_number" in evidence ? (evidence as GasSafeEvidence) : null;
+}
+
+export function asGenericRegisterEvidence(
+  evidence: CompaniesHouseEvidence | GasSafeEvidence | GenericRegisterEvidence | null | undefined
+): GenericRegisterEvidence | null {
+  if (!evidence) return null;
+  return "registration_number" in evidence ? (evidence as GenericRegisterEvidence) : null;
+}
+
+export interface CompaniesHouseSearchItem {
+  company_number: string;
+  title: string;
+  company_status: string;
+  company_type?: string;
+  address_snippet?: string;
+  date_of_creation?: string;
+}
+
+export interface CompaniesHouseSearchResult {
+  items: CompaniesHouseSearchItem[];
+  total_results: number;
+  page_number: number;
+  items_per_page: number;
 }
 
 export interface Job {

@@ -8,6 +8,7 @@ import {
   insertPartnerSchema, insertPartnerPlacementSchema,
   PARTNER_ENQUIRY_STATUSES, PARTNER_STATUSES, PARTNER_SURFACES, PARTNER_COMMERCIAL_MODELS, PARTNER_VERTICALS,
   VERIFICATION_KINDS,
+  FILE_VERIFICATION_KINDS,
 } from "@shared/schema";
 import {
   ALLOWED_MIME_TYPES, MAX_FILE_BYTES,
@@ -15,12 +16,13 @@ import {
 } from "./verifications-storage";
 import { selectPlacements, debugPlacements } from "./placement-engine";
 import { resolveMicrositeByHost, MICROSITES } from "@shared/microsites";
+import { getRegisterImplication } from "@shared/register-implications";
 import { computeInvoice, computeStats } from "./invoice-generator";
 import { registerClickRoute } from "./click-tracking";
 import { registerOutcomeCaptureRoute } from "./outcome-capture";
 import { signOutcomeToken, buildOutcomeLink } from "./outcome-tokens";
 import { summarizeCards, autoEscalate, computeExpiry, isCardActive } from "@shared/cards";
-import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail, sendOutcomeAskEmail, sendHomeownerMagicLink, sendVerificationRequestToTradesman, sendVerificationAccessGranted, sendVerificationAccessDenied, sendVerificationApproved, sendVerificationRejected } from "./mailer";
+import { sendCardIssuedEmail, sendCardRescindedEmail, sendNewLeadEmail, sendPartnerEnquiryNotification, sendMagicLinkEmail, sendOutcomeAskEmail, sendHomeownerMagicLink, sendVerificationRequestToTradesman, sendVerificationAccessGranted, sendVerificationAccessDenied, sendFoundingProInterest, sendVerificationApproved, sendVerificationRejected } from "./mailer";
 import {
   requireHomeowner, readHomeownerSessionCookie, setHomeownerSessionCookie, clearHomeownerSessionCookie,
   HOMEOWNER_SESSION_TTL_MS, HOMEOWNER_RATE_LIMIT_MAX, HOMEOWNER_RATE_LIMIT_WINDOW_MS, HOMEOWNER_REQUEST_THROTTLE_MS,
@@ -32,7 +34,35 @@ import { createFeaturedCheckoutSession, createLeadPackCheckoutSession } from "./
 import { createBillingPortalSession } from "./stripe-portal";
 import { sweepPastDueFeatured } from "./featured-sweep";
 import { handleStripeWebhook } from "./stripe-webhook";
+import { handleResendWebhook } from "./resend-webhook";
+import {
+  homeownerInterestRequestSchema,
+  recordHomeownerInterest,
+  getVerifiedCountByArea,
+  DENSITY_THRESHOLD,
+  UnmatchedAreaInvalidError,
+} from "./homeowner-interest";
+import { resolveAreas, extractOutwardPostcode } from "./area-resolver";
+import { validateAreaStringCached } from "./area-validator";
 import { stripeIsConfigured } from "./stripe";
+import {
+  searchCompany,
+  lookupCompanyByNumberCached,
+  normaliseCompanyNumber,
+  isPlausibleCompanyNumber,
+  CompaniesHouseConfigError,
+  CompaniesHouseAuthError,
+  CompaniesHouseNotFoundError,
+  CompaniesHouseRateLimitError,
+  CompaniesHouseNetworkError,
+} from "./companies-house";
+import {
+  normaliseGasSafeNumber,
+  isPlausibleGasSafeNumber,
+  buildGasSafeRegisterUrl,
+  normalisePostcode,
+} from "./gas-safe";
+import { registerGenericRegisterRoutes } from "./register-submission";
 import {
   generateToken, hashToken, generateSessionId,
   normaliseEmail, isValidEmail, requestFingerprint,
@@ -204,6 +234,57 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/areas", async (_req, res) => {
     res.json(await storage.getAreas());
   });
+  // Free-text resolver. Returns matching seeded areas ranked by quality, or
+  // an empty list (the caller then routes the user to the unmatched-area
+  // waitlist with `requestedArea` set to their typed string).
+  app.get("/api/areas/resolve", async (req, res) => {
+    const q = typeof req.query.q === "string" ? req.query.q : "";
+    if (q.trim().length < 2) return res.json({ matches: [], outward: null });
+    const all = await storage.getAreas();
+    const matches = resolveAreas(q, all);
+    const outward = extractOutwardPostcode(q);
+    res.json({
+      matches: matches.map((m) => ({ ...m.area, rule: m.rule, score: m.score })),
+      outward,
+    });
+  });
+  // Validate a free-text area string against a geocoder. Returns whether the
+  // string looks like a real-world place, plus a near-match suggestion when
+  // applicable. The client calls this (debounced) before showing the
+  // "We're not in <X> yet — tap to get notified" CTA so users can't get a
+  // straight-faced reply for fantasy/joke inputs like "Hogwarts" or
+  // "Banana Republic".
+  //
+  // We rate-limit lightly via the same public-form guard — a debounced
+  // client UI typically fires a couple of requests per session.
+  app.get(
+    "/api/areas/validate",
+    publicFormGuard({ windowMs: 10 * 60 * 1000, max: 60 }),
+    async (req, res) => {
+      const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+      if (q.length < 2 || q.length > 80) {
+        return res.json({ valid: false, reason: "too_short_or_long" });
+      }
+      // Same character allowlist as the schema — reject before we burn
+      // a Nominatim call on obvious junk.
+      if (!/^[A-Za-z0-9 \-]+$/.test(q)) {
+        return res.json({ valid: false, reason: "bad_chars" });
+      }
+      const result = await validateAreaStringCached(q);
+      if (result.kind === "accept") {
+        return res.json({
+          valid: true,
+          canonicalName: result.canonicalName,
+          displayName: result.displayName,
+        });
+      }
+      return res.json({
+        valid: false,
+        reason: result.reason,
+        suggestion: result.suggestion ?? null,
+      });
+    },
+  );
   app.get("/api/areas/:slug", async (req, res) => {
     const a = await storage.getAreaBySlug(req.params.slug);
     if (!a) return res.status(404).json({ message: "Area not found" });
@@ -876,6 +957,74 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     void handleStripeWebhook(req, res);
   });
 
+  // ── Resend webhook ──
+  // POST /api/resend/webhook — receives signed events from Resend (Svix
+  // signing scheme). Verified against req.rawBody. Updates email_log status
+  // for delivered / opened / clicked / bounced / complained, and writes a
+  // resend_webhook_log audit row deduplicated by svix-id.
+  app.post("/api/resend/webhook", (req, res) => {
+    void handleResendWebhook(req, res);
+  });
+
+  // ── Homeowner interest (waitlist for sub-density boroughs) ──
+  // Rate-limited like other public forms (10/10min/IP). The handler
+  // upserts on (email, area, category) so repeat submissions from the
+  // same homeowner are no-ops, and only the first submission triggers
+  // a confirmation email.
+  app.post(
+    "/api/homeowner-interest",
+    publicFormGuard({ windowMs: 10 * 60 * 1000, max: 10 }),
+    async (req, res) => {
+      try {
+        const parsed = homeownerInterestRequestSchema.parse(req.body);
+        const result = await recordHomeownerInterest(parsed);
+        // Same 200 regardless of created/updated — don't leak whether
+        // the email was already on the list.
+        res.status(200).json({ ok: true });
+        void result; // keep result.id available for future analytics
+      } catch (e) {
+        if (e instanceof z.ZodError) {
+          return res.status(400).json({ message: "Validation failed", errors: e.errors });
+        }
+        if (e instanceof UnmatchedAreaInvalidError) {
+          // 422 — the request is well-formed but the geocoder doesn't
+          // recognise the requestedArea as a real place. The client uses
+          // the suggestion (if present) to offer a one-click "did you mean?".
+          return res.status(422).json({
+            ok: false,
+            reason: e.suggestion ? "looks_like_typo" : "not_a_place",
+            message: e.message,
+            suggestion: e.suggestion ?? null,
+          });
+        }
+        throw e;
+      }
+    },
+  );
+
+  // GET /api/areas/:slug/density — returns verified-pro count and whether
+  // the area is above the gating threshold. Used by the area landing page
+  // to choose between the search experience and the waitlist signup.
+  app.get("/api/areas/:slug/density", async (req, res) => {
+    const slug = req.params.slug;
+    const area = (await storage.getAreas()).find((a) => a.slug === slug);
+    if (!area) return res.status(404).json({ message: "Area not found" });
+    const categoryIdParam = req.query.categoryId;
+    const categoryId =
+      typeof categoryIdParam === "string" && /^\d+$/.test(categoryIdParam)
+        ? Number(categoryIdParam)
+        : undefined;
+    const verifiedCount = await getVerifiedCountByArea(area.id, categoryId);
+    res.json({
+      areaId: area.id,
+      slug: area.slug,
+      name: area.name,
+      verifiedCount,
+      threshold: DENSITY_THRESHOLD,
+      isBelowThreshold: verifiedCount < DENSITY_THRESHOLD,
+    });
+  });
+
   // ── Partner enquiries (inbound from /partners marketing page) ──
   // Tighter rate limit than other public forms (3/10min/IP) because partner
   // enquiries are low-volume by nature — anything more is probably a bot.
@@ -929,11 +1078,65 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     },
   );
 
+  // ── Founding Pro interest form ──
+  // Inbound from /founding-pro/interest. No DB write — this is the Quick fix
+  // to unblock the live pilot cohort (10 invitees sent 15 June 2026). A proper
+  // claim flow with profile pre-fill will replace this.
+  //
+  // Mailer send is AWAITED (not fire-and-forget) so a Vercel serverless
+  // teardown can't kill the in-flight Resend POST — see PR #104 for the
+  // homeowner-access fix that established this pattern.
+  app.post(
+    "/api/founding-pro/interest",
+    publicFormGuard({ windowMs: 10 * 60 * 1000, max: 3 }),
+    async (req, res) => {
+      try {
+        const schema = z.object({
+          companyName: z.string().min(1).max(200),
+          contactName: z.string().min(1).max(120),
+          email: z.string().email().max(200),
+          phone: z.string().min(5).max(40),
+          trades: z.string().min(1).max(200),
+          postcodes: z.string().min(1).max(200),
+          bio: z.string().min(1).max(2000),
+          ref: z.string().max(80).nullable().optional(),
+        });
+        const parsed = schema.parse(req.body);
+
+        const result = await sendFoundingProInterest({
+          companyName: parsed.companyName,
+          contactName: parsed.contactName,
+          email: parsed.email,
+          phone: parsed.phone,
+          trades: parsed.trades,
+          postcodes: parsed.postcodes,
+          bio: parsed.bio,
+          ref: parsed.ref ?? null,
+        });
+
+        if (!result.ok) {
+          // Log internally but still 200 to the user — we'll see the failure in
+          // server logs and email_log; meanwhile the pro doesn't get a scary
+          // error after typing all that, and we have the submission in logs.
+          console.error(`[founding-pro-interest] mailer failed:`, result.error);
+        }
+        res.status(201).json({ ok: true });
+      } catch (e) {
+        if (e instanceof z.ZodError) {
+          return res.status(400).json({ message: "Validation failed", errors: e.errors });
+        }
+        throw e;
+      }
+    },
+  );
+
   // ── Reviews create ──
   app.post("/api/reviews", publicFormGuard(), async (req, res) => {
     try {
       const parsed = insertReviewSchema.parse(req.body);
-      const created = await storage.createReview({ ...parsed, status: "pending" });
+      // status defaults to 'pending' at the DB level (schema.ts:163);
+      // never trust submitter-supplied status — moderation-controlled only.
+      const created = await storage.createReview(parsed);
       // recompute rating from APPROVED reviews only (pending reviews are not public)
       const all = (await storage.getReviewsByTradesman(parsed.tradesmanId)).filter((r) => r.status === "approved");
       const avg = all.length ? all.reduce((s, r) => s + r.rating, 0) / all.length : 0;
@@ -1942,7 +2145,9 @@ res.json(updated);
   // Zod schemas for the upload + decision request bodies. Kept inline because
   // they're route-local and reference VERIFICATION_KINDS already imported.
   const uploadVerificationBodySchema = z.object({
-    kind: z.enum(VERIFICATION_KINDS),
+    // File-upload route only — 'companies_house' uses a separate API-lookup
+    // endpoint that doesn't accept a file. Hence FILE_VERIFICATION_KINDS, not VERIFICATION_KINDS.
+    kind: z.enum(FILE_VERIFICATION_KINDS),
     fileBase64: z.string().min(1, "fileBase64 is required"),
     fileMimeType: z.string().min(1),
     fileName: z.string().max(255).optional(),
@@ -2071,6 +2276,13 @@ res.json(updated);
     if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid verification id" });
     const row = await storage.getTradesmanVerificationById(id);
     if (!row) return res.status(404).json({ message: "Verification not found" });
+    // CH-kind rows have no file — there's nothing to sign. Admin UI should
+    // render evidence_data directly for those instead of calling this endpoint.
+    if (!row.filePath || !row.fileMimeType) {
+      return res.status(409).json({
+        message: "This verification has no file evidence (likely a Companies House lookup). Use the evidence_data field instead.",
+      });
+    }
     const ttl = req.query.ttl ? Math.min(Math.max(Number(req.query.ttl) || 300, 30), 3600) : 300;
     try {
       const url = await signVerificationUrl(row.filePath, ttl);
@@ -2114,8 +2326,64 @@ res.json(updated);
     // rejected upload silently revokes a previously-approved badge. Revocation
     // is a separate admin action (TODO PR-C, if needed).
     if (decision.status === "approved" && updated) {
-      const patch: Partial<Tradesman> =
-        updated.kind === "insurance" ? { insured: true } : { licensed: true };
+      // Approval of a verification row lights up the matching badges on the
+      // tradesman row. There are two flavours:
+      //
+      //   1. File-backed kinds (insurance, qualification): each maps to a
+      //      single fixed boolean (insured / licensed). Pro uploaded a doc;
+      //      admin reviewed it; that doc is evidence for exactly one badge.
+      //
+      //   2. Register-backed kinds (companies_house, gas_safe, niceic, etc):
+      //      driven by the REGISTER_IMPLICATIONS lookup table in
+      //      shared/register-implications.ts. Each register declares which
+      //      generic badges (verified/insured/licensed) it implies AND an
+      //      optional scope badge ("Gas Work", "Electrical Work", etc).
+      //      Implications are derived from the register's own legal/scheme
+      //      preconditions — e.g. Gas Safe membership requires ACS quals +
+      //      PLI, so an approved gas_safe row lights all three.
+      //
+      // We don't un-flip on rejection of a later row — that would create a
+      // footgun where a rejected resubmission silently revokes a previously
+      // approved badge. Revocation is a separate admin action.
+      const patch: Partial<Tradesman> = {};
+      if (updated.kind === "insurance") {
+        patch.insured = true;
+      } else if (updated.kind === "qualification") {
+        patch.licensed = true;
+      } else {
+        const impl = getRegisterImplication(updated.kind);
+        if (impl) {
+          for (const badge of impl.impliesBadges) patch[badge] = true;
+          // Per-register public flag. Each is independent; never auto-revoked
+          // on a later rejection (same policy as the file-backed kinds).
+          if (updated.kind === "gas_safe")  patch.gasSafeVerified = true;
+          if (updated.kind === "niceic")    patch.niceicVerified = true;
+          if (updated.kind === "napit")     patch.napitVerified = true;
+          if (updated.kind === "mcs")       patch.mcsVerified = true;
+          if (updated.kind === "oftec")     patch.oftecVerified = true;
+          if (updated.kind === "trustmark") patch.trustmarkVerified = true;
+          if (updated.kind === "fgas")      patch.fgasVerified = true;
+          if (updated.kind === "ciphe")     patch.cipheVerified = true;
+          if (impl.scopeBadge) {
+            // Merge into the existing scope_badges JSON array on the tradesman
+            // row, dedup-preserving order. Fetch the row fresh so concurrent
+            // approvals on the same pro don't clobber each other's scope badges.
+            const tradesman = await storage.getTradesmanById(updated.tradesmanId);
+            let current: string[] = [];
+            try {
+              const parsed = JSON.parse(tradesman?.scopeBadges ?? "[]");
+              if (Array.isArray(parsed)) current = parsed.filter((s): s is string => typeof s === "string");
+            } catch { /* fall through with empty array */ }
+            if (!current.includes(impl.scopeBadge)) {
+              current.push(impl.scopeBadge);
+              patch.scopeBadges = JSON.stringify(current);
+            }
+          }
+        } else {
+          // Unknown register kind — conservatively light only `verified`.
+          patch.verified = true;
+        }
+      }
       await storage.updateTradesman(updated.tradesmanId, patch);
     }
 
@@ -2158,7 +2426,351 @@ res.json(updated);
   });
 
 
+
   /* ══════════════════════════════════════════════════════
+     COMPANIES HOUSE VERIFICATION ROUTES
+
+     Three endpoints behind requireAuth so we never burn CH API quota on
+     anonymous traffic, and so each call is attributable to a specific pro:
+
+       1. GET  /api/companies-house/search?q=<query>     — free-text suggest
+       2. GET  /api/companies-house/company/:number      — single lookup
+       3. POST /api/tradesmen/:id/verifications/companies-house
+          — self-service "I claim this company" submission. Looks up the
+            company server-side, snapshots a trimmed payload into
+            evidence_data, and inserts a tradesman_verifications row
+            with status='pending' for admin review.
+
+     Rate-limiting: per-IP windowed limit on each endpoint. The CH key has
+     a 600 req / 5min budget; these limits keep a single client from
+     burning it (and protect us from accidental loops in the pro UI).
+     ══════════════════════════════════════════════════════ */
+
+  // Translate the typed helper errors into HTTP responses. Centralised so all
+  // three routes share the same mapping — see server/companies-house.ts for
+  // the full taxonomy.
+  function mapCompaniesHouseError(e: unknown, res: any): boolean {
+    if (e instanceof CompaniesHouseConfigError) {
+      // Server misconfiguration — don't leak the message.
+      console.error("[companies-house] config error:", e.message);
+      res.status(503).json({ message: "Verification service is temporarily unavailable." });
+      return true;
+    }
+    if (e instanceof CompaniesHouseAuthError) {
+      // Our key, not the user's fault — 502.
+      console.error("[companies-house] auth error:", e.message);
+      res.status(502).json({ message: "Verification service rejected our credentials." });
+      return true;
+    }
+    if (e instanceof CompaniesHouseNotFoundError) {
+      res.status(404).json({ message: `Company ${e.companyNumber} not found on the UK register.` });
+      return true;
+    }
+    if (e instanceof CompaniesHouseRateLimitError) {
+      if (e.retryAfterSeconds != null) res.set("Retry-After", String(e.retryAfterSeconds));
+      res.status(429).json({
+        message: "Too many verification lookups right now. Please try again shortly.",
+        retryAfterSeconds: e.retryAfterSeconds,
+      });
+      return true;
+    }
+    if (e instanceof CompaniesHouseNetworkError) {
+      console.error("[companies-house] network error:", e.message);
+      res.status(502).json({ message: "Could not reach Companies House. Please try again." });
+      return true;
+    }
+    return false;
+  }
+
+  // 1. GET /api/companies-house/search?q=<query>&limit=<n>
+  app.get(
+    "/api/companies-house/search",
+    rateLimit({ windowMs: 60 * 1000, max: 30 }),
+    requireAuth,
+    async (req, res) => {
+      const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+      if (q.length < 2) {
+        // Match the helper's no-op contract — we don't 400 here because the
+        // type-ahead UI sends one character at a time as the user types.
+        return res.json({ items: [], total_results: 0, page_number: 1, items_per_page: 0 });
+      }
+      const limit = req.query.limit
+        ? Math.min(Math.max(Number(req.query.limit) || 10, 1), 20)
+        : 10;
+      try {
+        const result = await searchCompany(q, { itemsPerPage: limit });
+        res.json(result);
+      } catch (e) {
+        if (mapCompaniesHouseError(e, res)) return;
+        console.error("[companies-house] search unexpected:", e);
+        res.status(500).json({ message: "Search failed" });
+      }
+    },
+  );
+
+  // 2. GET /api/companies-house/company/:number
+  app.get(
+    "/api/companies-house/company/:number",
+    rateLimit({ windowMs: 60 * 1000, max: 30 }),
+    requireAuth,
+    async (req, res) => {
+      const raw = String(req.params.number ?? "");
+      const number = normaliseCompanyNumber(raw);
+      if (!isPlausibleCompanyNumber(number)) {
+        // Save a round-trip to CH for obviously-malformed numbers.
+        return res.status(400).json({
+          message: "Company number must be 8 digits or 2 letters + 6 digits (e.g. SC123456).",
+        });
+      }
+      try {
+        const record = await lookupCompanyByNumberCached(number);
+        res.json(record);
+      } catch (e) {
+        if (mapCompaniesHouseError(e, res)) return;
+        console.error("[companies-house] lookup unexpected:", e);
+        res.status(500).json({ message: "Lookup failed" });
+      }
+    },
+  );
+
+  // 3. POST /api/tradesmen/:id/verifications/companies-house
+  //    Pro-self submission. Server fetches the company record (don't trust the
+  //    client's copy of the payload), snapshots a trimmed subset into
+  //    evidence_data, and inserts a pending verification row for admin review.
+  const submitCompaniesHouseSchema = z.object({
+    companyNumber: z.string().min(2).max(20),
+  });
+  app.post(
+    "/api/tradesmen/:id/verifications/companies-house",
+    expressJson({ limit: "4kb" }),
+    rateLimit({ windowMs: 60 * 1000, max: 10 }),
+    requireAuth,
+    requireSelf("id"),
+    async (req, res) => {
+      const tradesmanId = Number(req.params.id);
+      if (!Number.isFinite(tradesmanId)) {
+        return res.status(400).json({ message: "Invalid tradesman id" });
+      }
+
+      const parsed = submitCompaniesHouseSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: "Invalid submission", errors: parsed.error.flatten() });
+      }
+      const number = normaliseCompanyNumber(parsed.data.companyNumber);
+      if (!isPlausibleCompanyNumber(number)) {
+        return res.status(400).json({
+          message: "Company number must be 8 digits or 2 letters + 6 digits (e.g. SC123456).",
+        });
+      }
+
+      // Dedupe pre-check — the unique partial index is the source of truth; this
+      // exists to return a clearer 409 than "unique constraint violated".
+      const existing = await storage.getCompaniesHouseVerificationByTradesmanAndCompany(
+        tradesmanId,
+        number,
+      );
+      if (existing) {
+        return res.status(409).json({
+          message: existing.status === "approved"
+            ? "You're already verified for this company."
+            : "You already have a pending verification for this company.",
+          existingId: existing.id,
+          status: existing.status,
+        });
+      }
+
+      let record;
+      try {
+        record = await lookupCompanyByNumberCached(number);
+      } catch (e) {
+        if (mapCompaniesHouseError(e, res)) return;
+        console.error("[companies-house] submit lookup unexpected:", e);
+        return res.status(500).json({ message: "Lookup failed" });
+      }
+
+      // Reject struck-off / dissolved companies at the API boundary — they
+      // shouldn't count as evidence. Admin can still override by inserting
+      // manually if needed.
+      const status = String(record.company_status || "").toLowerCase();
+      if (status === "dissolved" || status === "liquidation" || status === "removed") {
+        return res.status(422).json({
+          message: `Company ${record.company_number} is ${record.company_status}. We can only verify active companies.`,
+          companyStatus: record.company_status,
+        });
+      }
+
+      try {
+        const row = await storage.createCompaniesHouseVerification({
+          tradesmanId,
+          companyNumber: record.company_number,
+          evidenceData: {
+            // Snapshot only the fields we'll surface in admin review / public proof.
+            // Anything we don't display is a privacy/compliance liability — not stored.
+            company_number: record.company_number,
+            company_name: record.company_name,
+            company_status: record.company_status,
+            type: record.type,
+            date_of_creation: record.date_of_creation ?? null,
+            date_of_cessation: record.date_of_cessation ?? null,
+            jurisdiction: record.jurisdiction ?? null,
+            registered_office_address: record.registered_office_address ?? null,
+            fetched_at: new Date().toISOString(),
+          },
+          source: "pro_submission",
+          verifiedAt: Date.now(),
+          // Stays pending — admin still needs to confirm this pro actually
+          // controls this company (e.g. matches director name, business address).
+          autoApprove: false,
+        });
+        res.status(201).json({
+          id: row.id,
+          status: row.status,
+          companyNumber: row.companyNumber,
+          companyName: record.company_name,
+          submittedAt: row.submittedAt,
+        });
+      } catch (e: any) {
+        // Race: another tab inserted between our pre-check and this insert.
+        // The unique partial index turns this into a Postgres 23505.
+        if (e?.code === "23505") {
+          return res.status(409).json({
+            message: "A verification for this company was just created.",
+          });
+        }
+        console.error("[companies-house] insert failed:", e);
+        res.status(500).json({ message: "Could not save verification" });
+      }
+    },
+  );
+
+  /* ══════════════════════════════════════════════════════
+     GAS SAFE REGISTER VERIFICATION ROUTE (PR-E)
+
+     POST /api/tradesmen/:id/verifications/gas-safe
+
+     The Gas Safe Register has no public API and the consumer web search is
+     gated by Imperva WAF (datacenter IPs blocked) + ASP.NET CSRF/ViewState
+     tokens. We CANNOT verify a registration number server-side.
+
+     Flow:
+       - Pro submits { gasSafeNumber, businessName, postcode } (the latter
+         two are evidence the admin uses to confirm the pro actually controls
+         this registration — not used for any automated check).
+       - We validate the number format, dedupe against existing non-rejected
+         rows for the same (tradesman, number), and insert a 'pending' row.
+       - The row carries a canonical Gas Safe Register deep-link in
+         gas_safe_register_url so the admin can click straight through to
+         visually confirm. The trimmed user-entered evidence lives in
+         evidence_data.
+       - Admin approves via the existing admin/verifications queue (same
+         path as PR-D'). On approval the gas_safe_verified flag is lit by
+         the existing register-implications post-approval handler.
+     ══════════════════════════════════════════════════════ */
+  const submitGasSafeSchema = z.object({
+    gasSafeNumber: z.string().min(2).max(20),
+    businessName: z.string().trim().min(2).max(200),
+    postcode: z.string().trim().min(5).max(10),
+  });
+  app.post(
+    "/api/tradesmen/:id/verifications/gas-safe",
+    expressJson({ limit: "4kb" }),
+    rateLimit({ windowMs: 60 * 1000, max: 10 }),
+    requireAuth,
+    requireSelf("id"),
+    async (req, res) => {
+      const tradesmanId = Number(req.params.id);
+      if (!Number.isFinite(tradesmanId)) {
+        return res.status(400).json({ message: "Invalid tradesman id" });
+      }
+
+      const parsed = submitGasSafeSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({
+          message: "Invalid submission",
+          errors: parsed.error.flatten(),
+        });
+      }
+      const number = normaliseGasSafeNumber(parsed.data.gasSafeNumber);
+      if (!isPlausibleGasSafeNumber(number)) {
+        return res.status(400).json({
+          message: "Gas Safe registration number must be 4–8 digits.",
+        });
+      }
+
+      const businessName = parsed.data.businessName.trim().slice(0, 200);
+      const postcode = normalisePostcode(parsed.data.postcode);
+
+      // Dedupe pre-check — unique partial index uq_tv_tradesman_gas_safe_number
+      // is the hard guarantee; this returns a clearer 409.
+      const existing = await storage.getGasSafeVerificationByTradesmanAndNumber(
+        tradesmanId,
+        number,
+      );
+      if (existing) {
+        return res.status(409).json({
+          message: existing.status === "approved"
+            ? "You're already verified for this Gas Safe number."
+            : "You already have a pending verification for this Gas Safe number.",
+          existingId: existing.id,
+          status: existing.status,
+        });
+      }
+
+      try {
+        const row = await storage.createGasSafeVerification({
+          tradesmanId,
+          gasSafeNumber: number,
+          gasSafeRegisterUrl: buildGasSafeRegisterUrl(number),
+          evidenceData: {
+            // What the pro told us — NOT verified by us, surfaced verbatim to
+            // the admin reviewer. The admin uses these to confirm a match
+            // against the Gas Safe Register website.
+            gas_safe_number: number,
+            business_name: businessName,
+            postcode,
+            submitted_at: new Date().toISOString(),
+            // Explicit marker so any downstream consumer of evidence_data
+            // knows this snapshot was NOT register-confirmed.
+            verification_method: "pro_self_submission_pending_admin_review",
+          },
+          source: "pro_submission",
+          verifiedAt: null,
+          // Cannot auto-approve — server cannot reach Gas Safe Register.
+          autoApprove: false,
+        });
+        res.status(201).json({
+          id: row.id,
+          status: row.status,
+          gasSafeNumber: row.gasSafeNumber,
+          gasSafeRegisterUrl: row.gasSafeRegisterUrl,
+          submittedAt: row.submittedAt,
+        });
+      } catch (e: any) {
+        if (e?.code === "23505") {
+          return res.status(409).json({
+            message: "A verification for this Gas Safe number was just created.",
+          });
+        }
+        console.error("[gas-safe] insert failed:", e);
+        res.status(500).json({ message: "Could not save verification" });
+      }
+    },
+  );
+
+  /* ═══════════════════════════════════════════════════════
+     GENERIC REGISTER SUBMISSION ROUTES (PR-F)
+
+     One route factory mounts the seven submit-for-admin-review register
+     kinds (NICEIC, NAPIT, MCS, OFTEC, TrustMark, F-Gas, CIPHE). Each
+     ends up at POST /api/tradesmen/:id/verifications/:kind with an
+     identical contract — see server/register-submission.ts.
+
+     Gas Safe predates this abstraction and keeps its bespoke route
+     above; CH is API-backed and lives elsewhere entirely.
+     ═══════════════════════════════════════════════════════ */
+  registerGenericRegisterRoutes(app, storage, { requireAuth, requireSelf });
+
+  /* ═══════════════════════════════════════════════════════
      HOMEOWNER ACCESS (PR D) — consent-gated verification proof viewing.
 
      Flow:
@@ -2239,11 +2851,19 @@ res.json(updated);
         const PUBLIC_URL_ENV = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
         const magicLinkUrl = `${PUBLIC_URL_ENV}/api/homeowner/verify?token=${encodeURIComponent(token)}&tradesmanId=${tradesmanId}`;
 
-        sendHomeownerMagicLink({
-          email,
-          magicLinkUrl,
-          tradesmanName: tradesman.businessName,
-        }).catch((err: any) => console.error("[homeowner] sendHomeownerMagicLink failed:", err?.message));
+        // Awaited (not fire-and-forget) so the serverless function doesn't get torn down
+        // before the Resend HTTP call + email_log write complete. The mailer never throws,
+        // it returns {ok:false,error} on failure and we still return 202 to avoid leaking
+        // delivery state to the caller.
+        try {
+          await sendHomeownerMagicLink({
+            email,
+            magicLinkUrl,
+            tradesmanName: tradesman.businessName,
+          });
+        } catch (err: any) {
+          console.error("[homeowner] sendHomeownerMagicLink failed:", err?.message);
+        }
 
         return res.status(202).json({ ok: true, throttle: false });
       } catch (err: any) {
@@ -2279,13 +2899,17 @@ res.json(updated);
       if (tradesman) {
         const PUBLIC_URL_ENV = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
         const dashboardUrl = `${PUBLIC_URL_ENV}/dashboard#verification-requests`;
-        sendVerificationRequestToTradesman({
-          tradesmanEmail: tradesman.email,
-          tradesmanName: tradesman.businessName,
-          tradesmanId: tradesman.id,
-          homeownerEmail: result.email,
-          dashboardUrl,
-        }).catch((err: any) => console.error("[homeowner] sendVerificationRequestToTradesman failed:", err?.message));
+        try {
+          await sendVerificationRequestToTradesman({
+            tradesmanEmail: tradesman.email,
+            tradesmanName: tradesman.businessName,
+            tradesmanId: tradesman.id,
+            homeownerEmail: result.email,
+            dashboardUrl,
+          });
+        } catch (err: any) {
+          console.error("[homeowner] sendVerificationRequestToTradesman failed:", err?.message);
+        }
       }
 
       const PUBLIC_URL_ENV = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
@@ -2421,20 +3045,28 @@ res.json(updated);
 
         if (decision === "granted") {
           const profileUrl = `${PUBLIC_URL_ENV}/tradesman/${tradesmanId}`;
-          sendVerificationAccessGranted({
-            homeownerEmail: existing.homeownerEmail,
-            tradesmanId,
-            tradesmanName: (await storage.getTradesmanById(tradesmanId))?.businessName ?? "The tradesman",
-            profileUrl,
-            expiresAt: updated.grantedUntil!,
-          }).catch((err: any) => console.error("[homeowner] sendVerificationAccessGranted failed:", err?.message));
+          try {
+            await sendVerificationAccessGranted({
+              homeownerEmail: existing.homeownerEmail,
+              tradesmanId,
+              tradesmanName: (await storage.getTradesmanById(tradesmanId))?.businessName ?? "The tradesman",
+              profileUrl,
+              expiresAt: updated.grantedUntil!,
+            });
+          } catch (err: any) {
+            console.error("[homeowner] sendVerificationAccessGranted failed:", err?.message);
+          }
         } else if (decision === "denied") {
-          sendVerificationAccessDenied({
-            homeownerEmail: existing.homeownerEmail,
-            tradesmanId,
-            tradesmanName: (await storage.getTradesmanById(tradesmanId))?.businessName ?? "The tradesman",
-            notes: notes ?? null,
-          }).catch((err: any) => console.error("[homeowner] sendVerificationAccessDenied failed:", err?.message));
+          try {
+            await sendVerificationAccessDenied({
+              homeownerEmail: existing.homeownerEmail,
+              tradesmanId,
+              tradesmanName: (await storage.getTradesmanById(tradesmanId))?.businessName ?? "The tradesman",
+              notes: notes ?? null,
+            });
+          } catch (err: any) {
+            console.error("[homeowner] sendVerificationAccessDenied failed:", err?.message);
+          }
         }
 
         res.json(updated);

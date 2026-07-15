@@ -32,7 +32,8 @@ import type {
   CreditTransaction, InsertCreditTransaction,
   TradesmanCredits,
   TradesmanCard, InsertTradesmanCard,
-  TradesmanVerification, InsertTradesmanVerification, VerificationKind, VerificationStatus,
+  TradesmanVerification, InsertTradesmanVerification, VerificationKind, VerificationStatus, VerificationSource,
+  GenericRegisterKind,
   ModerationLogEntry,
   InsertPaymentsLog, PaymentsLogEntry,
   MagicLinkToken, InsertMagicLinkToken,
@@ -212,6 +213,71 @@ updateReview(id: number, patch: Partial<Review>): Promise<Review | undefined>;
     tradesmanId: number,
     kind: VerificationKind,
     nowYmd: string,
+  ): Promise<TradesmanVerification | undefined>;
+  /** Insert a Companies House evidence row. Distinct from createTradesmanVerification
+   *  because the shape differs: no file fields, requires companyNumber+evidenceData.
+   *  The DB CHECK constraint tv_evidence_shape enforces this at the row level. */
+  createCompaniesHouseVerification(input: {
+    tradesmanId: number;
+    companyNumber: string;
+    evidenceData: unknown;
+    source: VerificationSource;
+    /** Only set if the lookup succeeded server-side; null leaves it pending. */
+    verifiedAt?: number | null;
+    /** If true, the row is created with status='approved' (used by admin backfill
+     *  and by the automated pro flow when the CH lookup itself is the evidence). */
+    autoApprove?: boolean;
+  }): Promise<TradesmanVerification>;
+  /** Latest non-rejected CH evidence row for a (tradesman, companyNumber) pair.
+   *  Used to dedupe submissions — if the pro already has a pending/approved CH
+   *  row for the same company, we don't insert a duplicate. */
+  getCompaniesHouseVerificationByTradesmanAndCompany(
+    tradesmanId: number,
+    companyNumber: string,
+  ): Promise<TradesmanVerification | undefined>;
+  /** Insert a Gas Safe Register evidence row. Same shape contract as CH but
+   *  with gasSafeNumber/gasSafeRegisterUrl instead of companyNumber.
+   *  The DB CHECK constraint tv_evidence_shape enforces shape at the row level. */
+  createGasSafeVerification(input: {
+    tradesmanId: number;
+    gasSafeNumber: string;
+    gasSafeRegisterUrl?: string | null;
+    evidenceData: unknown;
+    source: VerificationSource;
+    /** Only set if the register lookup succeeded server-side; null leaves it pending. */
+    verifiedAt?: number | null;
+    /** If true, the row is created with status='approved' (used by admin backfill
+     *  and by the automated pro flow when the register lookup itself is the evidence). */
+    autoApprove?: boolean;
+  }): Promise<TradesmanVerification>;
+  /** Latest non-rejected Gas Safe evidence row for a (tradesman, gasSafeNumber) pair. */
+  getGasSafeVerificationByTradesmanAndNumber(
+    tradesmanId: number,
+    gasSafeNumber: string,
+  ): Promise<TradesmanVerification | undefined>;
+
+  /** PR-F generic register submission. Replaces N bespoke methods (one per
+   *  register kind) with a single call that takes the kind discriminator.
+   *  Writes to the generic `registration_number` + `register_url` columns
+   *  (not the bespoke `gas_safe_number`). The DB CHECK constraint enforces
+   *  shape at the row level. Status is 'pending' unless autoApprove=true. */
+  createGenericRegisterVerification(input: {
+    tradesmanId: number;
+    kind: GenericRegisterKind;
+    registrationNumber: string;
+    registerUrl?: string | null;
+    evidenceData: unknown;
+    source: VerificationSource;
+    /** Only set if the register lookup succeeded server-side; null leaves pending. */
+    verifiedAt?: number | null;
+    /** Used by admin backfill flows. Pro-self-submission never auto-approves. */
+    autoApprove?: boolean;
+  }): Promise<TradesmanVerification>;
+  /** Latest non-rejected generic-register evidence row for a (tradesman, kind, registrationNumber). */
+  getGenericRegisterVerificationByTradesmanAndNumber(
+    tradesmanId: number,
+    kind: GenericRegisterKind,
+    registrationNumber: string,
   ): Promise<TradesmanVerification | undefined>;
 
   // ── homeowner sessions (PR D) ──
@@ -892,6 +958,171 @@ async updateReview(id: number, patch: Partial<Review>) { const [row] = await db.
           eq(tradesmanVerifications.kind, kind),
           eq(tradesmanVerifications.status, "approved"),
           sql`(${tradesmanVerifications.expiryDate} IS NULL OR ${tradesmanVerifications.expiryDate} >= ${nowYmd})`,
+        ))
+        .orderBy(desc(tradesmanVerifications.submittedAt))
+        .limit(1),
+    );
+  }
+
+  async createCompaniesHouseVerification(input: {
+    tradesmanId: number;
+    companyNumber: string;
+    evidenceData: unknown;
+    source: VerificationSource;
+    verifiedAt?: number | null;
+    autoApprove?: boolean;
+  }): Promise<TradesmanVerification> {
+    // We rely on the DB's tv_evidence_shape CHECK and unique partial index
+    // (uq_tv_tradesman_company_number) for the hard guarantees. The route layer
+    // pre-checks dedupe to return a friendlier 409 — this insert will still
+    // surface a constraint error if two requests race past the pre-check.
+    const ts = now();
+    const [row] = await db.insert(tradesmanVerifications).values({
+      tradesmanId: input.tradesmanId,
+      kind: "companies_house",
+      // File columns are NULL for CH evidence; the CHECK constraint allows this
+      // only when kind='companies_house'.
+      filePath: null,
+      fileMimeType: null,
+      fileSizeBytes: null,
+      qualificationType: null,
+      insuranceCoverGbp: null,
+      expiryDate: null,
+      companyNumber: input.companyNumber,
+      evidenceData: input.evidenceData,
+      source: input.source,
+      verifiedAt: input.verifiedAt ?? null,
+      status: input.autoApprove ? "approved" : "pending",
+      submittedAt: ts,
+      reviewedAt: input.autoApprove ? ts : null,
+      reviewedBy: input.autoApprove ? "system:companies_house" : null,
+    }).returning();
+    return row;
+  }
+
+  async getCompaniesHouseVerificationByTradesmanAndCompany(
+    tradesmanId: number,
+    companyNumber: string,
+  ): Promise<TradesmanVerification | undefined> {
+    // Return most-recent non-rejected row — a previously-rejected submission
+    // shouldn't block the pro from resubmitting after fixing the issue.
+    return one(
+      db.select().from(tradesmanVerifications)
+        .where(and(
+          eq(tradesmanVerifications.tradesmanId, tradesmanId),
+          eq(tradesmanVerifications.kind, "companies_house"),
+          eq(tradesmanVerifications.companyNumber, companyNumber),
+          sql`${tradesmanVerifications.status} <> 'rejected'`,
+        ))
+        .orderBy(desc(tradesmanVerifications.submittedAt))
+        .limit(1),
+    );
+  }
+
+  async createGasSafeVerification(input: {
+    tradesmanId: number;
+    gasSafeNumber: string;
+    gasSafeRegisterUrl?: string | null;
+    evidenceData: unknown;
+    source: VerificationSource;
+    verifiedAt?: number | null;
+    autoApprove?: boolean;
+  }): Promise<TradesmanVerification> {
+    // Mirrors createCompaniesHouseVerification — different register, same
+    // contract. The DB CHECK constraint tv_evidence_shape and unique partial
+    // index uq_tv_tradesman_gas_safe_number provide the hard guarantees.
+    const ts = now();
+    const [row] = await db.insert(tradesmanVerifications).values({
+      tradesmanId: input.tradesmanId,
+      kind: "gas_safe",
+      filePath: null,
+      fileMimeType: null,
+      fileSizeBytes: null,
+      qualificationType: null,
+      insuranceCoverGbp: null,
+      expiryDate: null,
+      companyNumber: null,
+      gasSafeNumber: input.gasSafeNumber,
+      gasSafeRegisterUrl: input.gasSafeRegisterUrl ?? null,
+      evidenceData: input.evidenceData,
+      source: input.source,
+      verifiedAt: input.verifiedAt ?? null,
+      status: input.autoApprove ? "approved" : "pending",
+      submittedAt: ts,
+      reviewedAt: input.autoApprove ? ts : null,
+      reviewedBy: input.autoApprove ? "system:gas_safe" : null,
+    }).returning();
+    return row;
+  }
+
+  async getGasSafeVerificationByTradesmanAndNumber(
+    tradesmanId: number,
+    gasSafeNumber: string,
+  ): Promise<TradesmanVerification | undefined> {
+    return one(
+      db.select().from(tradesmanVerifications)
+        .where(and(
+          eq(tradesmanVerifications.tradesmanId, tradesmanId),
+          eq(tradesmanVerifications.kind, "gas_safe"),
+          eq(tradesmanVerifications.gasSafeNumber, gasSafeNumber),
+          sql`${tradesmanVerifications.status} <> 'rejected'`,
+        ))
+        .orderBy(desc(tradesmanVerifications.submittedAt))
+        .limit(1),
+    );
+  }
+
+  // PR-F: generic register submission (NICEIC, NAPIT, MCS, OFTEC, TrustMark,
+  // F-Gas, CIPHE). One implementation parameterised by `kind`; replaces
+  // what would otherwise be seven near-identical create*Verification methods.
+  async createGenericRegisterVerification(input: {
+    tradesmanId: number;
+    kind: GenericRegisterKind;
+    registrationNumber: string;
+    registerUrl?: string | null;
+    evidenceData: unknown;
+    source: VerificationSource;
+    verifiedAt?: number | null;
+    autoApprove?: boolean;
+  }): Promise<TradesmanVerification> {
+    const ts = now();
+    const [row] = await db.insert(tradesmanVerifications).values({
+      tradesmanId: input.tradesmanId,
+      kind: input.kind,
+      filePath: null,
+      fileMimeType: null,
+      fileSizeBytes: null,
+      qualificationType: null,
+      insuranceCoverGbp: null,
+      expiryDate: null,
+      companyNumber: null,
+      gasSafeNumber: null,
+      gasSafeRegisterUrl: null,
+      registrationNumber: input.registrationNumber,
+      registerUrl: input.registerUrl ?? null,
+      evidenceData: input.evidenceData,
+      source: input.source,
+      verifiedAt: input.verifiedAt ?? null,
+      status: input.autoApprove ? "approved" : "pending",
+      submittedAt: ts,
+      reviewedAt: input.autoApprove ? ts : null,
+      reviewedBy: input.autoApprove ? `system:${input.kind}` : null,
+    }).returning();
+    return row;
+  }
+
+  async getGenericRegisterVerificationByTradesmanAndNumber(
+    tradesmanId: number,
+    kind: GenericRegisterKind,
+    registrationNumber: string,
+  ): Promise<TradesmanVerification | undefined> {
+    return one(
+      db.select().from(tradesmanVerifications)
+        .where(and(
+          eq(tradesmanVerifications.tradesmanId, tradesmanId),
+          eq(tradesmanVerifications.kind, kind),
+          eq(tradesmanVerifications.registrationNumber, registrationNumber),
+          sql`${tradesmanVerifications.status} <> 'rejected'`,
         ))
         .orderBy(desc(tradesmanVerifications.submittedAt))
         .limit(1),

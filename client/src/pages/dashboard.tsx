@@ -520,6 +520,15 @@ export default function Dashboard() {
               tradesmanId={tradesmanId!}
               insured={!!data.tradesman.insured}
               licensed={!!data.tradesman.licensed}
+              verified={!!data.tradesman.verified}
+              gasSafeVerified={!!data.tradesman.gasSafeVerified}
+              niceicVerified={!!data.tradesman.niceicVerified}
+              napitVerified={!!data.tradesman.napitVerified}
+              mcsVerified={!!data.tradesman.mcsVerified}
+              oftecVerified={!!data.tradesman.oftecVerified}
+              trustmarkVerified={!!data.tradesman.trustmarkVerified}
+              fgasVerified={!!data.tradesman.fgasVerified}
+              cipheVerified={!!data.tradesman.cipheVerified}
             />
           </TabsContent>
 

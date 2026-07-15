@@ -5,9 +5,19 @@ import { Layout } from "@/components/layout";
 import { TradesmanGrid } from "@/components/tradesman-grid";
 import { CategoryIcon } from "@/components/brand";
 import { Button } from "@/components/ui/button";
+import { BoroughWaitlist } from "@/components/borough-waitlist";
 import type { Category, Area, Tradesman } from "@/lib/api-types";
 import { parseJsonArray } from "@/lib/api-types";
 import { ChevronRight, MapPin } from "lucide-react";
+
+interface DensityResponse {
+  areaId: number;
+  slug: string;
+  name: string;
+  verifiedCount: number;
+  threshold: number;
+  isBelowThreshold: boolean;
+}
 
 export default function AreaPage() {
   const [, params] = useRoute("/area/:slug");
@@ -15,10 +25,18 @@ export default function AreaPage() {
   const { data: categories } = useQuery<Category[]>({ queryKey: ["/api/categories"] });
   const { data: areas } = useQuery<Area[]>({ queryKey: ["/api/areas"] });
   const { data: tradesmen, isLoading } = useQuery<Tradesman[]>({ queryKey: ["/api/tradesmen"] });
+  // Density check decides whether we show the search grid or the waitlist
+  // signup. Fetched in parallel so the page doesn't blink.
+  const { data: density } = useQuery<DensityResponse>({
+    queryKey: [`/api/areas/${slug}/density`],
+    enabled: !!slug,
+  });
 
   const area = areas?.find((a) => a.slug === slug);
   const inArea = (tradesmen || []).filter((t) => area && t.areaId === area.id);
   const cats = (categories || []).filter((c) => inArea.some((t) => parseJsonArray<number>(t.categories).includes(c.id)));
+
+  const isBelow = density?.isBelowThreshold ?? false;
 
   return (
     <Layout>
@@ -37,27 +55,47 @@ export default function AreaPage() {
             </div>
           </div>
           <p className="mt-3 max-w-2xl text-white/80">
-            Trusted, verified local tradesmen serving {area?.name}. Filter by trade and compare reviews, ratings and response times.
+            {isBelow
+              ? `We're being honest: ${area?.name || slug} is still in pilot. Drop your email below and we'll let you know the moment we have enough verified pros to give you a real choice.`
+              : `Trusted, verified local tradesmen serving ${area?.name}. Filter by trade and compare reviews, ratings and response times.`}
           </p>
         </div>
       </div>
 
       <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6">
-        <TradesmanGrid tradesmen={inArea} categories={categories} areas={areas} isLoading={isLoading} filterMode="category" />
+        {/*
+          Below the density threshold, we hide the search grid and show
+          the waitlist instead. Above the threshold, normal grid +
+          popular-trades chips. We deliberately don't show a half-empty
+          grid to a homeowner who came hoping to book \u2014 it undermines
+          the "verified shortlist" promise.
+        */}
+        {area && density && isBelow ? (
+          <BoroughWaitlist
+            areaId={area.id}
+            areaName={area.name}
+            verifiedCount={density.verifiedCount}
+            threshold={density.threshold}
+          />
+        ) : (
+          <>
+            <TradesmanGrid tradesmen={inArea} categories={categories} areas={areas} isLoading={isLoading} filterMode="category" />
 
-        {cats.length > 0 && area && (
-          <div className="mt-14 rounded-xl border border-border bg-accent/40 p-6">
-            <h2 className="font-display text-base font-semibold text-foreground">Popular trades in {area.name}</h2>
-            <div className="mt-4 flex flex-wrap gap-2">
-              {cats.map((c) => (
-                <Link key={c.id} href={`/category/${c.slug}/in/${area.slug}`}>
-                  <Button variant="outline" size="sm" className="gap-1.5" data-testid={`link-local-${c.slug}`}>
-                    <CategoryIcon name={c.icon} className="h-3.5 w-3.5 text-primary" /> {c.name}s in {area.name}
-                  </Button>
-                </Link>
-              ))}
-            </div>
-          </div>
+            {cats.length > 0 && area && (
+              <div className="mt-14 rounded-xl border border-border bg-accent/40 p-6">
+                <h2 className="font-display text-base font-semibold text-foreground">Popular trades in {area.name}</h2>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {cats.map((c) => (
+                    <Link key={c.id} href={`/category/${c.slug}/in/${area.slug}`}>
+                      <Button variant="outline" size="sm" className="gap-1.5" data-testid={`link-local-${c.slug}`}>
+                        <CategoryIcon name={c.icon} className="h-3.5 w-3.5 text-primary" /> {c.name}s in {area.name}
+                      </Button>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
       <PartnerPlacement surface="area_footer" area={area?.id} className="mx-auto max-w-7xl px-4 pb-10 sm:px-6" />

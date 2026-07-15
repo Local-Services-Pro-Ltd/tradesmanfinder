@@ -127,7 +127,7 @@ function Footer() {
       <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6">
         <div className="grid gap-10 md:grid-cols-4">
           <div className="md:col-span-1">
-            <Logo className="[&_span:last-child]:text-white" />
+            <Logo variant="light" className="[&_span:last-child]:text-white" />
             <p className="mt-4 max-w-xs text-sm text-white/70">
               The trusted way to find vetted local tradesmen across the UK. Post a job free and compare quotes.
             </p>
@@ -163,7 +163,7 @@ function Footer() {
         </div>
         <div className="mt-12 flex flex-col items-center justify-between gap-3 border-t border-white/10 pt-6 text-xs text-white/60 sm:flex-row">
           <p>© {new Date().getFullYear()} Local Services Pro Ltd. All rights reserved.</p>
-          <p>Registered in England &amp; Wales. A demo MVP — businesses shown are illustrative.</p>
+          <p>Registered in England &amp; Wales. Currently in pilot across selected London areas.</p>
         </div>
       </div>
     </footer>
