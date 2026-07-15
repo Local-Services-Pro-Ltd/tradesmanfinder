@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — enforce commit author identity
+#
+# Blocks commits whose author does not match the expected identity for this repo.
+# Wired up automatically by scripts/install-git-hooks.sh (runs on `npm install`
+# via the `prepare` script), which sets core.hooksPath=.githooks.
+#
+# Bypass in an emergency with:  git commit --no-verify
+# ...but if you find yourself doing that, fix the identity instead:
+#   git config user.name  "BYHomeOwner"
+#   git config user.email "92626446+BYHomeOwner@users.noreply.github.com"
+#
+# Rationale: Vercel refuses to build preview deploys for commits whose author
+# it cannot verify against the connected GitHub account. Bad-author commits
+# create noisy build failures and (worse) can silently disable preview deploys
+# on a PR. Blocking at commit time is cheaper than debugging it after push.
+
+set -euo pipefail
+
+name=$(git config user.name || echo "")
+email=$(git config user.email || echo "")
+
+# Detect repo from remote origin. Works with both https and ssh remotes.
+remote=$(git config --get remote.origin.url || echo "")
+
+# Default expected identity (applies to every repo unless overridden below).
+expected_name="BYHomeOwner"
+expected_email="92626446+BYHomeOwner@users.noreply.github.com"
+
+# Per-repo overrides. Add new entries here as needed.
+if echo "$remote" | grep -qiE "[:/]Byhomeowner-ai/web(\.git)?$"; then
+  expected_name="Steve Gisanrin"
+  expected_email="stevegisanrin@aol.com"
+fi
+
+if [[ "$name" == "$expected_name" && "$email" == "$expected_email" ]]; then
+  exit 0
+fi
+
+# Fail with a helpful message.
+cat >&2 <<EOF
+────────────────────────────────────────────────────────────────────
+✗ commit blocked: git author identity does not match this repo
+
+  current:   ${name:-(unset)} <${email:-(unset)}>
+  expected:  ${expected_name} <${expected_email}>
+  remote:    ${remote:-(no origin)}
+
+Fix with:
+  git config user.name  "${expected_name}"
+  git config user.email "${expected_email}"
+
+Then re-run your commit.
+
+Why this matters: Vercel refuses to build preview deploys for commits
+whose author it cannot verify against the connected GitHub account.
+Wrong-author commits break the CI/preview loop for the whole PR.
+
+Emergency bypass (rare):  git commit --no-verify
+────────────────────────────────────────────────────────────────────
+EOF
+exit 1

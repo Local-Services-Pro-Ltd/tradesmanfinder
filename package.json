@@ -7,6 +7,7 @@
     "dev": "NODE_ENV=development tsx server/index.ts",
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
+    "prepare": "bash scripts/install-git-hooks.sh",
     "check": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
