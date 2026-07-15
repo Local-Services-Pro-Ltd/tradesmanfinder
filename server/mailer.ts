@@ -25,6 +25,10 @@ const RESEND_API = "https://api.resend.com/emails";
 const PUBLIC_URL = process.env.PUBLIC_URL || "https://tradesmanfinder.com";
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "support@tradesmanfinder.com";
 
+// Tradesman-facing transactional sends (verification decisions) come from the
+// dedicated pros subdomain rather than the moderation alias.
+const PROS_FROM = "TradesmanFinder <noreply@pros.tradesmanfinder.com>";
+
 function getFrom(): string {
   return (
     process.env.EMAIL_FROM ||
@@ -37,6 +41,7 @@ interface SendArgs {
   subject: string;
   html: string;
   text: string;
+  from?: string; // override the default From; falls back to getFrom()
   tag?: string; // analytics label
   // Persisted to email_log for audit + admin debugging. Optional only to keep
   // back-compat with callers that have not been updated yet — new callers
@@ -87,9 +92,9 @@ async function persistEmailLog(args: {
   }
 }
 
-async function send({ to, subject, html, text, tag, log }: SendArgs): Promise<{ ok: boolean; id?: string; error?: string }> {
+async function send({ to, subject, html, text, from: fromOverride, tag, log }: SendArgs): Promise<{ ok: boolean; id?: string; error?: string }> {
   const key = process.env.RESEND_API_KEY;
-  const from = getFrom();
+  const from = fromOverride || getFrom();
   if (!key) {
     console.log(`[mailer] RESEND_API_KEY not set — would send to ${to}: ${subject}`);
     if (log) {
@@ -967,5 +972,108 @@ export async function sendVerificationAccessDenied(opts: {
     text,
     tag: "verification_access_denied",
     log: { template: "verification_access_denied", tradesmanId },
+  });
+}
+
+// ── PR H: Verification decision emails (to the tradesman) ───────────────────
+
+type VerificationKind = "insurance" | "qualification";
+
+/**
+ * Notify the tradesman that their submitted certificate was approved.
+ */
+export async function sendVerificationApproved(opts: {
+  to: string;
+  tradesmanName: string;
+  kind: VerificationKind;
+  profileUrl: string;
+  tradesmanId?: number;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const { to, tradesmanName, kind, profileUrl, tradesmanId } = opts;
+  const subject = `Your ${kind} certificate has been verified ✓`;
+
+  const bodyHtml = `
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">
+      Hi ${escapeHtml(tradesmanName)}, good news — we've verified your ${escapeHtml(kind)} certificate. The badge is now live on your public profile.
+    </p>
+  `;
+
+  const text =
+    `Hi ${tradesmanName}, good news — we've verified your ${kind} certificate. The badge is now live on your public profile.\n\n` +
+    `View your profile: ${profileUrl}\n\n` +
+    `— TradesmanFinder`;
+
+  const html = wrap({
+    title: subject,
+    bodyHtml,
+    ctaUrl: profileUrl,
+    ctaLabel: "View your profile",
+    accent: "green",
+  });
+
+  return send({
+    to,
+    from: PROS_FROM,
+    subject,
+    html,
+    text,
+    tag: "verification_approved",
+    log: { template: "verification_approved", tradesmanId: tradesmanId ?? null },
+  });
+}
+
+/**
+ * Notify the tradesman that their submitted certificate could not be verified.
+ * The reviewer note is shown verbatim in a styled callout.
+ */
+export async function sendVerificationRejected(opts: {
+  to: string;
+  tradesmanName: string;
+  kind: VerificationKind;
+  reviewerNote: string;
+  dashboardUrl: string;
+  tradesmanId?: number;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const { to, tradesmanName, kind, reviewerNote, dashboardUrl, tradesmanId } = opts;
+  const subject = `We couldn't verify your ${kind} certificate`;
+
+  const bodyHtml = `
+    <p style="margin:0 0 14px 0;font-size:15px;line-height:1.55">
+      Hi ${escapeHtml(tradesmanName)}, thanks for submitting your ${escapeHtml(kind)} certificate. We weren't able to verify it this time.
+    </p>
+    <table cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:18px 0;background:#fef2f2;border:1px solid #fecaca;border-radius:6px">
+      <tr><td style="padding:14px 16px;font-size:14px;line-height:1.6;color:#991b1b">
+        <div style="font-weight:600;margin-bottom:4px">Reason from our team:</div>
+        <div style="color:#7f1d1d">&ldquo;${escapeHtml(reviewerNote)}&rdquo;</div>
+      </td></tr>
+    </table>
+    <p style="margin:0 0 14px 0;font-size:14px;line-height:1.55;color:#374151">
+      Please upload a new document from your dashboard and we'll review again.
+    </p>
+  `;
+
+  const text =
+    `Hi ${tradesmanName}, thanks for submitting your ${kind} certificate. We weren't able to verify it this time.\n\n` +
+    `Reason from our team: "${reviewerNote}"\n\n` +
+    `Please upload a new document from your dashboard and we'll review again.\n\n` +
+    `Upload new document: ${dashboardUrl}\n\n` +
+    `— TradesmanFinder`;
+
+  const html = wrap({
+    title: subject,
+    bodyHtml,
+    ctaUrl: dashboardUrl,
+    ctaLabel: "Upload new document",
+    accent: "red",
+  });
+
+  return send({
+    to,
+    from: PROS_FROM,
+    subject,
+    html,
+    text,
+    tag: "verification_rejected",
+    log: { template: "verification_rejected", tradesmanId: tradesmanId ?? null },
   });
 }
