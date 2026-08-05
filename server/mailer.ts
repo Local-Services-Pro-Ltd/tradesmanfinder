@@ -5,6 +5,14 @@
 //   RESEND_API_KEY  — Resend API key (re_...). If unset, sends are silently skipped.
 //   EMAIL_FROM      — From address, e.g. "TradesmanFinder Moderation <moderation@tradesmanfinder.com>"
 //                     Falls back to "TradesmanFinder <onboarding@resend.dev>" if unset.
+//
+// Suppression (issue #144): every send funnels through the internal send()
+// below, which is the single chokepoint for the whole module — all 14
+// exported sendXxx() functions call it. send() checks suppression_list via
+// server/email-suppression.ts immediately before the Resend HTTP call, on
+// every invocation, fail-closed. This guarantees the check covers every
+// current AND future send path added to this file without needing to touch
+// each call-site individually.
 
 import type { TradesmanCard } from "@shared/schema";
 import { emailLog } from "@shared/schema";
@@ -14,6 +22,7 @@ import { selectPlacements } from "./placement-engine";
 import { storage } from "./storage";
 import { signOutcomeToken, buildOutcomeLink } from "./outcome-tokens";
 import { buildOutcomeAskEmail, type OutcomeAskEmailLinks, type BuildOutcomeAskEmailInput } from "./outcome-ask-email";
+import { isSuppressed, SuppressionCheckError } from "./email-suppression";
 
 // Re-export the pure builder + its types so callers that already import
 // from "./mailer" keep working. The builder itself lives in
@@ -62,7 +71,7 @@ async function persistEmailLog(args: {
   from: string;
   subject: string;
   resendId: string | null;
-  status: "sent" | "failed";
+  status: "sent" | "failed" | "skipped_suppressed";
   errorMessage: string | null;
   jobId?: number | null;
   tradesmanId?: number | null;
@@ -95,6 +104,45 @@ async function persistEmailLog(args: {
 async function send({ to, subject, html, text, from: fromOverride, tag, log }: SendArgs): Promise<{ ok: boolean; id?: string; error?: string }> {
   const key = process.env.RESEND_API_KEY;
   const from = fromOverride || getFrom();
+
+  // ── Per-send suppression_list check (issue #144) ──
+  // Non-negotiable: every outbound send checks suppression_list for the
+  // destination email immediately before the send decision, in the same
+  // request as the send. No cached snapshots, no in-memory Set — see
+  // server/email-suppression.ts for the fail-closed rationale.
+  //
+  // Fail-closed: if the check itself errors (DB down, etc.) we do NOT let
+  // the send proceed. We log the skip to email_log as 'skipped_suppressed'
+  // either way — a broken check and a real suppression both result in "no
+  // send", they just differ in the error message for triage.
+  try {
+    const suppressed = await isSuppressed(to);
+    if (suppressed) {
+      console.warn(`[mailer] send blocked — ${to} is in suppression_list`);
+      if (log) {
+        await persistEmailLog({
+          template: log.template, to, from, subject,
+          resendId: null, status: "skipped_suppressed", errorMessage: "suppressed",
+          jobId: log.jobId, tradesmanId: log.tradesmanId, partnerId: log.partnerId,
+          redactionCount: log.redactionCount,
+        });
+      }
+      return { ok: false, error: "suppressed" };
+    }
+  } catch (err) {
+    const message = err instanceof SuppressionCheckError ? err.message : (err as Error)?.message || "suppression_check_failed";
+    console.error(`[mailer] suppression check failed for ${to} — skipping send (fail-closed):`, message);
+    if (log) {
+      await persistEmailLog({
+        template: log.template, to, from, subject,
+        resendId: null, status: "skipped_suppressed", errorMessage: `suppression_check_failed: ${message}`,
+        jobId: log.jobId, tradesmanId: log.tradesmanId, partnerId: log.partnerId,
+        redactionCount: log.redactionCount,
+      });
+    }
+    return { ok: false, error: "suppression_check_failed" };
+  }
+
   if (!key) {
     console.log(`[mailer] RESEND_API_KEY not set — would send to ${to}: ${subject}`);
     if (log) {
