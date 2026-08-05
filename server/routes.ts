@@ -28,6 +28,7 @@ import {
   HOMEOWNER_SESSION_TTL_MS, HOMEOWNER_RATE_LIMIT_MAX, HOMEOWNER_RATE_LIMIT_WINDOW_MS, HOMEOWNER_REQUEST_THROTTLE_MS,
 } from "./homeowner-auth";
 import type { Tradesman, TradesmanCard } from "@shared/schema";
+import { slugify } from "@shared/slugify";
 import { z } from "zod";
 import { publicFormGuard, rateLimit } from "./spam-guard";
 import { createFeaturedCheckoutSession, createLeadPackCheckoutSession } from "./stripe-checkout";
@@ -199,10 +200,6 @@ const ADMIN_KEY = process.env.ADMIN_KEY; if (!ADMIN_KEY) throw new Error('ADMIN_
 // Schema is managed by Supabase migrations (apply_migration). No runtime migrate needed.
 function migrate() {
   // no-op in Postgres deployment
-}
-
-function slugify(s: string) {
-  return s.toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
