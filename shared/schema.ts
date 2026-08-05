@@ -113,7 +113,12 @@ export const tradesmen = pgTable("tradesmen", {
        'pending' → 'claimed' | 'opted_out' | 'deleted' (Postgres CHECK enforces this).
      - email_verified_at is set once the claim-token magic link is used.
      - founding_pro is set true when a claim wins one of 10 founder slots
-       per area (issue #145). founding_pro_slot integer is added in issue #137. */
+       per area (issue #145), and founding_pro_slot records the assigned
+       1..10 number. Postgres CHECK constraints (added in the
+       2026-08-05-founding-pro-slot migration) enforce that:
+         (a) slot is either NULL or 1..10,
+         (b) founding_pro=true iff slot is not NULL,
+         (c) (area_id, slot) is UNIQUE on rows where both are non-null. */
   emailVerifiedAt: timestamp("email_verified_at", { withTimezone: true, mode: "date" }),
   claimStatus: text("claim_status").default("unclaimed"),
   listingSource: text("listing_source"),
@@ -121,6 +126,7 @@ export const tradesmen = pgTable("tradesmen", {
   claimedAt: timestamp("claimed_at", { withTimezone: true, mode: "date" }),
   optedOutAt: timestamp("opted_out_at", { withTimezone: true, mode: "date" }),
   foundingPro: boolean("founding_pro").notNull().default(false),
+  foundingProSlot: integer("founding_pro_slot"),
   /* Companies House enrichment — populated on pre-list seed from the CH
      public-search fallback (proxy issue tracked separately). */
   chCompanyNumber: text("ch_company_number"),
