@@ -28,6 +28,7 @@ import {
   HOMEOWNER_SESSION_TTL_MS, HOMEOWNER_RATE_LIMIT_MAX, HOMEOWNER_RATE_LIMIT_WINDOW_MS, HOMEOWNER_REQUEST_THROTTLE_MS,
 } from "./homeowner-auth";
 import type { Tradesman, TradesmanCard } from "@shared/schema";
+import { handleProProfile } from "./pro-profile";
 import { slugify } from "@shared/slugify";
 import { z } from "zod";
 import { publicFormGuard, rateLimit } from "./spam-guard";
@@ -308,6 +309,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const visible = includeBanned ? enriched : enriched.filter((t) => !t.cardSummary.isPubliclyHidden);
     res.json(visible);
   });
+  // ── Public pro profile (issue #139) ──
+  // Separate endpoint from /api/tradesmen/by-slug because the response is
+  // claim_status-aware and data-minimised for unclaimed listings.
+  // See server/pro-profile.ts for the field-visibility policy.
+  app.get("/api/pro/:slug", handleProProfile);
+
   app.get("/api/tradesmen/by-slug/:slug", async (req, res) => {
     const t = await storage.getTradesmanBySlug(req.params.slug);
     if (!t) return res.status(404).json({ message: "Tradesman not found" });

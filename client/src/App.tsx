@@ -14,6 +14,7 @@ import AreaUnavailable from "@/pages/area-unavailable";
 import Hyperlocal from "@/pages/hyperlocal";
 import MicrositePage from "@/pages/microsite";
 import TradesmanProfile from "@/pages/tradesman";
+import ProProfile from "@/pages/pro-profile";
 import PostAJob from "@/pages/post-a-job";
 import ForTradesmen from "@/pages/for-tradesmen";
 import FoundingPro from "@/pages/founding-pro";
@@ -70,6 +71,10 @@ function AppRouter() {
       <Route path="/area/unavailable" component={AreaUnavailable} />
       <Route path="/area/:slug" component={AreaPage} />
       <Route path="/tradesman/:slug" component={TradesmanProfile} />
+      {/* Public claim-aware profile (issue #139). Distinct from
+          /tradesman/:slug so pre-list rows can render with data
+          minimisation until the owner claims their listing. */}
+      <Route path="/pro/:slug" component={ProProfile} />
       <Route path="/post-a-job" component={PostAJob} />
       <Route path="/for-tradesmen" component={ForTradesmen} />
       <Route path="/founding-pro" component={FoundingPro} />
